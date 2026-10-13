@@ -209,6 +209,27 @@ describe('watchDownloads', () => {
     expect(files).toEqual(['x', 'y']);
   });
 
+  it('keeps retrying while a dev proxy reports the server down (5xx), then fails on a refusal', async () => {
+    let statusAnswer: () => Response = () => new Response('proxy error', { status: 502 });
+    const calls = mockFetch((_url, init) => {
+      if (init?.method === 'POST') return json({ available: true, on: true });
+      return statusAnswer();
+    });
+    const onError = vi.fn();
+    watchDownloads(() => undefined, onError, { EventSource: ES, retryDelayMs: 1 });
+    await flush();
+    lastSource().fail(true);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(onError).not.toHaveBeenCalled();
+    expect(FakeEventSource.instances).toHaveLength(2);
+    statusAnswer = () => json({ error: { code: 'unauthorized', message: 'The access token was not accepted.' } }, 401);
+    lastSource().fail(true);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0][0].message).toBe('The access token was not accepted.');
+    expect(calls.filter((c) => c.init?.method !== 'POST')).toHaveLength(2);
+  });
+
   it('gives up when the server stays unreachable past the reconnect window', async () => {
     watchServer();
     const onError = vi.fn();

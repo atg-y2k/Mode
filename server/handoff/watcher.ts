@@ -224,6 +224,7 @@ export class DownloadsWatcher {
   private readonly byPath = new Map<string, { size: number; mtime: number }>();
   private readonly recent: Extract<WatchEvent, { type: 'file' }>[] = [];
   private seq = 0;
+  private pending: Promise<void> = Promise.resolve();
 
   constructor(opts: DownloadsWatcherOptions) {
     this.dir = opts.dir ? resolve(opts.dir) : null;
@@ -274,8 +275,12 @@ export class DownloadsWatcher {
         stabilityMs: this.stabilityMs,
         pollMs: this.pollMs,
       });
-      fsw.on('add', (p) => void this.consider(p, generation));
-      fsw.on('change', (p) => void this.consider(p, generation));
+      // One file at a time, in event order: downloads are announced in the order they finished.
+      const enqueue = (p: string) => {
+        this.pending = this.pending.then(() => this.consider(p, generation)).catch(() => undefined);
+      };
+      fsw.on('add', enqueue);
+      fsw.on('change', enqueue);
       fsw.on('error', (err) => {
         if (generation !== this.generation) return;
         this.log(`[handoff] watcher error: ${err instanceof Error ? err.message : String(err)}`);

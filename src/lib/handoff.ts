@@ -288,8 +288,8 @@ export function watchDownloads(onFile: (f: DownloadedFile) => void, onError?: (e
         },
         (err: unknown) => {
           if (stopped) return;
-          // Server down: keep trying within the window; refusals end it.
-          if (err instanceof ApiError && err.code === 'network' && err.status === 0) {
+          // Server down or restarting (no answer, or a dev proxy's 5xx): keep trying within the window; refusals end it.
+          if (err instanceof ApiError && err.code === 'network' && (err.status === 0 || err.status >= 500)) {
             const delay = Math.min(retryDelayMs * 2 ** manualRetries++, 30_000);
             retryTimer = setTimeout(connect, delay);
           } else {

@@ -300,8 +300,9 @@ export function createSiteProfileService(opts: SiteServiceOptions = {}): SitePro
       if (rest.length) next.failed = rest;
       else delete next.failed;
     }
-    remember(key, { profile: next, expiresAt: entry.expiresAt });
+    // Disk first: once memory shows the ecoregion, a new process sees it too.
     if (durable(next)) await disk.write(`profile_${key}.json`, next);
+    remember(key, { profile: next, expiresAt: entry.expiresAt });
   };
 
   const lookUp = async (key: string, lat: number, lon: number): Promise<CachedProfile> => {

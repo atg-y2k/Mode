@@ -117,7 +117,9 @@ export function registerHandoffRoutes<E extends Env>(app: Hono<E>, deps: Handoff
     API_PATHS.handoffEvents,
     route((c) => {
       requireWatchAccess(c);
-      const lastId = Number(c.req.header('last-event-id') ?? c.req.query('since') ?? Number.NaN);
+      // Last-Event-ID (browser reconnect) or ?since= (stream re-created by the client): replay what was missed.
+      const lastIdRaw = (c.req.header('last-event-id') || c.req.query('since') || '').trim();
+      const lastId = /^\d{1,15}$/.test(lastIdRaw) ? Number(lastIdRaw) : Number.NaN;
       return streamSSE(c, async (stream) => {
         const queue: WatchEvent[] = [];
         let wake: (() => void) | null = null;

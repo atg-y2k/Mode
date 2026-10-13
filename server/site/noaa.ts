@@ -12,10 +12,12 @@
  *   stations at once. Stations without temperature normals come back without
  *   the PRB* fields, so "has the fields" is decided by the answer itself.
  *
- * Field meanings (NCEI readme, "ANN-TMIN-PRBLST-T32FP10 = earliest date by
- * which …"): PRBLST-T32FPnn is the date after which the LAST spring freeze
- * occurs with probability nn %, PRBFST-T32FPnn the date before which the
- * FIRST fall freeze occurs with probability nn %. So:
+ * Field meanings (NCEI by-station readme: PRBLST / PRBFST are the dates of
+ * the last spring / first fall freeze "at the given probability and
+ * temperature threshold"; in the data FP10 is the latest spring date and the
+ * earliest fall date): PRBLST-T32FPnn is the date on or after which the LAST
+ * spring 32 °F freeze occurs with probability nn %, PRBFST-T32FPnn the date on
+ * or before which the FIRST fall freeze occurs with probability nn %. So:
  *   lastSpring50 = PRBLST FP50 (median last frost)
  *   lastSpring90 = PRBLST FP10 (only 1 year in 10 has a frost after it — "90 % safe")
  *   firstFall50  = PRBFST FP50 (median first frost)

@@ -98,19 +98,27 @@ if (onnxWasm) {
   onnxWasm.numThreads = (globalThis as { crossOriginIsolated?: boolean }).crossOriginIsolated ? Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2) - 1)) : 1;
 }
 
+interface GpuAdapterLike {
+  features: { has(name: string): boolean };
+  isFallbackAdapter?: boolean;
+  info?: { vendor?: string; architecture?: string; isFallbackAdapter?: boolean };
+}
 interface GpuLike {
-  requestAdapter(opts?: { powerPreference?: string }): Promise<{ features: { has(name: string): boolean } } | null>;
+  requestAdapter(opts?: { powerPreference?: string }): Promise<GpuAdapterLike | null>;
 }
 
 let device: { backend: Backend; f16: boolean } | null = null;
 
 async function detectDevice(prefer: 'auto' | 'wasm'): Promise<{ backend: Backend; f16: boolean }> {
   if (prefer === 'wasm') return { backend: 'wasm', f16: false };
-  const gpu = (navigator as Navigator & { gpu?: GpuLike }).gpu;
+  const gpu = (navigator as unknown as { gpu?: GpuLike }).gpu;
   if (!gpu) return { backend: 'wasm', f16: false };
   try {
     const adapter = await gpu.requestAdapter({ powerPreference: 'high-performance' });
     if (!adapter) return { backend: 'wasm', f16: false };
+    // A software adapter (SwiftShader) is far slower than WASM: measured 150 s vs 5 s for the EdgeTAM encoder.
+    const soft = adapter.isFallbackAdapter || adapter.info?.isFallbackAdapter || /swiftshader/i.test(`${adapter.info?.vendor ?? ''} ${adapter.info?.architecture ?? ''}`);
+    if (soft) return { backend: 'wasm', f16: false };
     return { backend: 'webgpu', f16: adapter.features.has('shader-f16') };
   } catch {
     return { backend: 'wasm', f16: false };
