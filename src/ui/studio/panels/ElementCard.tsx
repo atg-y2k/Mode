@@ -55,26 +55,53 @@ export const ElementCard = memo(function ElementCard({ el, photoId, scene, locat
       className={cn('rounded-2xl border bg-surface transition-shadow', expanded ? 'border-accent/40 shadow-panel' : 'border-line hover:border-line-strong')}
     >
       <div className="flex items-center gap-1 p-2">
-        <button
-          type="button"
-          aria-expanded={expanded}
-          aria-controls={bodyId}
-          onClick={() => setExpanded(!expanded)}
-          className="flex min-h-11 min-w-0 flex-1 items-center gap-2.5 rounded-xl px-1 text-left focus-visible:outline-2 focus-visible:outline-accent"
-        >
-          <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent">
-            <Icon className="size-[18px]" aria-hidden />
-          </span>
-          <span className="min-w-0 flex-1">
-            <span className="flex items-center gap-1.5">
-              <span className="truncate text-sm font-medium text-text">{el.label}</span>
-              {worst && worst !== 'good' && <FeasibilityBadge compact feasibility={{ rating: worst, reasons: [`A chosen plant option is rated “${FEASIBILITY_META[worst].short}” for this spot.`] }} />}
-              {tailorJob?.status === 'running' && <Sparkles className="size-3.5 shrink-0 animate-pulse text-accent" aria-label="Tailoring options" />}
+        {expanded ? (
+          <div className="flex min-h-11 min-w-0 flex-1 items-center gap-2.5 px-1">
+            <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent">
+              <Icon className="size-[18px]" aria-hidden />
             </span>
-            <span className="block truncate text-xs text-muted">{summary || 'No options picked — your prompt decides'}</span>
-          </span>
-          <ChevronDown className={cn('size-4 shrink-0 text-subtle transition-transform', expanded && 'rotate-180')} aria-hidden />
-        </button>
+            <span className="min-w-0 flex-1">
+              <InlineText
+                value={el.label}
+                label="Rename element"
+                className="max-w-full text-sm font-medium text-text"
+                onCommit={(label) =>
+                  typeBrief(photoId, `label:${el.id}`, (b) => {
+                    const t = b.elements.find((e) => e.id === el.id);
+                    if (t) t.label = label;
+                  })
+                }
+              />
+              <span className="block truncate text-xs text-muted">{summary || 'No options picked — your prompt decides'}</span>
+            </span>
+          </div>
+        ) : (
+          <button
+            type="button"
+            aria-expanded={false}
+            aria-controls={bodyId}
+            onClick={() => setExpanded(true)}
+            className="flex min-h-11 min-w-0 flex-1 items-center gap-2.5 rounded-xl px-1 text-left focus-visible:outline-2 focus-visible:outline-accent"
+          >
+            <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent">
+              <Icon className="size-[18px]" aria-hidden />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="flex items-center gap-1.5">
+                <span className="truncate text-sm font-medium text-text">{el.label}</span>
+                {worst && worst !== 'good' && <FeasibilityBadge compact feasibility={{ rating: worst, reasons: [`A chosen plant option is rated “${FEASIBILITY_META[worst].short}” for this spot.`] }} />}
+                {tailorJob?.status === 'running' && <Sparkles className="size-3.5 shrink-0 animate-pulse text-accent" aria-label="Tailoring options" />}
+              </span>
+              <span className="block truncate text-xs text-muted">{summary || 'No options picked — your prompt decides'}</span>
+            </span>
+            <ChevronDown className="size-4 shrink-0 text-subtle" aria-hidden />
+          </button>
+        )}
+        {expanded && (
+          <IconButton label={`Collapse ${el.label}`} size="sm" className="max-lg:size-9" aria-expanded aria-controls={bodyId} onClick={() => setExpanded(false)}>
+            <ChevronDown className="size-4 rotate-180" />
+          </IconButton>
+        )}
         <IconButton label={`Remove ${el.label}`} size="sm" className="max-lg:size-9" onClick={() => editBrief(photoId, (b) => removeElement(b, el.id))}>
           <X className="size-4" />
         </IconButton>
@@ -82,18 +109,7 @@ export const ElementCard = memo(function ElementCard({ el, photoId, scene, locat
 
       {expanded && (
         <div id={bodyId} className="flex flex-col gap-5 border-t border-line px-3 pb-3 pt-3">
-          <div className="flex flex-col gap-1">
-            <InlineText
-              value={el.label}
-              label="Rename element"
-              className="self-start px-1 text-sm font-medium text-text"
-              onCommit={(label) => typeBrief(photoId, `label:${el.id}`, (b) => {
-                const t = b.elements.find((e) => e.id === el.id);
-                if (t) t.label = label;
-              })}
-            />
-            <p className="px-1 text-xs text-muted">{def.description}</p>
-          </div>
+          <p className="text-xs leading-relaxed text-muted">{def.description}</p>
 
           <Guidance type={el.type} />
 
@@ -130,7 +146,7 @@ export const ElementCard = memo(function ElementCard({ el, photoId, scene, locat
                 <ArrowDown className="size-4" />
               </IconButton>
             </div>
-            <Button size="sm" variant="ghost" icon={<Trash2 className="size-3.5 max-lg:h-9" />} onClick={() => editBrief(photoId, (b) => removeElement(b, el.id))}>
+            <Button size="sm" className="max-lg:h-9" variant="ghost" icon={<Trash2 className="size-3.5" />} onClick={() => editBrief(photoId, (b) => removeElement(b, el.id))}>
               Remove element
             </Button>
           </div>
@@ -309,8 +325,9 @@ function DimensionBlock({ el, dim, photoId }: { el: ElementSpec; dim: ElementDim
         {canCompare && !comparing && (
           <Button
             size="sm"
+            className="max-lg:h-9"
             variant="ghost"
-            icon={<GitCompare className="size-3.5 max-lg:h-9" />}
+            icon={<GitCompare className="size-3.5" />}
             title={blocker ?? 'Render one variation per option on your photo, everything else unchanged'}
             onClick={() => setCompare(defaultCompareSelection(el, dim, 4))}
           >
@@ -478,7 +495,7 @@ function TailorSection({ el, photoId }: { el: ElementSpec; photoId: string }) {
         />
       )}
       <div className="flex flex-wrap gap-2">
-        <Button size="sm" variant="soft" icon={<Sparkles className="size-3.5 max-lg:h-9" />} disabled={!aiReady} onClick={run}>
+        <Button size="sm" className="max-lg:h-9" variant="soft" icon={<Sparkles className="size-3.5" />} disabled={!aiReady} onClick={run}>
           {job?.status === 'done' ? 'Tailor again' : 'Tailor options'}
         </Button>
         {!asking && aiReady && (

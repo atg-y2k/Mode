@@ -51,32 +51,28 @@ function RunList({ photo, scene }: { photo: Photo; scene: SceneMap | undefined }
 
   return (
     <div className="flex min-h-full flex-col">
-      <PanelHeader
-        title="History"
-        subtitle="Every run on this photo — its plan, brief and plant notes."
-        action={
-          photo.generations.length > 0 && (
-            <Segmented
-              size="sm"
-              value={filter}
-              onChange={setFilter}
-              options={[
-                { value: 'all', label: `All · ${photo.generations.length}` },
-                {
-                  value: 'favorites',
-                  label: (
-                    <>
-                      <Star className="size-3" aria-hidden /> {favorites}
-                      <span className="sr-only"> favorites</span>
-                    </>
-                  ),
-                  title: 'Favorites only',
-                },
-              ]}
-            />
-          )
-        }
-      />
+      <PanelHeader title="History" subtitle="Every run on this photo — its plan, brief and plant notes." />
+      {photo.generations.length > 0 && (
+        <div className="px-4 pt-3">
+          <Segmented
+            size="sm"
+            className="w-full"
+            value={filter}
+            onChange={setFilter}
+            options={[
+              { value: 'all', label: `All runs · ${photo.generations.length}` },
+              {
+                value: 'favorites',
+                label: (
+                  <>
+                    <Star className="size-3" aria-hidden /> Favorites · {favorites}
+                  </>
+                ),
+              },
+            ]}
+          />
+        </div>
+      )}
       {photo.generations.length === 0 ? (
         <EmptyState
           icon={<Sparkles className="size-6" />}
@@ -140,7 +136,7 @@ function RunCard({ g, photo, scene, favoritesOnly }: { g: Generation; photo: Pho
           <p className="mt-0.5 text-[11px] text-subtle" title={new Date(g.createdAt).toLocaleString()}>
             {relativeTime(g.createdAt)}
             {g.mode === 'compare' ? ' · compare' : ''}
-            {g.provider ? ` · ${g.provider}${g.model ? ` ${g.model}` : ''}` : ''}
+            {g.provider ? ` · ${providerText(g, health?.imageProviders)}` : ''}
             {base ? ` · from “${base.title}”` : g.baseVariationId ? ' · from a deleted variation' : ''}
           </p>
         </div>
@@ -197,14 +193,15 @@ function RunCard({ g, photo, scene, favoritesOnly }: { g: Generation; photo: Pho
 
       <div className="flex flex-wrap items-center gap-1.5 border-t border-line pt-2.5">
         {(g.mode === 'compare' || g.variations.length > 1) && (
-          <Button size="sm" variant="ghost" icon={<LayoutGrid className="size-3.5 max-lg:h-9" />} onClick={() => openRunGrid(g.id)}>
+          <Button size="sm" className="max-lg:h-9" variant="ghost" icon={<LayoutGrid className="size-3.5" />} onClick={() => openRunGrid(g.id)}>
             Side by side
           </Button>
         )}
         <Button
           size="sm"
+          className="max-lg:h-9"
           variant="ghost"
-          icon={<RotateCcw className="size-3.5 max-lg:h-9" />}
+          icon={<RotateCcw className="size-3.5" />}
           loading={starting}
           disabled={!!blocker || !!progress}
           title={blocker ?? 'Run the same brief again'}
@@ -219,7 +216,7 @@ function RunCard({ g, photo, scene, favoritesOnly }: { g: Generation; photo: Pho
         >
           Re-run
         </Button>
-        <Button size="sm" variant="ghost" icon={<Copy className="size-3.5 max-lg:h-9" />} title="Load this run's brief into the Design tab to change it" onClick={() => restoreBrief(photo.id, g.id)}>
+        <Button size="sm" className="max-lg:h-9" variant="ghost" icon={<Copy className="size-3.5" />} title="Load this run's brief into the Design tab to change it" onClick={() => restoreBrief(photo.id, g.id)}>
           Edit brief
         </Button>
         <span className="flex-1" />
@@ -250,8 +247,14 @@ function RunCard({ g, photo, scene, favoritesOnly }: { g: Generation; photo: Pho
 function RunStatus({ g }: { g: Generation }) {
   if (g.status === 'failed') return <Badge tone="danger">Failed</Badge>;
   if (g.status === 'partial') return <Badge tone="warning">Partial</Badge>;
-  if (g.status === 'running') return null;
-  return <Badge tone="neutral">{g.variations.length}</Badge>;
+  return null;
+}
+
+/** "OpenAI gpt-image-1" from the configured providers, else the stored id. */
+function providerText(g: Generation, providers: { id: string; name: string }[] | undefined): string {
+  if (!g.provider) return '';
+  const name = providers?.find((p) => p.id === g.provider)?.name ?? (g.provider === 'openai' ? 'OpenAI' : g.provider === 'gemini' ? 'Gemini' : g.provider);
+  return g.model ? `${name} ${g.model}` : name;
 }
 
 function Disclosure({ open, onToggle, label, tone }: { open: boolean; onToggle: () => void; label: string; tone?: 'warning' }) {

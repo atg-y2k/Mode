@@ -120,15 +120,18 @@ function IdeaBoard({ project, space, setting }: { project: Project; space: Space
 
       <section className="flex flex-1 flex-col gap-3 px-4 py-4">
         <div className="flex items-center justify-between gap-2">
-          <h3 className="text-xs font-semibold uppercase tracking-wider text-muted">Your ideas</h3>
+          <h3 className="text-xs font-semibold uppercase tracking-wider text-muted">
+            Your ideas <span className="font-normal tabular-nums text-subtle">· {items.length}</span>
+          </h3>
           {space && (
             <Segmented
               size="sm"
+              className="shrink-0"
               value={filter}
               onChange={setFilter}
               options={[
-                { value: 'space', label: `This space · ${forSpace.length}`, title: `Ideas for ${space.name} and the whole house` },
-                { value: 'all', label: `All · ${board.length}` },
+                { value: 'space', label: 'This space', title: `Ideas for ${space.name} and the whole house (${forSpace.length})` },
+                { value: 'all', label: 'All', title: `Every idea in the project (${board.length})` },
               ]}
             />
           )}

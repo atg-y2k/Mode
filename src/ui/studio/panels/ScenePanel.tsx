@@ -70,7 +70,7 @@ function SceneView({ space, photo, scene, brief }: { space: Space; photo: Photo;
         action={
           scene &&
           !job && (
-            <Button size="sm" variant="ghost" icon={<RefreshCw className="size-3.5 max-lg:h-9" />} disabled={!aiReady} onClick={() => setConfirmRemap(true)}>
+            <Button size="sm" className="max-lg:h-9" variant="ghost" icon={<RefreshCw className="size-3.5" />} disabled={!aiReady} onClick={() => setConfirmRemap(true)}>
               Re-map
             </Button>
           )
@@ -453,7 +453,8 @@ function ZoneRow({ zone, photo, targeted, setting }: { zone: SceneZone; photo: P
         </div>
         <IconButton
           label={targeted ? 'Remove from the areas that may change' : 'Add to the areas that may change'}
-          size="sm" className="max-lg:size-9"
+          size="sm"
+          className="max-lg:size-9"
           active={targeted}
           onClick={() => editBrief(photo.id, (b) => toggleTargetZone(b, zone.id))}
           onFocus={() => focus(true)}
@@ -496,13 +497,14 @@ function ZoneRow({ zone, photo, targeted, setting }: { zone: SceneZone; photo: P
             ))}
           </Select>
         )}
-        <Button size="sm" variant="ghost" icon={<PenTool className="size-3.5 max-lg:h-9" />} onClick={() => void refineZoneOutline(photo.id, zone.id)} title="Outline this area precisely with the Fine-tune brush and wand">
+        <Button size="sm" className="max-lg:h-9" variant="ghost" icon={<PenTool className="size-3.5" />} onClick={() => void refineZoneOutline(photo.id, zone.id)} title="Outline this area precisely with the Fine-tune brush and wand">
           Refine outline
         </Button>
         <span className="flex-1" />
         <IconButton
           label={`Delete ${zone.label}`}
-          size="sm" className="max-lg:size-9"
+          size="sm"
+          className="max-lg:size-9"
           onClick={() => {
             deleteZone(photo.id, zone.id);
             useStore.getState().notify(`Deleted “${zone.label}”. Undo brings it back.`, 'info');
@@ -556,7 +558,8 @@ function Paths({ photo, paths }: { photo: Photo; paths: ScenePath[] }) {
             </div>
             <IconButton
               label={`Delete ${p.label}`}
-              size="sm" className="max-lg:size-9"
+              size="sm"
+              className="max-lg:size-9"
               onClick={() => {
                 deletePath(photo.id, p.id);
                 useStore.getState().notify(`Deleted “${p.label}”. Undo brings it back.`, 'info');
@@ -585,9 +588,10 @@ function Opportunities({ photoId, items, prompt }: { photoId: string; items: str
               <span className="min-w-0 flex-1">{t}</span>
               <Button
                 size="sm"
+                className="max-lg:h-9"
                 variant={added ? 'ghost' : 'soft'}
                 disabled={added}
-                icon={added ? <Check className="size-3.5 max-lg:h-9" /> : <Plus className="size-3.5" />}
+                icon={added ? <Check className="size-3.5" /> : <Plus className="size-3.5" />}
                 onClick={() => {
                   editBrief(photoId, (b) => void appendToPrompt(b, t));
                   useStore.getState().notify('Added to your brief’s description.', 'success');

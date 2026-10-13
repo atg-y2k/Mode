@@ -948,7 +948,7 @@ const ENTRIES: PlantEntry[] = [
       deerResistant: false,
       native: 'Hybrid (East Asia)',
     },
-    art: { form: 'succulent-rosette', foliage: '#4f7a3a', foliage2: '#e3e0b8', flower: '#b9a6d8', seed: 93 },
+    art: { form: 'succulent-rosette', foliage: '#4f7a3a', foliage2: '#a9bf86', flower: '#b9a6d8', seed: 92 },
     cost: [14, 28],
     description: 'Bold green leaves with crisp white margins that light up shady beds; slugs and deer love hostas.',
     tags: ['perennial', 'shade', 'foliage', 'variegated', 'woodland', 'edging'],

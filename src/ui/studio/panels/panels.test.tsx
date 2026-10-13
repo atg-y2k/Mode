@@ -270,7 +270,7 @@ describe('DesignPanel', () => {
 
   it('targets areas, sets plant maturity and toggles inspiration', () => {
     render(<panels.DesignPanel />);
-    const areas = screen.getByText('Areas that may change').closest('section') as HTMLElement;
+    const areas = screen.getByText('Areas to change').closest('section') as HTMLElement;
     fireEvent.click(within(areas).getByRole('button', { name: 'Front lawn' }));
     expect(draft().targetZoneIds).toEqual(['z_lawn']);
     fireEvent.click(screen.getByRole('radio', { name: 'Mature' }));
@@ -418,7 +418,7 @@ describe('HistoryPanel', () => {
     expect(screen.getByText('Catmint')).toBeTruthy();
 
     // Favorites filter keeps only the starred variation.
-    fireEvent.click(screen.getByRole('radio', { name: /favorites/ }));
+    fireEvent.click(screen.getByRole('radio', { name: /Favorites/ }));
     expect(screen.queryByTitle('Wide flagstone')).toBeNull();
     expect(screen.getByTitle('Curved bluestone')).toBeTruthy();
 

@@ -29,28 +29,37 @@ export interface TimeOfDayLook {
    * (golden hour: warm sunlit planes, cooler shade).
    */
   shadowTint?: [number, number, number];
+  /**
+   * 0..1, with shadowTint: how much strongly blue pixels (open sky) take the
+   * shadow tint instead of the highlight tint, so a low warm sun gilds the
+   * house without turning a blue sky gray.
+   */
+  skyToShadow?: number;
 }
 
 /**
- * The looks are tuned on real-photo-like scenes:
- * - golden: low warm sun — orange highlights, slightly violet shade, a touch
- *   darker, more contrast and saturation.
- * - dusk: blue hour — −1.3 EV, cool blue, desaturated, flatter (no sun).
- * - night: −2.6 EV moonlit blue, strongly desaturated; contrast is reduced
+ * Looks at ambient = 1. They are tuned so the default ambient (0.75) gives
+ * the intended result — golden ≈ −0.3 EV, dusk ≈ −1.3 EV, night ≈ −2.6 EV —
+ * and ambient 1 is the strongest version of each look.
+ * - golden: low warm sun — orange highlights, slightly violet shade, blue sky
+ *   kept, more contrast and saturation.
+ * - dusk: blue hour — cool blue, desaturated, flatter (no direct sun).
+ * - night: moonlit deep blue, strongly desaturated; contrast is reduced
  *   before the exposure drop so harsh daylight shadows read as diffuse
  *   ambient light and the placed lights carry the scene.
  */
 export const TIME_OF_DAY_LOOKS: Record<TimeOfDay, TimeOfDayLook> = {
   day: { exposure: 0, tint: [1, 1, 1], saturation: 0, contrast: 0 },
   golden: {
-    exposure: -0.3,
-    tint: [1.2, 0.98, 0.68],
-    shadowTint: [1.02, 0.94, 1.02],
-    saturation: 0.14,
-    contrast: 0.16,
+    exposure: -0.4,
+    tint: [1.24, 0.97, 0.62],
+    shadowTint: [1.0, 0.95, 1.08],
+    skyToShadow: 0.85,
+    saturation: 0.18,
+    contrast: 0.2,
   },
-  dusk: { exposure: -1.3, tint: [0.8, 0.92, 1.3], saturation: -0.38, contrast: -0.12 },
-  night: { exposure: -2.6, tint: [0.62, 0.84, 1.55], saturation: -0.72, contrast: -0.3 },
+  dusk: { exposure: -1.75, tint: [0.8, 0.93, 1.32], saturation: -0.5, contrast: -0.16 },
+  night: { exposure: -3.45, tint: [0.52, 0.8, 1.85], saturation: -0.85, contrast: -0.4 },
 };
 
 const LIGHT_GAIN: Record<TimeOfDay, number> = { day: 0.2, golden: 0.45, dusk: 0.75, night: 1 };
@@ -71,6 +80,8 @@ const LB = 0.0722;
 
 type Vec3 = [number, number, number];
 
+const ONE: Vec3 = [1, 1, 1];
+
 function finite(v: unknown, fallback: number): number {
   return typeof v === 'number' && Number.isFinite(v) ? v : fallback;
 }
@@ -84,6 +95,10 @@ function smoothstep(e0: number, e1: number, x: number): number {
   return t * t * (3 - 2 * t);
 }
 
+function lerp3(a: Vec3, b: Vec3, t: number): Vec3 {
+  return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+}
+
 function lookFor(t: TimeOfDay): TimeOfDayLook {
   return TIME_OF_DAY_LOOKS[t] ?? TIME_OF_DAY_LOOKS.day;
 }
@@ -91,44 +106,38 @@ function lookFor(t: TimeOfDay): TimeOfDayLook {
 /** Settings with missing / non-finite fields replaced (older saves, sliders mid-edit). */
 function sanitize(s: LightingSettings): LightingSettings {
   return {
-    timeOfDay: TIME_OF_DAY_LOOKS[s.timeOfDay] ? s.timeOfDay : 'day',
-    exposure: clamp(finite(s.exposure, 0), -6, 6),
-    kelvin: clamp(finite(s.kelvin, 5500), 1000, 40000),
-    ambient: clamp(finite(s.ambient, 0.75), 0, 1),
-    contrast: clamp(finite(s.contrast, 0), -1, 1),
-    saturation: clamp(finite(s.saturation, 0), -1, 1),
+    timeOfDay: s && TIME_OF_DAY_LOOKS[s.timeOfDay] ? s.timeOfDay : 'day',
+    exposure: clamp(finite(s?.exposure, 0), -6, 6),
+    kelvin: clamp(finite(s?.kelvin, 5500), 1000, 40000),
+    ambient: clamp(finite(s?.ambient, 0.75), 0, 1),
+    contrast: clamp(finite(s?.contrast, 0), -1, 1),
+    saturation: clamp(finite(s?.saturation, 0), -1, 1),
   };
 }
 
-/** kelvinToRgb ratio to neutral 5500 K, used as a linear-light multiplier. */
+/** kelvinToRgb relative to neutral 5500 K, used as a linear-light multiplier. */
 function kelvinRatio(kelvin: number): Vec3 {
   const c = kelvinToRgb(kelvin);
   const n = kelvinToRgb(5500);
   return [c.r / n.r, c.g / n.g, c.b / n.b];
 }
 
-/** Scale so the luminance of the multiplier is 1 (pure color shift, no brightness change). */
+/** Scale so the multiplier's luminance is 1 (a pure color shift, no brightness change). */
 function normalizeLuminance(v: Vec3): Vec3 {
   const y = LR * v[0] + LG * v[1] + LB * v[2];
   return y > 0 ? [v[0] / y, v[1] / y, v[2] / y] : [1, 1, 1];
 }
 
-/** White-balance multiplier for an ambient color temperature (identity at 5500 K). */
+/** White-balance multiplier for an ambient color temperature (exactly 1,1,1 at 5500 K). */
 export function whiteBalanceGains(kelvin: number): Vec3 {
   if (kelvin === 5500) return [1, 1, 1];
   return normalizeLuminance(kelvinRatio(kelvin));
 }
 
-/** Linear RGB of a light of `kelvin` with luminance 1. */
+/** Linear RGB of a light of `kelvin`, normalized to luminance 1. */
 export function lightColorLinear(kelvin: number): Vec3 {
   return normalizeLuminance(kelvinRatio(clamp(finite(kelvin, 2700), 1000, 40000)));
 }
-
-function lerp3(a: Vec3, b: Vec3, t: number): Vec3 {
-  return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
-}
-
-const ONE: Vec3 = [1, 1, 1];
 
 /** Deterministic per-pixel dither in [0, 1) (integer hash of the pixel index). */
 function dither(i: number): number {
@@ -139,17 +148,10 @@ function dither(i: number): number {
   return (h & 0xffff) / 65536;
 }
 
-/** sRGB 8-bit (as float, dithered) of a linear value, clamped. */
+/** Dithered 8-bit sRGB code of a linear value (Uint8ClampedArray clamps the result). */
 function encode(v: number, d: number): number {
   return Math.floor(linearToSrgb8(v) + d);
 }
-
-// ---------------------------------------------------------------------------
-// Grade
-// ---------------------------------------------------------------------------
-
-/** Above this (linear, max channel) the grade rolls highlights off smoothly instead of clipping. */
-const GRADE_KNEE = 0.9;
 
 /** Identity below `knee`, then a C1 rational shoulder that approaches 1. */
 function shoulder(x: number, knee: number): number {
@@ -157,6 +159,18 @@ function shoulder(x: number, knee: number): number {
   const u = (x - knee) / (1 - knee);
   return knee + ((1 - knee) * u) / (1 + u);
 }
+
+/** 0..1: how much a linear RGB color looks like open blue sky (strongly blue-dominant). */
+function blueness(r: number, b: number): number {
+  return b > 1e-4 ? smoothstep(0.35, 0.65, (b - r) / b) : 0;
+}
+
+// ---------------------------------------------------------------------------
+// Grade
+// ---------------------------------------------------------------------------
+
+/** Above this (linear, max channel) the grade rolls highlights off instead of clipping. */
+const GRADE_KNEE = 0.9;
 
 function schlickBias(t: number, a: number): number {
   return t / ((1 / a - 2) * (1 - t) + 1);
@@ -189,11 +203,12 @@ function contrastLut(contrast: number): Float32Array {
 /** Everything applyGrade needs, resolved once per call. */
 interface GradeParams {
   identity: boolean;
-  /** Exposure × white balance per channel (before tint). */
+  /** Exposure × white balance per channel. */
   gain: Vec3;
   hiTint: Vec3;
   shTint: Vec3;
   split: boolean;
+  skyToShadow: number;
   saturation: number;
   contrast: number;
 }
@@ -217,6 +232,7 @@ function gradeParams(input: LightingSettings): GradeParams {
     hiTint,
     shTint,
     split: hiTint[0] !== shTint[0] || hiTint[1] !== shTint[1] || hiTint[2] !== shTint[2],
+    skyToShadow: clamp(look.skyToShadow ?? 0, 0, 1),
     saturation,
     contrast,
   };
@@ -224,8 +240,8 @@ function gradeParams(input: LightingSettings): GradeParams {
 
 /**
  * Per-channel multiplier the grade applies to a mid-tone (exposure × white
- * balance × tint). Used to estimate the un-graded surface color when
- * renderLights is not given the pre-grade image.
+ * balance × tint). renderLights uses it to estimate un-graded surface colors
+ * when it is not given the pre-grade image.
  */
 export function gradeGain(s: LightingSettings): Vec3 {
   const p = gradeParams(s);
@@ -233,7 +249,7 @@ export function gradeGain(s: LightingSettings): Vec3 {
   return [p.gain[0] * t[0], p.gain[1] * t[1], p.gain[2] * t[2]];
 }
 
-/** True when applyGrade(img, s) would leave the image untouched. */
+/** True when applyGrade(img, s) leaves the image untouched (e.g. DEFAULT_LIGHTING). */
 export function isIdentityGrade(s: LightingSettings): boolean {
   return gradeParams(s).identity;
 }
@@ -251,6 +267,7 @@ export function applyGrade(img: ImageDataLike, s: LightingSettings): void {
   const [hr, hg, hb] = p.hiTint;
   const [sr, sg, sb] = p.shTint;
   const split = p.split;
+  const skyK = p.skyToShadow;
   // Without split toning the combined multiplier is constant.
   const mr0 = gr * hr;
   const mg0 = gg * hg;
@@ -273,6 +290,13 @@ export function applyGrade(img: ImageDataLike, s: LightingSettings): void {
       y *= k;
     }
 
+    // Split-toning weight from the scene color, before saturation changes it.
+    let w = 1;
+    if (split) {
+      w = smoothstep(0.12, 0.75, Math.sqrt(y));
+      if (skyK > 0) w *= 1 - skyK * blueness(r, b);
+    }
+
     // Saturation around luminance (keeps lightness; never pushes a channel below 0).
     if (sat !== 1) {
       let f = sat;
@@ -287,7 +311,6 @@ export function applyGrade(img: ImageDataLike, s: LightingSettings): void {
 
     // Exposure × white balance × time-of-day tint.
     if (split) {
-      const w = smoothstep(0.12, 0.75, Math.sqrt(y));
       r *= gr * (sr + (hr - sr) * w);
       g *= gg * (sg + (hg - sg) * w);
       b *= gb * (sb + (hb - sb) * w);
@@ -314,25 +337,84 @@ export function applyGrade(img: ImageDataLike, s: LightingSettings): void {
 }
 
 // ---------------------------------------------------------------------------
+// Light geometry helpers (shared with the compositor and editor overlays)
+// ---------------------------------------------------------------------------
+
+/** Endpoint of a strip / string light (falls back to a short horizontal run). */
+export function lightEndPoint(l: PlacedLight): { x: number; y: number } {
+  if (Number.isFinite(l.x2) && Number.isFinite(l.y2)) return { x: l.x2 as number, y: l.y2 as number };
+  return { x: l.x + Math.max(40, finite(l.radius, 50) * 0.8), y: l.y };
+}
+
+/** Sag of a string light's wire at mid-span, in px (~10% of the span). */
+export function stringSag(l: PlacedLight): number {
+  const e = lightEndPoint(l);
+  return Math.hypot(e.x - l.x, e.y - l.y) * 0.1;
+}
+
+/** Point at t ∈ [0, 1] along a string light's sagging wire (parabolic catenary approximation). */
+export function stringPoint(l: PlacedLight, t: number): { x: number; y: number } {
+  const e = lightEndPoint(l);
+  const sag = stringSag(l);
+  return { x: l.x + (e.x - l.x) * t, y: l.y + (e.y - l.y) * t + 4 * sag * t * (1 - t) };
+}
+
+/** Radius of a string light's bulb glass in px (bulbs hang this far below the wire). */
+export function stringBulbRadius(l: PlacedLight): number {
+  return clamp(finite(l.fixtureSize, 40) * 0.07, 1.5, 24);
+}
+
+/**
+ * Where a string light's bulbs sit on the wire: evenly spaced (none at the
+ * mounting ends), roughly half a fixture size apart. The glass hangs
+ * stringBulbRadius() below each point.
+ */
+export function stringBulbs(l: PlacedLight): { x: number; y: number }[] {
+  const e = lightEndPoint(l);
+  const span = Math.hypot(e.x - l.x, e.y - l.y);
+  const spacing = Math.max(10, finite(l.fixtureSize, 40) * 0.45);
+  const n = clamp(Math.round(span / spacing), 2, 80);
+  const out: { x: number; y: number }[] = [];
+  for (let i = 0; i < n; i++) out.push(stringPoint(l, (i + 0.5) / n));
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Lights
 // ---------------------------------------------------------------------------
 
-/** Peak reflected light (× surface color) of a light at intensity 1 at night. */
-const REFLECT = 1.15;
-/** Part of the reflected light independent of the surface's own brightness (keeps dark surfaces visibly lit). */
-const RESPONSE_FLOOR = 0.14;
-/** Surface brightness → response curve exponent (< 1 lifts dark surfaces and baked-in daylight shadows). */
+/** Peak reflected light (× surface response) of a light at intensity 1 at night. */
+const REFLECT = 1.2;
+/** Part of the response independent of the surface's own brightness (dark surfaces still read as lit). */
+const RESPONSE_FLOOR = 0.12;
+/** Surface brightness → response exponent (< 1 lifts dark surfaces and baked-in daylight shadows). */
 const RESPONSE_POW = 0.8;
-/** Peak of the emissive halo around the emitter (multiplied by lightGain²). */
-const HALO = 0.75;
+/** How much light open blue sky "reflects" relative to a surface (lights never light the sky). */
+const SKY_RESPONSE = 0.12;
+/** Peak of the emissive halo around an emitter at night (scaled by lightGain²). */
+const HALO = 0.8;
+/** Indirect bounce: radius multiple and relative strength of the broad fill around every light. */
+const BOUNCE_RADIUS = 2.2;
+const BOUNCE = 0.07;
 /** Knee of the per-channel shoulder used when adding light. */
 const LIGHT_KNEE = 0.72;
 
+const DEG = Math.PI / 180;
+
 /**
- * One evaluated light shape. Radial shapes (`kind` 0) optionally restricted to
- * a soft cone; capsules (`kind` 1) measure the distance to a segment.
- * Falloff: f(q) = (1 − q)^p / (1 + K·q) with q = d² / R² — an inverse-square
- * like hot center windowed to exactly 0 (with zero slope) at R.
+ * One evaluated light shape. Radial shapes (`kind` 0, circles or ellipses)
+ * optionally restricted to a beam; capsules (`kind` 1) measure the distance
+ * to a segment.
+ *
+ * Falloff: f(q) = (1 − q)^p / (1 + K·q), q = d²/R² — an inverse-square hot
+ * center (standoff R/√K) windowed to exactly 0, with zero slope, at R.
+ *
+ * Beams model a source held a small standoff D in front of the lit surface
+ * (a sconce on a wall, an uplight at a trunk): a surface point at distance v
+ * along the axis and u across it is inside the beam when the 3-D angle
+ * acos(v / √(u² + v² + D²)) is below the beam's half angle. That yields the
+ * familiar scallop with a rounded top just past the fixture instead of a
+ * hard cone apex, and the edge is a smoothstep between inner and outer angle.
  */
 interface Prim {
   kind: 0 | 1;
@@ -347,16 +429,18 @@ interface Prim {
   /** Capsule end. */
   ex: number;
   ey: number;
-  R: number;
-  invR2: number;
+  rx: number;
+  ry: number;
+  invRx2: number;
+  invRy2: number;
   K: number;
-  p: number;
-  cone: boolean;
-  /** Cone apex and unit axis. */
-  ax: number;
-  ay: number;
+  p: 2 | 3;
+  beam: boolean;
+  /** Beam axis (unit, image space). */
   dx: number;
   dy: number;
+  /** Squared standoff of the source from the lit surface. */
+  d2: number;
   cosIn: number;
   cosOut: number;
   r: number;
@@ -368,30 +452,99 @@ interface PrimSpec {
   emissive?: boolean;
   x: number;
   y: number;
-  /** Capsule end (omit for radial). */
+  /** Capsule end (omit for radial shapes). */
   x2?: number;
   y2?: number;
+  /** Radius (horizontal radius for ellipses). */
   R: number;
+  /** Vertical radius for ellipses (defaults to R). */
+  Ry?: number;
   K: number;
-  p?: number;
+  p?: 2 | 3;
   amp: number;
   color: Vec3;
-  /** Cone: axis angle (radians, image space: 0 = right, π/2 = down), half-angles, apex pull-back in px. */
-  cone?: { angle: number; inner: number; outer: number; back: number };
+  /** Beam: axis angle (radians, image space: 0 = right, π/2 = down), half angles, standoff in px. */
+  beam?: { angle: number; inner: number; outer: number; standoff: number };
+}
+
+function falloff(q: number, K: number, p: 2 | 3): number {
+  if (q >= 1) return 0;
+  const w = 1 - q;
+  return (p === 3 ? w * w * w : w * w) / (1 + K * q);
+}
+
+function beamWeight(c: number, cosOut: number, cosIn: number): number {
+  if (c <= cosOut) return 0;
+  if (c >= cosIn) return 1;
+  const t = (c - cosOut) / (cosIn - cosOut);
+  return t * t * (3 - 2 * t);
+}
+
+/** Peak of a beam's profile along its axis, so every beam can be normalized to peak 1. */
+function beamPeak(R: number, K: number, p: 2 | 3, d2: number, cosOut: number, cosIn: number): number {
+  let peak = 0;
+  for (let i = 1; i <= 256; i++) {
+    const v = (R * i) / 256;
+    const f = falloff((v * v) / (R * R), K, p) * beamWeight(v / Math.sqrt(v * v + d2), cosOut, cosIn);
+    if (f > peak) peak = f;
+  }
+  return peak;
 }
 
 function makePrim(sp: PrimSpec, W: number, H: number): Prim | null {
-  const R = sp.R;
-  if (!(R > 0.5) || !(sp.amp > 0)) return null;
+  const rx = sp.R;
+  const ry = sp.Ry ?? sp.R;
+  if (!(rx > 0.5) || !(ry > 0.5) || !(sp.amp > 0)) return null;
   const capsule = sp.x2 !== undefined && sp.y2 !== undefined;
   const ex = capsule ? (sp.x2 as number) : sp.x;
   const ey = capsule ? (sp.y2 as number) : sp.y;
-  const x0 = Math.max(0, Math.floor(Math.min(sp.x, ex) - R));
-  const x1 = Math.min(W - 1, Math.ceil(Math.max(sp.x, ex) + R));
-  const y0 = Math.max(0, Math.floor(Math.min(sp.y, ey) - R));
-  const y1 = Math.min(H - 1, Math.ceil(Math.max(sp.y, ey) + R));
+  const p = sp.p ?? 2;
+  let bx0 = Math.min(sp.x, ex) - rx;
+  let bx1 = Math.max(sp.x, ex) + rx;
+  let by0 = Math.min(sp.y, ey) - ry;
+  let by1 = Math.max(sp.y, ey) + ry;
+  let amp = sp.amp;
+  let beam = false;
+  let dx = 0;
+  let dy = 0;
+  let d2 = 0;
+  let cosIn = 1;
+  let cosOut = 1;
+  if (sp.beam && !capsule) {
+    beam = true;
+    dx = Math.cos(sp.beam.angle);
+    dy = Math.sin(sp.beam.angle);
+    d2 = sp.beam.standoff * sp.beam.standoff;
+    cosOut = Math.cos(clamp(sp.beam.outer, 1e-3, Math.PI / 2 - 1e-3));
+    cosIn = Math.cos(clamp(sp.beam.inner, 0, Math.acos(cosOut) - 1e-3));
+    const peak = beamPeak(rx, sp.K, p, d2, cosOut, cosIn);
+    if (!(peak > 1e-6)) return null;
+    amp /= peak;
+    // Only the half disc in front of the source can be lit: tighten the bounds.
+    let mnx = sp.x;
+    let mxx = sp.x;
+    let mny = sp.y;
+    let mxy = sp.y;
+    for (let i = 0; i <= 32; i++) {
+      const a = sp.beam.angle - Math.PI / 2 + (Math.PI * i) / 32;
+      const px = sp.x + Math.cos(a) * rx;
+      const py = sp.y + Math.sin(a) * rx;
+      if (px < mnx) mnx = px;
+      if (px > mxx) mxx = px;
+      if (py < mny) mny = py;
+      if (py > mxy) mxy = py;
+    }
+    bx0 = mnx - 1;
+    bx1 = mxx + 1;
+    by0 = mny - 1;
+    by1 = mxy + 1;
+  }
+  const x0 = Math.max(0, Math.floor(bx0));
+  const x1 = Math.min(W - 1, Math.ceil(bx1));
+  const y0 = Math.max(0, Math.floor(by0));
+  const y1 = Math.min(H - 1, Math.ceil(by1));
   if (x0 > x1 || y0 > y1) return null;
-  const prim: Prim = {
+  return {
     kind: capsule ? 1 : 0,
     emissive: !!sp.emissive,
     x0,
@@ -402,75 +555,36 @@ function makePrim(sp: PrimSpec, W: number, H: number): Prim | null {
     cy: sp.y,
     ex,
     ey,
-    R,
-    invR2: 1 / (R * R),
+    rx,
+    ry,
+    invRx2: 1 / (rx * rx),
+    invRy2: 1 / (ry * ry),
     K: sp.K,
-    p: sp.p ?? 2,
-    cone: false,
-    ax: 0,
-    ay: 0,
-    dx: 0,
-    dy: 0,
-    cosIn: 1,
-    cosOut: 1,
-    r: sp.color[0] * sp.amp,
-    g: sp.color[1] * sp.amp,
-    b: sp.color[2] * sp.amp,
+    p,
+    beam,
+    dx,
+    dy,
+    d2,
+    cosIn,
+    cosOut,
+    r: sp.color[0] * amp,
+    g: sp.color[1] * amp,
+    b: sp.color[2] * amp,
   };
-  if (sp.cone && !capsule) {
-    const { angle, inner, outer, back } = sp.cone;
-    prim.cone = true;
-    prim.dx = Math.cos(angle);
-    prim.dy = Math.sin(angle);
-    prim.ax = sp.x - prim.dx * back;
-    prim.ay = sp.y - prim.dy * back;
-    prim.cosIn = Math.cos(Math.min(inner, outer - 1e-3));
-    prim.cosOut = Math.cos(outer);
+}
+
+/** ∫₋₁¹ (1 − u²)² / (1 + 5u²) du: line integral of a K = 5 pool, used to normalize string lights. */
+const POOL_LINE_INTEGRAL_K5 = (() => {
+  let s = 0;
+  const N = 2000;
+  for (let i = 0; i < N; i++) {
+    const u = -1 + (2 * (i + 0.5)) / N;
+    s += falloff(u * u, 5, 2);
   }
-  return prim;
-}
+  return (s * 2) / N;
+})();
 
-/** Endpoint of a strip / string light (falls back to a short horizontal run). */
-export function lightEndPoint(l: PlacedLight): { x: number; y: number } {
-  if (Number.isFinite(l.x2) && Number.isFinite(l.y2)) return { x: l.x2 as number, y: l.y2 as number };
-  return { x: l.x + Math.max(40, l.radius * 0.8), y: l.y };
-}
-
-/** Sag of a string light's catenary (px): ~10% of the span. */
-export function stringSag(l: PlacedLight): number {
-  const e = lightEndPoint(l);
-  return Math.hypot(e.x - l.x, e.y - l.y) * 0.1;
-}
-
-/** Point at t ∈ [0, 1] along a string light's sagging wire (parabolic catenary approximation). */
-export function stringPoint(l: PlacedLight, t: number): { x: number; y: number } {
-  const e = lightEndPoint(l);
-  const sag = stringSag(l);
-  return { x: l.x + (e.x - l.x) * t, y: l.y + (e.y - l.y) * t + 4 * sag * t * (1 - t) };
-}
-
-/**
- * Bulb positions of a string light: evenly spaced along the wire (none at the
- * mounting ends), roughly half a fixture size apart.
- */
-export function stringBulbs(l: PlacedLight): { x: number; y: number }[] {
-  const e = lightEndPoint(l);
-  const span = Math.hypot(e.x - l.x, e.y - l.y);
-  const spacing = Math.max(10, finite(l.fixtureSize, 40) * 0.45);
-  const n = clamp(Math.round(span / spacing), 2, 80);
-  const out: { x: number; y: number }[] = [];
-  for (let i = 0; i < n; i++) out.push(stringPoint(l, (i + 0.5) / n));
-  return out;
-}
-
-/** Radius of a string light's bulb glass in px (shared with the compositor's wire drawing). */
-export function stringBulbRadius(l: PlacedLight): number {
-  return clamp(finite(l.fixtureSize, 40) * 0.07, 1.5, 24);
-}
-
-const DEG = Math.PI / 180;
-
-/** Decomposes one light into falloff primitives (pools, cones, halos). */
+/** Decomposes one light into falloff primitives (pools, beams, halos). */
 function lightPrims(l: PlacedLight, gain: number, W: number, H: number): Prim[] {
   const R = finite(l.radius, 0);
   const intensity = clamp(finite(l.intensity, 1), 0, 4);
@@ -478,17 +592,24 @@ function lightPrims(l: PlacedLight, gain: number, W: number, H: number): Prim[] 
   const color = lightColorLinear(l.kelvin);
   const reflect = REFLECT * intensity * gain;
   const halo = HALO * intensity * gain * gain;
-  const fx = clamp(finite(l.fixtureSize, R * 0.25), 2, R);
+  const fx = clamp(finite(l.fixtureSize, R * 0.25), 2, Math.max(2, R));
   const haloR = clamp(fx * 0.4, 3, R * 0.35);
   const specs: PrimSpec[] = [];
   const { x, y } = l;
 
   switch (l.beam) {
-    case 'down':
+    case 'down': {
+      // Wall scallop below the fixture + soft oval pool on the floor / ground below it.
+      specs.push({ x, y, R, K: 2.5, amp: reflect * 0.85, color, beam: { angle: Math.PI / 2, inner: 20 * DEG, outer: 56 * DEG, standoff: R * 0.1 } });
+      specs.push({ x, y: y + R * 0.45, R: R * 0.75, Ry: R * 0.4, K: 3, amp: reflect * 0.55, color });
+      specs.push({ x, y, R: R * 0.3, K: 4, amp: reflect * 0.1, color });
+      specs.push({ emissive: true, x, y, R: haloR, K: 10, p: 3, amp: halo, color });
+      break;
+    }
     case 'up': {
-      const angle = l.beam === 'down' ? Math.PI / 2 : -Math.PI / 2;
-      specs.push({ x, y, R, K: 3.5, amp: reflect, color, cone: { angle, inner: 14 * DEG, outer: 48 * DEG, back: R * 0.07 } });
-      specs.push({ x, y, R: R * 0.4, K: 6, amp: reflect * 0.22, color });
+      // Grazing scallop above the fixture + a little spill on the ground around it.
+      specs.push({ x, y, R, K: 2.5, amp: reflect, color, beam: { angle: -Math.PI / 2, inner: 14 * DEG, outer: 42 * DEG, standoff: R * 0.08 } });
+      specs.push({ x, y, R: R * 0.3, Ry: R * 0.1, K: 3, amp: reflect * 0.25, color });
       specs.push({ emissive: true, x, y, R: haloR, K: 10, p: 3, amp: halo, color });
       break;
     }
@@ -499,12 +620,12 @@ function lightPrims(l: PlacedLight, gain: number, W: number, H: number): Prim[] 
         x,
         y,
         R,
-        K: 2.5,
+        K: 2,
         amp: reflect * 1.1,
         color,
-        cone: { angle, inner: half * 0.45, outer: Math.min(Math.PI * 0.98, half * 1.3), back: R * 0.05 },
+        beam: { angle, inner: half * 0.5, outer: half * 1.25, standoff: R * 0.06 },
       });
-      specs.push({ x, y, R: R * 0.28, K: 6, amp: reflect * 0.18, color });
+      specs.push({ x, y, R: R * 0.22, K: 4, amp: reflect * 0.12, color });
       specs.push({ emissive: true, x, y, R: haloR, K: 10, p: 3, amp: halo, color });
       break;
     }
@@ -512,23 +633,22 @@ function lightPrims(l: PlacedLight, gain: number, W: number, H: number): Prim[] 
       const e = lightEndPoint(l);
       const core = clamp(fx * 0.08, 1.2, R * 0.1);
       specs.push({ x, y, x2: e.x, y2: e.y, R, K: 5, amp: reflect * 0.85, color });
-      specs.push({ emissive: true, x, y, x2: e.x, y2: e.y, R: core * 5, K: 14, p: 3, amp: halo * 0.8, color });
-      specs.push({ emissive: true, x, y, x2: e.x, y2: e.y, R: core, K: 0, p: 2, amp: halo * 1.3, color });
+      specs.push({ emissive: true, x, y, x2: e.x, y2: e.y, R: core * 5, K: 14, p: 3, amp: halo * 0.7, color });
+      specs.push({ emissive: true, x, y, x2: e.x, y2: e.y, R: core, K: 0, amp: 0.25 + halo, color });
       break;
     }
     case 'string': {
       const bulbs = stringBulbs(l);
       const e = lightEndPoint(l);
-      const span = Math.hypot(e.x - x, e.y - y);
-      const spacing = span / Math.max(1, bulbs.length);
+      const spacing = Math.hypot(e.x - x, e.y - y) / Math.max(1, bulbs.length);
       const poolR = Math.max(R * 0.55, spacing * 1.5);
       // Pools overlap along the wire; scale so their sum peaks near 0.55 × a single light.
       const poolAmp = (reflect * 0.55 * spacing) / (poolR * POOL_LINE_INTEGRAL_K5);
       const br = stringBulbRadius(l);
-      for (const p of bulbs) {
-        specs.push({ x: p.x, y: p.y, R: poolR, K: 5, amp: poolAmp, color });
-        specs.push({ emissive: true, x: p.x, y: p.y + br, R: br * 5, K: 12, p: 3, amp: halo * 0.7, color });
-        specs.push({ emissive: true, x: p.x, y: p.y + br, R: br * 1.15, K: 0, p: 2, amp: 0.6 + halo * 1.4, color });
+      for (const b of bulbs) {
+        specs.push({ x: b.x, y: b.y + br, R: poolR, K: 5, amp: poolAmp, color });
+        specs.push({ emissive: true, x: b.x, y: b.y + br, R: br * 5, K: 12, p: 3, amp: halo * 0.7, color });
+        specs.push({ emissive: true, x: b.x, y: b.y + br, R: br * 1.15, K: 0, amp: 0.35 + halo * 1.2, color });
       }
       break;
     }
@@ -539,6 +659,13 @@ function lightPrims(l: PlacedLight, gain: number, W: number, H: number): Prim[] 
       break;
     }
   }
+  // Indirect bounce: a broad, faint wash so a lit room (or garden) glows as a whole, not just in pools.
+  if (l.beam === 'strip' || l.beam === 'string') {
+    const e = lightEndPoint(l);
+    specs.push({ x, y, x2: e.x, y2: e.y, R: R * BOUNCE_RADIUS, K: 1, amp: reflect * BOUNCE, color });
+  } else {
+    specs.push({ x, y, R: R * BOUNCE_RADIUS, K: 1, amp: reflect * BOUNCE, color });
+  }
   const out: Prim[] = [];
   for (const sp of specs) {
     const p = makePrim(sp, W, H);
@@ -547,84 +674,65 @@ function lightPrims(l: PlacedLight, gain: number, W: number, H: number): Prim[] 
   return out;
 }
 
-/** ∫_{-1}^{1} (1 − u²)² / (1 + 5u²) du — the line integral of a K = 5 pool, for string normalization. */
-const POOL_LINE_INTEGRAL_K5 = (() => {
-  let s = 0;
-  const N = 2000;
-  for (let i = 0; i < N; i++) {
-    const u = -1 + (2 * (i + 0.5)) / N;
-    const q = u * u;
-    s += ((1 - q) * (1 - q)) / (1 + 5 * q);
-  }
-  return (s * 2) / N;
-})();
-
-/** Accumulates one primitive's contribution over row `y` into `acc` (3 floats per pixel). Returns [minX, maxX] touched. */
-function accumulateRow(pr: Prim, y: number, acc: Float32Array, span: Int32Array): void {
-  const py = y + 0.5;
-  let xs = pr.x0;
-  let xe = pr.x1;
+/**
+ * Accumulates one primitive over one row of sample points into `acc` (3
+ * floats per sample) and widens `span` to the samples it touched. Samples sit
+ * at x = n·step + 0.5 (n = 0..maxN), row at `py`: step 1 is the full-resolution
+ * pixel grid, larger steps the coarse grid of smooth shapes.
+ */
+function accumulateRow(pr: Prim, py: number, acc: Float32Array, span: Int32Array, step: number, maxN: number): void {
+  let lo = pr.x0;
+  let hi = pr.x1;
   if (pr.kind === 0) {
     const dy = py - pr.cy;
-    const h2 = pr.R * pr.R - dy * dy;
-    if (h2 <= 0) return;
-    const h = Math.sqrt(h2);
-    xs = Math.max(xs, Math.floor(pr.cx - h - 0.5));
-    xe = Math.min(xe, Math.ceil(pr.cx + h - 0.5));
+    const t = 1 - dy * dy * pr.invRy2;
+    if (t <= 0) return;
+    const h = pr.rx * Math.sqrt(t);
+    lo = Math.max(lo, pr.cx - h - 0.5);
+    hi = Math.min(hi, pr.cx + h - 0.5);
   }
-  if (xs > xe) return;
-  if (xs < span[0]) span[0] = xs;
-  if (xe > span[1]) span[1] = xe;
-  const { invR2, K, p, r, g, b } = pr;
+  const ns = Math.max(0, Math.ceil(lo / step - 1e-9));
+  const ne = Math.min(maxN, Math.floor(hi / step + 1e-9));
+  if (ns > ne) return;
+  const { invRx2, invRy2, K, p, r, g, b, beam } = pr;
   const segX = pr.ex - pr.cx;
   const segY = pr.ey - pr.cy;
-  const segL2 = segX * segX + segY * segY;
-  for (let x = xs; x <= xe; x++) {
-    const px = x + 0.5;
-    let dx: number;
-    let dy: number;
-    if (pr.kind === 1 && segL2 > 0) {
-      let t = ((px - pr.cx) * segX + (py - pr.cy) * segY) / segL2;
+  const segL2 = pr.kind === 1 ? segX * segX + segY * segY : 0;
+  const ddy = py - pr.cy;
+  let touchedLo = ne + 1;
+  let touchedHi = ns - 1;
+  for (let n = ns; n <= ne; n++) {
+    let dx = n * step + 0.5 - pr.cx;
+    let dy = ddy;
+    if (segL2 > 0) {
+      let t = (dx * segX + dy * segY) / segL2;
       t = t < 0 ? 0 : t > 1 ? 1 : t;
-      dx = px - (pr.cx + segX * t);
-      dy = py - (pr.cy + segY * t);
-    } else {
-      dx = px - pr.cx;
-      dy = py - pr.cy;
+      dx -= segX * t;
+      dy -= segY * t;
     }
-    const q = (dx * dx + dy * dy) * invR2;
+    const q = dx * dx * invRx2 + dy * dy * invRy2;
     if (q >= 1) continue;
     const w = 1 - q;
     let f = (p === 3 ? w * w * w : w * w) / (1 + K * q);
-    if (pr.cone) {
-      const vx = px - pr.ax;
-      const vy = py - pr.ay;
-      const len = Math.sqrt(vx * vx + vy * vy);
-      if (len > 1e-6) {
-        const c = (vx * pr.dx + vy * pr.dy) / len;
-        if (c <= pr.cosOut) continue;
-        if (c < pr.cosIn) {
-          const t = (c - pr.cosOut) / (pr.cosIn - pr.cosOut);
-          f *= t * t * (3 - 2 * t);
-        }
+    if (beam) {
+      const v = dx * pr.dx + dy * pr.dy;
+      if (v <= 0) continue;
+      const c = v / Math.sqrt(dx * dx + dy * dy + pr.d2);
+      if (c <= pr.cosOut) continue;
+      if (c < pr.cosIn) {
+        const t = (c - pr.cosOut) / (pr.cosIn - pr.cosOut);
+        f *= t * t * (3 - 2 * t);
       }
     }
-    const j = x * 3;
+    const j = n * 3;
     acc[j] += f * r;
     acc[j + 1] += f * g;
     acc[j + 2] += f * b;
+    if (n < touchedLo) touchedLo = n;
+    touchedHi = n;
   }
-}
-
-/** Per-8-bit-value surface response (reflectance proxy) for one channel. */
-function responseLut(channelGain: number): Float32Array {
-  const lut = new Float32Array(256);
-  const inv = channelGain > 0 ? 1 / channelGain : 1;
-  for (let v = 0; v < 256; v++) {
-    const alb = Math.min(1, SRGB8_TO_LINEAR[v] * inv);
-    lut[v] = RESPONSE_FLOOR + (1 - RESPONSE_FLOOR) * Math.pow(alb, RESPONSE_POW);
-  }
-  return lut;
+  if (touchedLo < span[0]) span[0] = touchedLo;
+  if (touchedHi > span[1]) span[1] = touchedHi;
 }
 
 /** Adds `add` to `base` through the shoulder so increments compress near white; add = 0 returns base exactly. */
@@ -635,13 +743,53 @@ function addLight(base: number, add: number): number {
   return out > 1 ? 1 : out;
 }
 
-let rowBuffers: { illum: Float32Array; emit: Float32Array } | null = null;
+/** Reused scratch buffers (grown on demand) so dragging a light doesn't churn the GC. */
+const scratch = {
+  f32: new Map<string, Float32Array>(),
+  i32: new Map<string, Int32Array>(),
+};
 
-function rowAccumulators(width: number): { illum: Float32Array; emit: Float32Array } {
-  if (!rowBuffers || rowBuffers.illum.length < width * 3) {
-    rowBuffers = { illum: new Float32Array(width * 3), emit: new Float32Array(width * 3) };
+function f32(name: string, size: number, clear: boolean): Float32Array {
+  let a = scratch.f32.get(name);
+  if (!a || a.length < size) {
+    a = new Float32Array(size);
+    scratch.f32.set(name, a);
+  } else if (clear) a.fill(0, 0, size);
+  return a;
+}
+
+function i32(name: string, size: number): Int32Array {
+  let a = scratch.i32.get(name);
+  if (!a || a.length < size) {
+    a = new Int32Array(size);
+    scratch.i32.set(name, a);
   }
-  return rowBuffers;
+  return a;
+}
+
+/** 8-bit code → light response of the surface (reflectance proxy), undoing a grade gain when needed. */
+function responseLut(channelGain: number): Float32Array {
+  const lut = new Float32Array(256);
+  const inv = channelGain > 0 ? 1 / channelGain : 1;
+  for (let v = 0; v < 256; v++) {
+    const a = Math.min(1, SRGB8_TO_LINEAR[v] * inv);
+    lut[v] = RESPONSE_FLOOR + (1 - RESPONSE_FLOOR) * Math.pow(a, RESPONSE_POW);
+  }
+  return lut;
+}
+
+/** 8-bit code → estimated linear surface value (undoing a grade gain when needed). */
+function albedoLut(channelGain: number): Float32Array {
+  const lut = new Float32Array(256);
+  const inv = channelGain > 0 ? 1 / channelGain : 1;
+  for (let v = 0; v < 256; v++) lut[v] = Math.min(1, SRGB8_TO_LINEAR[v] * inv);
+  return lut;
+}
+
+/** Coarse grid step for an image: smooth light shapes are evaluated every `step` px and interpolated. */
+function coarseStep(W: number, H: number): number {
+  const px = W * H;
+  return px > 600_000 ? 4 : px > 150_000 ? 2 : 1;
 }
 
 /**
@@ -649,84 +797,181 @@ function rowAccumulators(width: number): { illum: Float32Array; emit: Float32Arr
  * skipped. Falloff is smooth (no hard rim) and fades to 0 at `radius`.
  *
  * Light that lands on a surface is modulated by that surface's color (a lit
- * white wall glows, a dark mulch bed barely does), estimated from `albedo` —
- * the pre-grade image, when the caller has it — or from `img` by undoing the
- * grade's color multipliers. Emissive halos around bulbs are added as-is.
- * Additions pass a per-channel filmic shoulder so overlapping pools burn
- * smoothly toward warm white instead of clipping.
+ * white wall glows, a dark mulch bed barely does, open blue sky stays dark),
+ * estimated from `albedo` — the pre-grade image, when the caller has it — or
+ * else from `img` by undoing the grade's color multipliers. Emissive halos
+ * around the bulbs are added as-is. Additions pass a per-channel filmic
+ * shoulder so overlapping pools burn smoothly toward warm white instead of
+ * clipping or posterizing.
+ *
+ * Performance: large, smooth shapes are evaluated on a coarse grid and
+ * bilinearly interpolated; small ones (bulb cores, tight halos, beams with a
+ * short standoff) at full resolution.
  */
 export function renderLights(img: ImageDataLike, lights: PlacedLight[], s: LightingSettings, albedo?: ImageDataLike): void {
   const W = img.width;
   const H = img.height;
-  if (!(W > 0) || !(H > 0) || !lights?.length) return;
+  if (!(W > 0) || !(H > 0) || !lights?.length || img.data.length < W * H * 4) return;
   const gain = lightGain(sanitize(s).timeOfDay);
-  const prims: Prim[] = [];
+  const S = coarseStep(W, H);
+  const fine: Prim[] = [];
+  const coarse: Prim[] = [];
   for (const l of lights) {
     if (!l || !l.on) continue;
-    for (const p of lightPrims(l, gain, W, H)) prims.push(p);
+    for (const p of lightPrims(l, gain, W, H)) {
+      const small = Math.min(p.rx, p.ry) < 12 * S || (p.beam && p.d2 < 9 * S * S);
+      (S > 1 && !small ? coarse : fine).push(p);
+    }
   }
-  if (!prims.length) return;
+  if (!fine.length && !coarse.length) return;
 
-  const useAlbedo = !!albedo && albedo.width === W && albedo.height === H;
+  // --- coarse field: illum + emit (3 floats each) per node, spans per node row
+  const GW = Math.floor((W - 1) / S) + 2;
+  const GH = Math.floor((H - 1) / S) + 2;
+  let cIllum: Float32Array | null = null;
+  let cEmit: Float32Array | null = null;
+  let cSpan: Int32Array | null = null;
+  let yMin = H;
+  let yMax = -1;
+  if (coarse.length) {
+    cIllum = f32('cIllum', GW * GH * 3, true);
+    cEmit = f32('cEmit', GW * GH * 3, true);
+    cSpan = i32('cSpan', GH * 2);
+    const span = new Int32Array(2);
+    for (let gy = 0; gy < GH; gy++) {
+      span[0] = GW;
+      span[1] = -1;
+      const py = gy * S + 0.5;
+      const rowOff = gy * GW * 3;
+      for (const p of coarse) {
+        if (py < p.y0 - S || py > p.y1 + S) continue;
+        accumulateRow(p, py, p.emissive ? cEmit.subarray(rowOff) : cIllum.subarray(rowOff), span, S, GW - 1);
+      }
+      cSpan[gy * 2] = span[0];
+      cSpan[gy * 2 + 1] = span[1];
+      if (span[0] <= span[1]) {
+        yMin = Math.min(yMin, (gy - 1) * S + 1);
+        yMax = Math.max(yMax, (gy + 1) * S - 1);
+      }
+    }
+  }
+  for (const p of fine) {
+    if (p.y0 < yMin) yMin = p.y0;
+    if (p.y1 > yMax) yMax = p.y1;
+  }
+  yMin = Math.max(0, yMin);
+  yMax = Math.min(H - 1, yMax);
+  if (yMin > yMax) return;
+  fine.sort((a, b) => a.y0 - b.y0);
+
+  // --- surface response lookups
+  const useAlbedo = !!albedo && albedo.width === W && albedo.height === H && albedo.data.length >= W * H * 4;
   const src = useAlbedo ? (albedo as ImageDataLike).data : img.data;
   const g0 = useAlbedo ? ONE : gradeGain(s);
   const respR = responseLut(g0[0]);
   const respG = responseLut(g0[1]);
   const respB = responseLut(g0[2]);
+  const albR = albedoLut(g0[0]);
+  const albG = albedoLut(g0[1]);
+  const albB = albedoLut(g0[2]);
 
-  let yMin = H;
-  let yMax = -1;
-  for (const p of prims) {
-    if (p.y0 < yMin) yMin = p.y0;
-    if (p.y1 > yMax) yMax = p.y1;
-  }
-  prims.sort((a, b) => a.y0 - b.y0);
-
-  const { illum, emit } = rowAccumulators(W);
-  const spanI = new Int32Array(2);
-  const spanE = new Int32Array(2);
+  const fIllum = f32('fIllum', W * 3, false);
+  const fEmit = f32('fEmit', W * 3, false);
+  const vRow = f32('vRow', GW * 6, false);
+  const fSpan = new Int32Array(2);
   const d = img.data;
   const lin = SRGB8_TO_LINEAR;
-  const active: Prim[] = [];
+  const invS = 1 / S;
+  let active: Prim[] = [];
   let next = 0;
 
   for (let y = yMin; y <= yMax; y++) {
-    while (next < prims.length && prims[next].y0 <= y) active.push(prims[next++]);
-    spanI[0] = W;
-    spanI[1] = -1;
-    spanE[0] = W;
-    spanE[1] = -1;
-    for (let k = active.length - 1; k >= 0; k--) {
-      const p = active[k];
-      if (p.y1 < y) {
-        active.splice(k, 1);
-        continue;
+    // Fine shapes on this row.
+    while (next < fine.length && fine[next].y0 <= y) active.push(fine[next++]);
+    if (active.length && active.some((p) => p.y1 < y)) active = active.filter((p) => p.y1 >= y);
+    fSpan[0] = W;
+    fSpan[1] = -1;
+    for (const p of active) accumulateRow(p, y + 0.5, p.emissive ? fEmit : fIllum, fSpan, 1, W - 1);
+
+    // Coarse field: interpolate the two bracketing node rows into vRow (illum rgb, emit rgb per node).
+    let cx0 = W;
+    let cx1 = -1;
+    if (cIllum && cEmit && cSpan) {
+      const gy0 = Math.floor(y * invS);
+      const gy1 = Math.min(gy0 + 1, GH - 1);
+      const ty = y * invS - gy0;
+      let n0 = Math.min(cSpan[gy0 * 2], cSpan[gy1 * 2]);
+      let n1 = Math.max(cSpan[gy0 * 2 + 1], cSpan[gy1 * 2 + 1]);
+      if (n0 <= n1) {
+        n0 = Math.max(0, n0 - 1);
+        n1 = Math.min(GW - 1, n1 + 1);
+        const o0 = gy0 * GW * 3;
+        const o1 = gy1 * GW * 3;
+        for (let n = n0; n <= n1; n++) {
+          const a = n * 3;
+          const v = n * 6;
+          vRow[v] = cIllum[o0 + a] + (cIllum[o1 + a] - cIllum[o0 + a]) * ty;
+          vRow[v + 1] = cIllum[o0 + a + 1] + (cIllum[o1 + a + 1] - cIllum[o0 + a + 1]) * ty;
+          vRow[v + 2] = cIllum[o0 + a + 2] + (cIllum[o1 + a + 2] - cIllum[o0 + a + 2]) * ty;
+          vRow[v + 3] = cEmit[o0 + a] + (cEmit[o1 + a] - cEmit[o0 + a]) * ty;
+          vRow[v + 4] = cEmit[o0 + a + 1] + (cEmit[o1 + a + 1] - cEmit[o0 + a + 1]) * ty;
+          vRow[v + 5] = cEmit[o0 + a + 2] + (cEmit[o1 + a + 2] - cEmit[o0 + a + 2]) * ty;
+        }
+        cx0 = n0 * S;
+        cx1 = Math.min(W - 1, n1 * S);
       }
-      if (p.emissive) accumulateRow(p, y, emit, spanE);
-      else accumulateRow(p, y, illum, spanI);
     }
-    const xs = Math.min(spanI[0], spanE[0]);
-    const xe = Math.max(spanI[1], spanE[1]);
+
+    const xs = Math.min(fSpan[0], cx0);
+    const xe = Math.max(fSpan[1], cx1);
     if (xs > xe) continue;
     const row = y * W;
     for (let x = xs; x <= xe; x++) {
       const j = x * 3;
-      const ir = illum[j];
-      const ig = illum[j + 1];
-      const ib = illum[j + 2];
-      const er = emit[j];
-      const eg = emit[j + 1];
-      const eb = emit[j + 2];
-      if (ir + ig + ib + er + eg + eb <= 0) continue;
-      illum[j] = illum[j + 1] = illum[j + 2] = 0;
-      emit[j] = emit[j + 1] = emit[j + 2] = 0;
+      let ir = fIllum[j];
+      let ig = fIllum[j + 1];
+      let ib = fIllum[j + 2];
+      let er = fEmit[j];
+      let eg = fEmit[j + 1];
+      let eb = fEmit[j + 2];
+      fIllum[j] = fIllum[j + 1] = fIllum[j + 2] = 0;
+      fEmit[j] = fEmit[j + 1] = fEmit[j + 2] = 0;
+      if (x >= cx0 && x <= cx1) {
+        const fx = x * invS;
+        const n = fx | 0;
+        const t = fx - n;
+        const v0 = n * 6;
+        const v1 = n + 1 < GW ? v0 + 6 : v0;
+        ir += vRow[v0] + (vRow[v1] - vRow[v0]) * t;
+        ig += vRow[v0 + 1] + (vRow[v1 + 1] - vRow[v0 + 1]) * t;
+        ib += vRow[v0 + 2] + (vRow[v1 + 2] - vRow[v0 + 2]) * t;
+        er += vRow[v0 + 3] + (vRow[v1 + 3] - vRow[v0 + 3]) * t;
+        eg += vRow[v0 + 4] + (vRow[v1 + 4] - vRow[v0 + 4]) * t;
+        eb += vRow[v0 + 5] + (vRow[v1 + 5] - vRow[v0 + 5]) * t;
+      }
+      if (ir + ig + ib + er + eg + eb <= 1e-7) continue;
       const i = (row + x) * 4;
-      const ar = respR[src[i]];
-      const ag = respG[src[i + 1]];
-      const ab = respB[src[i + 2]];
-      const r = addLight(lin[d[i]], ir * ar + er);
-      const g = addLight(lin[d[i + 1]], ig * ag + eg);
-      const b = addLight(lin[d[i + 2]], ib * ab + eb);
+      const cr = src[i];
+      const cg = src[i + 1];
+      const cb = src[i + 2];
+      let kr = respR[cr];
+      let kg = respG[cg];
+      let kb = respB[cb];
+      // Open blue sky is far away: lights don't brighten it.
+      if (cb > cr + 24) {
+        const sr = albR[cr];
+        const sb = albB[cb];
+        const sky = blueness(sr, sb) * smoothstep(0.15, 0.4, LR * sr + LG * albG[cg] + LB * sb);
+        if (sky > 0) {
+          const k = 1 - (1 - SKY_RESPONSE) * sky;
+          kr *= k;
+          kg *= k;
+          kb *= k;
+        }
+      }
+      const r = addLight(lin[d[i]], ir * kr + er);
+      const g = addLight(lin[d[i + 1]], ig * kg + eg);
+      const b = addLight(lin[d[i + 2]], ib * kb + eb);
       const dt = dither(row + x);
       // Never darker than before (dither could otherwise round a tiny addition down).
       const nr = encode(r, dt);

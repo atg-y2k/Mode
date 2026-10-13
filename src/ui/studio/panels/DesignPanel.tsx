@@ -102,11 +102,7 @@ function BriefComposer({
         subtitle="Compose your idea from design elements, then generate photoreal variations of your photo."
       />
 
-      {setting === 'exterior' && (
-        <div className="px-4 pt-4">
-          <ClimateCallout setting={setting} />
-        </div>
-      )}
+      <ClimateCallout setting={setting} className="mx-4 mt-4" />
 
       <Section
         title="Design elements"
@@ -246,7 +242,7 @@ function AreasSection({ photo, scene, brief }: { photo: Photo; scene: SceneMap |
 
   return (
     <Section
-      title="Areas that may change"
+      title="Areas to change"
       action={scene && <Toggle checked={showZones} onChange={(v) => useStore.getState().setStudio({ showZones: v })} label={<span className="text-xs text-muted">Show on photo</span>} />}
     >
       <Segmented
@@ -361,7 +357,7 @@ function InspirationSection({ project, space, photoId, brief }: { project: Proje
       {relevant.length === 0 ? (
         <div className="flex flex-col items-start gap-2">
           <p className="text-xs text-muted">Inspiration images, notes, design themes and real products from your idea board guide every variation.</p>
-          <Button size="sm" icon={<Lightbulb className="size-3.5 max-lg:h-9" />} onClick={openIdeas}>
+          <Button size="sm" className="max-lg:h-9" icon={<Lightbulb className="size-3.5" />} onClick={openIdeas}>
             Add inspiration
           </Button>
         </div>

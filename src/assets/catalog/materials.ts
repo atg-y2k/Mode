@@ -409,7 +409,7 @@ export const MATERIALS: MaterialDef[] = [
     id: 'board-batten-siding-white',
     name: 'Board & batten siding (white)',
     category: 'siding',
-    surfaces: ['siding', 'garage-door', 'accent-wall'],
+    surfaces: ['siding', 'garage-door', 'accent-wall', 'fence'],
     texture: {
       pattern: 'board-batten',
       colors: ['#efede7', '#e9e7e1'],
@@ -659,7 +659,7 @@ export const MATERIALS: MaterialDef[] = [
     id: 'composite-deck-gray',
     name: 'Composite decking (driftwood gray)',
     category: 'decking',
-    surfaces: ['deck', 'stair', 'patio'],
+    surfaces: ['deck', 'stair', 'patio', 'fence'],
     texture: {
       pattern: 'deck-boards',
       colors: ['#8f8a82', '#7f7a73', '#9b958c', '#87817a'],
@@ -695,7 +695,7 @@ export const MATERIALS: MaterialDef[] = [
     id: 'pressure-treated-pine-deck',
     name: 'Pressure-treated pine decking',
     category: 'decking',
-    surfaces: ['deck', 'stair'],
+    surfaces: ['deck', 'stair', 'fence'],
     texture: {
       pattern: 'deck-boards',
       colors: ['#b39467', '#a6885c', '#c0a175', '#9b7e55'],
@@ -713,7 +713,7 @@ export const MATERIALS: MaterialDef[] = [
     id: 'ipe-hardwood-deck',
     name: 'Ipe hardwood decking',
     category: 'decking',
-    surfaces: ['deck', 'stair', 'patio'],
+    surfaces: ['deck', 'stair', 'patio', 'fence'],
     texture: {
       pattern: 'deck-boards',
       colors: ['#6b3f2a', '#5c3523', '#7a4a32', '#4f2d1f'],
@@ -843,7 +843,7 @@ export const MATERIALS: MaterialDef[] = [
     id: 'pea-gravel',
     name: 'Pea gravel (river blend)',
     category: 'hardscape',
-    surfaces: ['path', 'patio', 'driveway', 'planting-bed'],
+    surfaces: ['path', 'patio', 'driveway', 'planting-bed', 'lawn'],
     texture: {
       pattern: 'gravel',
       colors: ['#b9ab94', '#9c9180', '#cfc4b0', '#7f776b', '#a89a86'],
@@ -860,7 +860,7 @@ export const MATERIALS: MaterialDef[] = [
     id: 'decomposed-granite',
     name: 'Decomposed granite (gold)',
     category: 'hardscape',
-    surfaces: ['path', 'patio', 'driveway', 'planting-bed'],
+    surfaces: ['path', 'patio', 'driveway', 'planting-bed', 'lawn'],
     texture: {
       pattern: 'gravel',
       colors: ['#c4a97d', '#b89c70', '#d1b88e', '#a88d64'],
@@ -968,7 +968,7 @@ export const MATERIALS: MaterialDef[] = [
     id: 'dark-hardwood-mulch',
     name: 'Hardwood mulch (dark brown)',
     category: 'ground-cover',
-    surfaces: ['planting-bed'],
+    surfaces: ['planting-bed', 'lawn'],
     texture: {
       pattern: 'mulch',
       colors: ['#4a2e1c', '#3d2617', '#5b3a24', '#33200f'],
@@ -985,7 +985,7 @@ export const MATERIALS: MaterialDef[] = [
     id: 'cedar-mulch',
     name: 'Shredded cedar mulch',
     category: 'ground-cover',
-    surfaces: ['planting-bed', 'path'],
+    surfaces: ['planting-bed', 'path', 'lawn'],
     texture: {
       pattern: 'mulch',
       colors: ['#8a5a3a', '#7a4d30', '#9a6a46', '#6b4329'],
@@ -1002,7 +1002,7 @@ export const MATERIALS: MaterialDef[] = [
     id: 'black-mulch',
     name: 'Black dyed mulch',
     category: 'ground-cover',
-    surfaces: ['planting-bed'],
+    surfaces: ['planting-bed', 'lawn'],
     texture: {
       pattern: 'mulch',
       colors: ['#232120', '#1b1a19', '#2c2a28', '#33302c'],
@@ -1019,7 +1019,7 @@ export const MATERIALS: MaterialDef[] = [
     id: 'river-rock',
     name: 'River rock 1–3 in',
     category: 'ground-cover',
-    surfaces: ['planting-bed', 'path'],
+    surfaces: ['planting-bed', 'path', 'lawn'],
     texture: {
       pattern: 'gravel',
       colors: ['#8d8579', '#a39b8e', '#6f6a62', '#b6ad9f', '#7c6d5c'],
@@ -1038,7 +1038,7 @@ export const MATERIALS: MaterialDef[] = [
   // -------------------------------------------------------------------------
   {
     id: 'quartz-calacatta-look',
-    name: 'Quartz (white, bold gray veining)',
+    name: 'Quartz (white, marble look)',
     category: 'countertop',
     surfaces: ['countertop', 'backsplash'],
     texture: {

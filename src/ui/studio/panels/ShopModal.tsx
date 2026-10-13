@@ -15,7 +15,7 @@ import { useStore, type ShopRequest } from '../../../state/store';
 import { errorText } from '../../shell/format';
 import { openSettings } from '../../shell/shellUI';
 import { Badge, Button, Field, Modal, NumberInput, Select, TextInput, cn } from '../../common';
-import { runAiJob } from './aiJobs';
+import { runAiJob, useAiJob } from './aiJobs';
 import { addProductIdea } from './ideas';
 import { CATEGORY_LABELS, SHOP_STORES, priceLabel, storeLabel, zoneFit } from './productInfo';
 import { AiJobStatus, AiUnavailableNote, Chip, useAiReady } from './ui';
@@ -85,6 +85,7 @@ function ShopBody({ request }: { request: ShopRequest }) {
   };
 
   const result = last.result;
+  const searchJob = useAiJob(SEARCH_JOB);
 
   return (
     <div className="flex flex-col gap-4">
@@ -192,7 +193,7 @@ function ShopBody({ request }: { request: ShopRequest }) {
         </section>
       )}
 
-      {!result && aiReady && (
+      {!result && aiReady && !searchJob && (
         <div className="flex flex-col items-center gap-2 py-6 text-center">
           <ShoppingBag className="size-6 text-subtle" aria-hidden />
           <p className="max-w-sm text-sm text-muted">Search real products you could actually buy. Add the ones you like to your idea board — Mode then uses them in your designs.</p>
@@ -290,10 +291,11 @@ function ProductCard({ product, zone }: { product: ProductResult; zone: string |
         <div className="mt-auto flex flex-wrap gap-2 pt-1">
           <Button
             size="sm"
+            className="max-lg:h-9"
             variant={onBoard ? 'ghost' : 'primary'}
             disabled={onBoard}
             loading={busy}
-            icon={onBoard ? <Check className="size-3.5 max-lg:h-9" /> : <Plus className="size-3.5" />}
+            icon={onBoard ? <Check className="size-3.5" /> : <Plus className="size-3.5" />}
             onClick={() => void add()}
           >
             {onBoard ? 'On your board' : 'Add to idea board'}

@@ -174,13 +174,14 @@ function RecommendationCard({ rec, photoId, scene }: { rec: Recommendation; phot
         </div>
       )}
       <div className="flex flex-wrap gap-2 pt-0.5">
-        <Button size="sm" icon={<Plus className="size-3.5 max-lg:h-9" />} onClick={() => addRecommendationToBrief(photoId, rec)}>
+        <Button size="sm" className="max-lg:h-9" icon={<Plus className="size-3.5" />} onClick={() => addRecommendationToBrief(photoId, rec)}>
           Add to brief
         </Button>
         <Button
           size="sm"
+          className="max-lg:h-9"
           variant="primary"
-          icon={<ArrowRight className="size-3.5 max-lg:h-9" />}
+          icon={<ArrowRight className="size-3.5" />}
           loading={starting}
           disabled={!!blocker}
           title={blocker ?? 'Generate variations of this suggestion now'}

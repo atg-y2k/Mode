@@ -1072,7 +1072,7 @@ const DRAWINGS: Record<string, () => ReactNode> = {
     <>
       <path d="M4 42 V38 H9 V34 H14 V30 H26 V26 H31 V22 H36 V18 H44 V42 Z" className="fill-accent/20 stroke-accent" />
       <Ground />
-      <Label x={20} y={27}>landing</Label>
+      <Label x={17} y={27}>landing</Label>
     </>
   ),
   'steps-wraparound': () => (
