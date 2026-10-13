@@ -178,7 +178,7 @@ function NotMapped({ photoId }: { photoId: string }) {
       <Button variant="primary" className="self-center" icon={<Sparkles className="size-4" />} disabled={!aiReady} onClick={() => void mapScene(photoId)}>
         Map the scene
       </Button>
-      <AiUnavailableNote feature="Scene mapping" />
+      <AiUnavailableNote action="map the scene" />
       <p className="text-center text-xs text-subtle">No map yet? You can still describe changes on the Design tab — the whole photo may change.</p>
     </div>
   );

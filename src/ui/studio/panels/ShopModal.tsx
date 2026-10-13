@@ -164,7 +164,7 @@ function ShopBody({ request }: { request: ShopRequest }) {
         {stores.length === 0 && <p className="text-xs text-danger">Pick at least one store.</p>}
       </form>
 
-      <AiUnavailableNote feature="Product search" />
+      <AiUnavailableNote action="search stores" />
       {!aiReady && <p className="text-xs text-muted">Without AI you can still paste a product link on the Ideas tab — Mode reads the store page directly.</p>}
       <AiJobStatus jobKey={SEARCH_JOB} hint="Looking through real product pages at the stores you picked. Usually 30–90 seconds." onRetry={() => search()} />
 

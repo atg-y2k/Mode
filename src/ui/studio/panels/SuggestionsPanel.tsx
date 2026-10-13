@@ -82,7 +82,7 @@ function Suggestions({ photo, scene, setting }: { photo: Photo; scene: SceneMap 
             {viewingVariation ? `Suggests changes to the variation you're viewing (“${viewingVariation.title}”).` : 'Suggests changes to the original photo.'}
           </p>
         </form>
-        <AiUnavailableNote feature="Suggestions" />
+        <AiUnavailableNote action="get suggestions" />
         <AiJobStatus jobKey={suggestionsJobKey(photo.id)} hint="Claude studies the photo, its architecture and your ideas. Usually 30–90 seconds." onRetry={() => run()} />
         {!scene && !running && (
           <Callout

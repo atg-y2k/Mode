@@ -335,7 +335,7 @@ export function AiJobStatus({ jobKey, hint, onRetry, className }: { jobKey: stri
 }
 
 /** Explains why AI features are unavailable (nothing while they are usable). */
-export function AiUnavailableNote({ feature, className }: { feature: string; className?: string }) {
+export function AiUnavailableNote({ action, className }: { /** e.g. "get suggestions" */ action: string; className?: string }) {
   const health = useStore((s) => s.health);
   const availability = aiAvailability(health);
   if (availability.state === 'ready' || availability.state === 'unknown') return null;
@@ -343,7 +343,7 @@ export function AiUnavailableNote({ feature, className }: { feature: string; cla
     <Callout
       tone="warning"
       icon={<Sparkles className="size-4" aria-hidden />}
-      title={availability.state === 'offline' ? 'Server not reachable' : `${feature} needs AI`}
+      title={availability.state === 'offline' ? `Can't ${action} right now` : `Turn on AI to ${action}`}
       className={className}
       action={
         <>

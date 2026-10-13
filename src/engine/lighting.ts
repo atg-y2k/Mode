@@ -394,7 +394,7 @@ const SKY_RESPONSE = 0.12;
 /** Peak of the emissive halo around an emitter at night (scaled by lightGain²). */
 const HALO = 0.8;
 /** Indirect bounce: radius multiple and relative strength of the broad fill around every light. */
-const BOUNCE_RADIUS = 2.2;
+const BOUNCE_RADIUS = 2;
 const BOUNCE = 0.07;
 /** Knee of the per-channel shoulder used when adding light. */
 const LIGHT_KNEE = 0.72;
@@ -735,13 +735,36 @@ function accumulateRow(pr: Prim, py: number, acc: Float32Array, span: Int32Array
   if (touchedHi > span[1]) span[1] = touchedHi;
 }
 
-/** Adds `add` to `base` through the shoulder so increments compress near white; add = 0 returns base exactly. */
-function addLight(base: number, add: number): number {
+/** shoulder(linear(code)) for every 8-bit code: the base side of addLight. */
+const SHOULDER_OF_CODE: Float64Array = (() => {
+  const t = new Float64Array(256);
+  for (let v = 0; v < 256; v++) t[v] = shoulder(SRGB8_TO_LINEAR[v], LIGHT_KNEE);
+  return t;
+})();
+
+/**
+ * Adds `add` to the 8-bit code's linear value through the shoulder, so
+ * increments compress near white; add = 0 returns the base value exactly.
+ */
+function addLight(code: number, add: number): number {
+  const base = SRGB8_TO_LINEAR[code];
   const sum = base + add;
   if (sum <= LIGHT_KNEE) return sum;
-  const out = base + shoulder(sum, LIGHT_KNEE) - shoulder(base, LIGHT_KNEE);
+  const u = (sum - LIGHT_KNEE) / (1 - LIGHT_KNEE);
+  const out = base + LIGHT_KNEE + ((1 - LIGHT_KNEE) * u) / (1 + u) - SHOULDER_OF_CODE[code];
   return out > 1 ? 1 : out;
 }
+
+/**
+ * Per 8-bit code: a quarter of the linear step to the next code. Additions
+ * smaller than this on every channel can't change the output, so the pixel
+ * is skipped (the far tails of the broad bounce light, daylight scenes).
+ */
+const INVISIBLE_ADD: Float64Array = (() => {
+  const t = new Float64Array(256);
+  for (let v = 0; v < 256; v++) t[v] = 0.25 * (SRGB8_TO_LINEAR[Math.min(255, v + 1)] - SRGB8_TO_LINEAR[v] || 1);
+  return t;
+})();
 
 /** Reused scratch buffers (grown on demand) so dragging a light doesn't churn the GC. */
 const scratch = {
@@ -880,7 +903,6 @@ export function renderLights(img: ImageDataLike, lights: PlacedLight[], s: Light
   const vRow = f32('vRow', GW * 6, false);
   const fSpan = new Int32Array(2);
   const d = img.data;
-  const lin = SRGB8_TO_LINEAR;
   const invS = 1 / S;
   let active: Prim[] = [];
   let next = 0;
@@ -949,8 +971,10 @@ export function renderLights(img: ImageDataLike, lights: PlacedLight[], s: Light
         eg += vRow[v0 + 4] + (vRow[v1 + 4] - vRow[v0 + 4]) * t;
         eb += vRow[v0 + 5] + (vRow[v1 + 5] - vRow[v0 + 5]) * t;
       }
-      if (ir + ig + ib + er + eg + eb <= 1e-7) continue;
       const i = (row + x) * 4;
+      // Response ≤ 1, so this bounds the addition on every channel.
+      const mx = Math.max(ir, ig, ib) + Math.max(er, eg, eb);
+      if (mx < INVISIBLE_ADD[d[i]] && mx < INVISIBLE_ADD[d[i + 1]] && mx < INVISIBLE_ADD[d[i + 2]]) continue;
       const cr = src[i];
       const cg = src[i + 1];
       const cb = src[i + 2];
@@ -969,9 +993,9 @@ export function renderLights(img: ImageDataLike, lights: PlacedLight[], s: Light
           kb *= k;
         }
       }
-      const r = addLight(lin[d[i]], ir * kr + er);
-      const g = addLight(lin[d[i + 1]], ig * kg + eg);
-      const b = addLight(lin[d[i + 2]], ib * kb + eb);
+      const r = addLight(d[i], ir * kr + er);
+      const g = addLight(d[i + 1], ig * kg + eg);
+      const b = addLight(d[i + 2], ib * kb + eb);
       const dt = dither(row + x);
       // Never darker than before (dither could otherwise round a tiny addition down).
       const nr = encode(r, dt);
