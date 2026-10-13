@@ -1,0 +1,10 @@
+{
+  "name": "Mode — Home Redesign Studio",
+  "short_name": "Mode",
+  "description": "Try paint colors, lighting, materials and landscaping on photos of your home.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f6f4f0",
+  "theme_color": "#2f5d50",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}

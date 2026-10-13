@@ -1,0 +1,144 @@
+@import 'tailwindcss';
+
+/*
+ * Design tokens. Components use the semantic Tailwind colors below
+ * (bg-surface, text-muted, border-line, bg-accent, …) — never raw hex — so
+ * light and dark themes both work. Theme follows the OS unless
+ * <html data-theme="light|dark"> overrides it.
+ */
+:root {
+  --bg: #f6f4f0;
+  --surface: #ffffff;
+  --surface-2: #f1eee8;
+  --surface-3: #e8e3da;
+  --line: #e3ded4;
+  --line-strong: #cec7ba;
+  --text: #1f1d1a;
+  --muted: #6b665d;
+  --subtle: #9a948a;
+  --accent: #2f5d50;
+  --accent-hover: #264d42;
+  --accent-soft: #e2ece7;
+  --accent-fg: #ffffff;
+  --gold: #b8893a;
+  --danger: #b42318;
+  --danger-soft: #fdecea;
+  --success: #2f7d4f;
+  --warning: #a15c07;
+  --stage: #2a2825;
+  --shadow: 0 1px 2px rgb(31 29 26 / 0.06), 0 4px 16px rgb(31 29 26 / 0.06);
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --bg: #131210;
+    --surface: #1b1a18;
+    --surface-2: #232220;
+    --surface-3: #2d2b28;
+    --line: #33312d;
+    --line-strong: #4a4640;
+    --text: #f1eee9;
+    --muted: #aaa49a;
+    --subtle: #7b766e;
+    --accent: #72b6a0;
+    --accent-hover: #86c6b0;
+    --accent-soft: #1d2f29;
+    --accent-fg: #0d1a15;
+    --gold: #d9b779;
+    --danger: #f0776b;
+    --danger-soft: #3a1d1a;
+    --success: #6cc08f;
+    --warning: #e3a453;
+    --stage: #0d0c0b;
+    --shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 4px 16px rgb(0 0 0 / 0.35);
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme='dark'] {
+  --bg: #131210;
+  --surface: #1b1a18;
+  --surface-2: #232220;
+  --surface-3: #2d2b28;
+  --line: #33312d;
+  --line-strong: #4a4640;
+  --text: #f1eee9;
+  --muted: #aaa49a;
+  --subtle: #7b766e;
+  --accent: #72b6a0;
+  --accent-hover: #86c6b0;
+  --accent-soft: #1d2f29;
+  --accent-fg: #0d1a15;
+  --gold: #d9b779;
+  --danger: #f0776b;
+  --danger-soft: #3a1d1a;
+  --success: #6cc08f;
+  --warning: #e3a453;
+  --stage: #0d0c0b;
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 4px 16px rgb(0 0 0 / 0.35);
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-text: var(--text);
+  --color-muted: var(--muted);
+  --color-subtle: var(--subtle);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-fg: var(--accent-fg);
+  --color-gold: var(--gold);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-stage: var(--stage);
+  --shadow-panel: var(--shadow);
+  --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-display: ui-serif, 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
+}
+
+/* Range inputs styled once for the whole app. */
+input[type='range'] {
+  accent-color: var(--accent);
+}
+
+/* Thin scrollbars in panels. */
+.scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+
+/* Checkerboard used behind transparent asset previews. */
+.bg-checker {
+  background-image:
+    linear-gradient(45deg, var(--surface-3) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--surface-3) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--surface-3) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--surface-3) 75%);
+  background-size: 14px 14px;
+  background-position: 0 0, 0 7px, 7px -7px, -7px 0;
+}
