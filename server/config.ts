@@ -5,14 +5,28 @@
  * answers /api/health with AI disabled, so the rest of Mode works offline.
  */
 import { resolve } from 'node:path';
+import type { ImageProviderId } from '../shared/api';
 
 export const DEFAULT_CLAUDE_MODEL = 'claude-opus-5-5';
 export const DEFAULT_OPENAI_IMAGE_MODEL = 'gpt-image-1';
 export const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
+export const DEFAULT_GEMINI_IMAGE_MODEL = 'gemini-2.5-flash-image';
 export const DEFAULT_PORT = 8787;
 export const DEFAULT_RATE_LIMIT_PER_10MIN = 60;
 
+/** Providers implemented by server/imageProvider.ts (used by /api/render and photo assets). */
 export type ImageProviderName = 'openai';
+
+export interface ConfiguredImageProvider {
+  id: ImageProviderId;
+  model: string;
+  isDefault: boolean;
+}
+
+export const IMAGE_PROVIDER_LABELS: Record<ImageProviderId, string> = {
+  openai: 'OpenAI',
+  gemini: 'Google Gemini',
+};
 
 export interface ServerConfig {
   /** True when Claude features are available (ANTHROPIC_API_KEY set, or MODE_AI=on). */
@@ -21,11 +35,18 @@ export interface ServerConfig {
   anthropicApiKey: string | null;
   claudeModel: string;
 
-  /** Configured *and* usable image provider, or null. */
+  /**
+   * Provider for /api/render and photo-style /api/generate-asset (needs OpenAI:
+   * transparent backgrounds), or null.
+   */
   imageProvider: ImageProviderName | null;
+  /** Every image provider that has an API key (Studio lets the user pick); the default is flagged. */
+  imageProviders: ConfiguredImageProvider[];
   openaiApiKey: string | null;
   openaiImageModel: string;
   openaiBaseUrl: string;
+  geminiApiKey: string | null;
+  geminiImageModel: string;
 
   /** When set, every /api request except /api/health must send header `x-mode-token`. */
   accessToken: string | null;
@@ -83,15 +104,31 @@ export function loadConfig(env: Env = process.env, cwd: string = process.cwd()):
   // (the SDK then uses ANTHROPIC_AUTH_TOKEN or a profile from `ant auth login`).
   const aiEnabled = modeAi === false ? false : anthropicApiKey != null || modeAi === true;
 
+  // Image providers: each one is available when its key is set; IMAGE_PROVIDER
+  // picks the default ("none" / "off" disables image generation entirely).
   const providerRaw = str(env, 'IMAGE_PROVIDER')?.toLowerCase() ?? null;
+  const imagesOff = providerRaw === 'none' || providerRaw === 'off';
   const openaiApiKey = str(env, 'OPENAI_API_KEY');
-  let imageProvider: ImageProviderName | null = null;
-  if (providerRaw === 'openai') {
-    if (openaiApiKey) imageProvider = 'openai';
-    else warnings.push('IMAGE_PROVIDER=openai but OPENAI_API_KEY is not set; photoreal renders are disabled.');
-  } else if (providerRaw != null && providerRaw !== 'none' && providerRaw !== 'off') {
-    warnings.push(`IMAGE_PROVIDER="${providerRaw}" is not supported (supported: openai); photoreal renders are disabled.`);
+  const geminiApiKey = str(env, 'GEMINI_API_KEY');
+  const openaiImageModel = str(env, 'OPENAI_IMAGE_MODEL') ?? DEFAULT_OPENAI_IMAGE_MODEL;
+  const geminiImageModel = str(env, 'GEMINI_IMAGE_MODEL') ?? DEFAULT_GEMINI_IMAGE_MODEL;
+  const available: { id: ImageProviderId; model: string }[] = [];
+  if (!imagesOff && openaiApiKey) available.push({ id: 'openai', model: openaiImageModel });
+  if (!imagesOff && geminiApiKey) available.push({ id: 'gemini', model: geminiImageModel });
+  let defaultId: ImageProviderId | null = available[0]?.id ?? null;
+  if (providerRaw === 'openai' || providerRaw === 'gemini') {
+    if (available.some((p) => p.id === providerRaw)) defaultId = providerRaw;
+    else {
+      const key = providerRaw === 'openai' ? 'OPENAI_API_KEY' : 'GEMINI_API_KEY';
+      warnings.push(
+        `IMAGE_PROVIDER=${providerRaw} but ${key} is not set; ${defaultId ? `using ${defaultId} instead` : 'image generation is disabled'}.`,
+      );
+    }
+  } else if (providerRaw != null && !imagesOff) {
+    warnings.push(`IMAGE_PROVIDER="${providerRaw}" is not supported (use openai, gemini or none).`);
   }
+  const imageProviders = available.map((p) => ({ ...p, isDefault: p.id === defaultId }));
+  const imageProvider: ImageProviderName | null = available.some((p) => p.id === 'openai') ? 'openai' : null;
 
   const baseUrl = (str(env, 'OPENAI_BASE_URL') ?? DEFAULT_OPENAI_BASE_URL).replace(/\/+$/, '');
   const production = env.NODE_ENV === 'production';
@@ -103,9 +140,12 @@ export function loadConfig(env: Env = process.env, cwd: string = process.cwd()):
     anthropicApiKey,
     claudeModel: str(env, 'CLAUDE_MODEL') ?? DEFAULT_CLAUDE_MODEL,
     imageProvider,
+    imageProviders,
     openaiApiKey,
-    openaiImageModel: str(env, 'OPENAI_IMAGE_MODEL') ?? DEFAULT_OPENAI_IMAGE_MODEL,
+    openaiImageModel,
     openaiBaseUrl: baseUrl,
+    geminiApiKey,
+    geminiImageModel,
     accessToken: str(env, 'MODE_ACCESS_TOKEN'),
     rateLimitPer10Min: int(env, 'RATE_LIMIT_PER_10MIN', DEFAULT_RATE_LIMIT_PER_10MIN, warnings),
     trustProxy: bool(env, 'TRUST_PROXY') === true,
@@ -124,9 +164,12 @@ export function testConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     anthropicApiKey: null,
     claudeModel: DEFAULT_CLAUDE_MODEL,
     imageProvider: null,
+    imageProviders: [],
     openaiApiKey: null,
     openaiImageModel: DEFAULT_OPENAI_IMAGE_MODEL,
     openaiBaseUrl: DEFAULT_OPENAI_BASE_URL,
+    geminiApiKey: null,
+    geminiImageModel: DEFAULT_GEMINI_IMAGE_MODEL,
     accessToken: null,
     rateLimitPer10Min: DEFAULT_RATE_LIMIT_PER_10MIN,
     trustProxy: false,

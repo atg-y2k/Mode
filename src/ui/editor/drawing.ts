@@ -143,3 +143,30 @@ export function withAlpha(hex: string, alpha: number): string {
   const n = m ? parseInt(m[1], 16) : 0xffffff;
   return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
 }
+
+/** Pill with a color dot and the hex value (eyedropper loupe). */
+export function drawSwatchLabel(ctx: Ctx, hex: string, at: Pt): void {
+  ctx.save();
+  ctx.font = '600 12px ui-monospace, SFMono-Regular, Menlo, monospace';
+  const text = hex.toUpperCase();
+  const tw = ctx.measureText(text).width;
+  const w = tw + 36;
+  const h = 24;
+  const x = at.x - w / 2;
+  const y = at.y - h / 2;
+  ctx.fillStyle = 'rgba(0,0,0,0.75)';
+  ctx.beginPath();
+  ctx.roundRect(x, y, w, h, 12);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(x + 13, at.y, 6, 0, Math.PI * 2);
+  ctx.fillStyle = hex;
+  ctx.fill();
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+  ctx.stroke();
+  ctx.fillStyle = OVERLAY_INK;
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, x + 25, at.y + 0.5);
+  ctx.restore();
+}

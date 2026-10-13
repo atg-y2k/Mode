@@ -8,7 +8,7 @@
  * kept (flat ≈ none, gloss ≈ most).
  */
 import type { PaintFinish } from '../../shared/types';
-import { hexToRgb, labToSrgb8Into, rgb8ToLabInto, rgbToLab } from './color';
+import { hexToRgb, labArrayToSrgb8, rgbaToLabArray, rgbToLab } from './color';
 import type { ImageDataLike, Mask } from './types';
 
 export interface RegionStats {
@@ -51,11 +51,6 @@ const KNEE = 0.6;
 
 const HIST_BINS = 1001; // L quantized to 0.1
 
-/** Overlap of image and mask (they should be the same size; be defensive). */
-function overlap(src: ImageDataLike, mask: Mask): { w: number; h: number } {
-  return { w: Math.min(src.width, mask.width), h: Math.min(src.height, mask.height) };
-}
-
 /** Bounding box of mask > 0 within the first w×h pixels, or null. */
 function boundsWithin(mask: Mask, w: number, h: number): { x0: number; y0: number; x1: number; y1: number } | null {
   const md = mask.data;
@@ -85,33 +80,47 @@ function boundsWithin(mask: Mask, w: number, h: number): { x0: number; y0: numbe
   return { x0, y0, x1, y1 };
 }
 
+/**
+ * Covered span [start, end] of mask row `row` (offset of the row's first
+ * pixel) between x0 and x1, or null when that part of the row is empty.
+ */
+function rowSpan(md: Uint8Array, row: number, x0: number, x1: number): [number, number] | null {
+  let s = x0;
+  while (s <= x1 && md[row + s] === 0) s++;
+  if (s > x1) return null;
+  let e = x1;
+  while (md[row + e] === 0) e--;
+  return [s, e];
+}
+
 /** Lab statistics of `src` inside `mask`. Empty mask -> count 0 and neutral values. */
 export function computeRegionStats(src: ImageDataLike, mask: Mask): RegionStats {
   const empty: RegionStats = { count: 0, meanL: 50, meanA: 0, meanB: 0, p10L: 50, p90L: 50 };
-  const { w, h } = overlap(src, mask);
+  const w = Math.min(src.width, mask.width);
+  const h = Math.min(src.height, mask.height);
   const bb = boundsWithin(mask, w, h);
   if (!bb) return empty;
   const sd = src.data;
   const md = mask.data;
-  const lab = new Float64Array(3);
+  const rowLab = new Float32Array((bb.x1 - bb.x0 + 1) * 3);
   const hist = new Float64Array(HIST_BINS);
   let wSum = 0, sL = 0, sA = 0, sB = 0;
   for (let y = bb.y0; y <= bb.y1; y++) {
     const mRow = y * mask.width;
+    const span = rowSpan(md, mRow, bb.x0, bb.x1);
+    if (!span) continue;
+    const [xs, xe] = span;
     const sRow = y * src.width;
-    for (let x = bb.x0; x <= bb.x1; x++) {
+    rgbaToLabArray(sd.subarray((sRow + xs) * 4, (sRow + xe + 1) * 4), rowLab, xe - xs + 1);
+    for (let x = xs, o = 0; x <= xe; x++, o += 3) {
       const cov = md[mRow + x];
       if (cov === 0) continue;
-      const p = (sRow + x) * 4;
-      rgb8ToLabInto(sd[p], sd[p + 1], sd[p + 2], lab, 0);
-      const L = lab[0];
+      const L = rowLab[o];
       wSum += cov;
       sL += L * cov;
-      sA += lab[1] * cov;
-      sB += lab[2] * cov;
-      let bin = Math.round(L * 10);
-      if (bin < 0) bin = 0;
-      else if (bin >= HIST_BINS) bin = HIST_BINS - 1;
+      sA += rowLab[o + 1] * cov;
+      sB += rowLab[o + 2] * cov;
+      const bin = Math.min(HIST_BINS - 1, Math.max(0, Math.round(L * 10)));
       hist[bin] += cov;
     }
   }
@@ -135,6 +144,38 @@ export function computeRegionStats(src: ImageDataLike, mask: Mask): RegionStats 
   };
 }
 
+/** 32-bit FNV-1a style checksum of the mask bytes (≈1 ms per megapixel). */
+function maskSignature(m: Mask): number {
+  const d = m.data;
+  let h = 0x811c9dc5 ^ m.width ^ (m.height << 16);
+  let i = 0;
+  if ((d.byteOffset & 3) === 0) {
+    const n32 = d.length >> 2;
+    const d32 = new Uint32Array(d.buffer, d.byteOffset, n32);
+    for (let k = 0; k < n32; k++) h = Math.imul(h ^ d32[k], 0x01000193);
+    i = n32 << 2;
+  }
+  for (; i < d.length; i++) h = Math.imul(h ^ d[i], 0x01000193);
+  return h >>> 0;
+}
+
+const statsMemo = new WeakMap<Mask, { src: ImageDataLike; sig: number; stats: RegionStats }>();
+
+/**
+ * computeRegionStats with a per-mask memo: reused while the same `src` is
+ * passed and the mask bytes are unchanged (checked with a checksum, so
+ * in-place mask edits invalidate it). applyPaint uses it when no `stats`
+ * are given, so repainting a region a different color skips the stats pass.
+ */
+export function regionStatsMemo(src: ImageDataLike, mask: Mask): RegionStats {
+  const sig = maskSignature(mask);
+  const hit = statsMemo.get(mask);
+  if (hit && hit.src === src && hit.sig === sig) return hit.stats;
+  const stats = computeRegionStats(src, mask);
+  statsMemo.set(mask, { src, sig, stats });
+  return stats;
+}
+
 /**
  * Linear for |d| ≤ KNEE·head, then a tanh shoulder that approaches `head`
  * asymptotically: monotonic, slope-continuous, never exceeds the headroom.
@@ -154,10 +195,51 @@ function smoothstep(e0: number, e1: number, x: number): number {
   return t * t * (3 - 2 * t);
 }
 
+/** Resolution of the lightness transfer tables (entries per L unit). */
+const TABLE_RES = 20;
+const TABLE_SIZE = 100 * TABLE_RES + 2;
+
+/**
+ * Everything in applyPaint that depends only on the original lightness L,
+ * tabulated once per call: painted lightness before the finish (lp), the
+ * chroma scale (ratio) and the highlight blend weight (hw).
+ */
+interface PaintTables {
+  lp: Float32Array;
+  ratio: Float32Array;
+  hw: Float32Array;
+}
+
+function buildPaintTables(targetL: number, st: RegionStats, finish: PaintFinish): PaintTables {
+  const lp = new Float32Array(TABLE_SIZE);
+  const ratio = new Float32Array(TABLE_SIZE);
+  const hw = new Float32Array(TABLE_SIZE);
+  const meanL = st.meanL;
+  const kScale = Math.min(K_SCALE_MAX, Math.max(K_SCALE_MIN, (targetL + 16) / (Math.max(0, meanL) + 16)));
+  const k = SHADING_K * kScale;
+  const headUp = Math.max(0, 100 - targetL);
+  const headDown = Math.max(0, targetL);
+  const hiFactor = FINISH_HIGHLIGHT[finish] ?? 0;
+  const p90 = st.p90L;
+  // The highlight blend ramps in over a band above p90 that scales with the
+  // region's lightness spread, so only real highlights get the full effect.
+  const hiEnd = p90 + Math.max(3, (st.p90L - st.p10L) * 0.75);
+  for (let i = 0; i < TABLE_SIZE; i++) {
+    const L = i / TABLE_RES;
+    const d = (L - meanL) * k;
+    const v = d >= 0 ? targetL + softLimit(d, headUp) : targetL - softLimit(-d, headDown);
+    lp[i] = v;
+    ratio[i] = Math.min(1.15, Math.max(0, (v + 16) / (targetL + 16)));
+    hw[i] = hiFactor > 0 && L > p90 && L > v ? hiFactor * smoothstep(p90, hiEnd, L) : 0;
+  }
+  return { lp, ratio, hw };
+}
+
 /**
  * Paints `mask` area. Reads shading from `src` (the ORIGINAL photo) and writes
  * into `dst` (the composite so far, same size), blending by mask coverage × strength.
- * Pixels where mask = 0 are untouched. `stats` may be passed to skip recomputation.
+ * Pixels where mask = 0 are untouched. `stats` may be passed to skip recomputation
+ * (otherwise they come from regionStatsMemo).
  *
  * Per pixel (Lab):
  * - Lightness: L' = targetL + (L − meanL)·k. k = 0.9 scaled by the headroom
@@ -194,74 +276,67 @@ export function applyPaint(
   const h = Math.min(src.height, dst.height, mask.height);
   const bb = boundsWithin(mask, w, h);
   if (!bb) return;
-  const st = stats ?? computeRegionStats(src, mask);
-  if (st.count <= 0) return;
+  const st = stats ?? regionStatsMemo(src, mask);
+  if (!(st.count > 0)) return;
 
-  const tL = target.l, tA = target.a, tB = target.b;
-  const meanL = st.meanL, meanA = st.meanA, meanB = st.meanB;
-  const kScale = Math.min(K_SCALE_MAX, Math.max(K_SCALE_MIN, (tL + 16) / (Math.max(0, meanL) + 16)));
-  const k = SHADING_K * kScale;
-  const headUp = Math.max(0, 100 - tL);
-  const headDown = Math.max(0, tL);
-  const invT16 = 1 / (tL + 16);
-
-  const hiFactor = FINISH_HIGHLIGHT[opts.finish] ?? 0;
-  const p90 = st.p90L;
-  // The highlight blend ramps in over a band above p90 that scales with the
-  // region's lightness spread, so only real highlights get the full effect.
-  const hiBand = Math.max(3, (st.p90L - st.p10L) * 0.75);
-  const hiEnd = p90 + hiBand;
+  const { lp: lpT, ratio: ratioT, hw: hwT } = buildPaintTables(target.l, st, opts.finish);
+  const tA = target.a, tB = target.b;
+  const offA = CHROMA_KEEP * st.meanA;
+  const offB = CHROMA_KEEP * st.meanB;
+  const maxIdx = TABLE_SIZE - 2;
 
   const sd = src.data;
   const dd = dst.data;
   const md = mask.data;
-  const lab = new Float64Array(3);
-  const rgb = new Float64Array(3);
+  const row = new Float32Array((bb.x1 - bb.x0 + 1) * 3);
   const covScale = strength / 255;
 
   for (let y = bb.y0; y <= bb.y1; y++) {
     const mRow = y * mask.width;
+    const span = rowSpan(md, mRow, bb.x0, bb.x1);
+    if (!span) continue;
+    const [xs, xe] = span;
+    const n = xe - xs + 1;
     const sRow = y * src.width;
+    rgbaToLabArray(sd.subarray((sRow + xs) * 4, (sRow + xe + 1) * 4), row, n);
+
+    // Lab -> painted Lab, in place.
+    for (let o = 0, end = n * 3; o < end; o += 3) {
+      const L = row[o], A = row[o + 1], B = row[o + 2];
+      const t = Math.min(maxIdx, Math.max(0, L * TABLE_RES));
+      const k = t | 0;
+      const f = t - k;
+      let Lp = lpT[k] + (lpT[k + 1] - lpT[k]) * f;
+      const ratio = ratioT[k] + (ratioT[k + 1] - ratioT[k]) * f;
+      let ap = tA * ratio + CHROMA_KEEP * A - offA;
+      let bp = tB * ratio + CHROMA_KEEP * B - offB;
+      const hw = hwT[k] + (hwT[k + 1] - hwT[k]) * f;
+      if (hw > 0) {
+        Lp += (L - Lp) * hw;
+        ap += (A - ap) * hw;
+        bp += (B - bp) * hw;
+      }
+      row[o] = Lp;
+      row[o + 1] = ap;
+      row[o + 2] = bp;
+    }
+    labArrayToSrgb8(row, row, n);
+
+    // Blend into dst by coverage × strength.
     const dRow = y * dst.width;
-    for (let x = bb.x0; x <= bb.x1; x++) {
+    for (let x = xs, o = 0; x <= xe; x++, o += 3) {
       const cov = md[mRow + x];
       if (cov === 0) continue;
-      const sp = (sRow + x) * 4;
-      rgb8ToLabInto(sd[sp], sd[sp + 1], sd[sp + 2], lab, 0);
-      const L = lab[0], A = lab[1], B = lab[2];
-
-      // Lightness: scaled shading with soft roll-off toward 0 / 100.
-      const d = (L - meanL) * k;
-      let Lp = d >= 0 ? tL + softLimit(d, headUp) : tL - softLimit(-d, headDown);
-
-      // Chroma follows lightness like a change of illumination would.
-      let ratio = (Lp + 16) * invT16;
-      if (ratio > 1.15) ratio = 1.15;
-      else if (ratio < 0) ratio = 0;
-      let ap = tA * ratio + CHROMA_KEEP * (A - meanA);
-      let bp = tB * ratio + CHROMA_KEEP * (B - meanB);
-
-      // Finish: keep (part of) specular highlights.
-      if (hiFactor > 0 && L > p90 && L > Lp) {
-        const wgt = hiFactor * smoothstep(p90, hiEnd, L);
-        if (wgt > 0) {
-          Lp += (L - Lp) * wgt;
-          ap += (A - ap) * wgt;
-          bp += (B - bp) * wgt;
-        }
-      }
-
-      labToSrgb8Into(Lp, ap, bp, rgb, 0);
       const alpha = cov * covScale;
       const dp = (dRow + x) * 4;
       if (alpha >= 1) {
-        dd[dp] = rgb[0];
-        dd[dp + 1] = rgb[1];
-        dd[dp + 2] = rgb[2];
+        dd[dp] = row[o];
+        dd[dp + 1] = row[o + 1];
+        dd[dp + 2] = row[o + 2];
       } else {
-        dd[dp] = dd[dp] + (rgb[0] - dd[dp]) * alpha;
-        dd[dp + 1] = dd[dp + 1] + (rgb[1] - dd[dp + 1]) * alpha;
-        dd[dp + 2] = dd[dp + 2] + (rgb[2] - dd[dp + 2]) * alpha;
+        dd[dp] = dd[dp] + (row[o] - dd[dp]) * alpha;
+        dd[dp + 1] = dd[dp + 1] + (row[o + 1] - dd[dp + 1]) * alpha;
+        dd[dp + 2] = dd[dp + 2] + (row[o + 2] - dd[dp + 2]) * alpha;
       }
     }
   }

@@ -50,6 +50,33 @@ export function sampleLab(lab: LabImage, cx: number, cy: number, r: number): Lab
   return { l: sl / n, a: sa / n, b: sb / n };
 }
 
+/**
+ * Edge-aware color under (cx, cy): the average of the (2r+1)² window over the
+ * pixels within `maxDE` (ΔE76) of the center pixel only — denoises without
+ * mixing in the color across an edge the user clicked next to.
+ */
+export function sampleLabSimilar(lab: LabImage, cx: number, cy: number, r: number, maxDE: number): Lab {
+  const { width: w, height: h, data } = lab;
+  const c = (cy * w + cx) * 3;
+  const cl = data[c], ca = data[c + 1], cb = data[c + 2];
+  const max2 = maxDE * maxDE;
+  const x0 = Math.max(0, cx - r), x1 = Math.min(w - 1, cx + r);
+  const y0 = Math.max(0, cy - r), y1 = Math.min(h - 1, cy + r);
+  let sl = 0, sa = 0, sb = 0, n = 0;
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0; x <= x1; x++) {
+      const o = (y * w + x) * 3;
+      const dl = data[o] - cl, da = data[o + 1] - ca, db = data[o + 2] - cb;
+      if (dl * dl + da * da + db * db > max2) continue;
+      sl += data[o];
+      sa += data[o + 1];
+      sb += data[o + 2];
+      n++;
+    }
+  }
+  return { l: sl / n, a: sa / n, b: sb / n }; // n ≥ 1: the center always qualifies
+}
+
 /** Pixel coordinates of a point, or null when it lies outside the image. */
 function pixelOf(lab: LabImage, p: Pt): { x: number; y: number } | null {
   if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) return null;
@@ -75,6 +102,8 @@ const ST_MATCH = 3; // within tolerance, not yet part of a filled span
  *   from a tiny two-color matte — how far it sits between the seed color and
  *   its most different unselected neighbour — so blended edge pixels (e.g. a
  *   wall meeting white trim) are neither left as a halo nor fully taken.
+ *   Single-pixel holes (all in-image 4-neighbours selected: noise specks,
+ *   nail holes) are filled, as paint would cover them.
  * A seed outside the image yields an empty mask.
  */
 export function magicWand(lab: LabImage, seed: Pt, opts: WandOptions): Mask {
@@ -149,25 +178,43 @@ export function magicWand(lab: LabImage, seed: Pt, opts: WandOptions): Mask {
 
   const md = mask.data;
   for (let i = 0; i < n; i++) if (st[i] === ST_FILLED) md[i] = 255;
-  softenWandEdge(lab, md, st, ref);
+  softenWandEdge(lab, md, st, ref, tol);
   return mask;
 }
 
-/** Partial coverage for unselected pixels 4-adjacent to the selection (see magicWand). */
-function softenWandEdge(lab: LabImage, md: Uint8Array, st: Uint8Array, ref: Lab): void {
+/**
+ * Partial coverage for unselected pixels 4-adjacent to the selection (see
+ * magicWand). When the pixel is not a plausible mix of the seed color and its
+ * most different neighbour (off the line between them), it falls back to a
+ * conservative ramp: partial coverage only up to 1.5 × tolerance.
+ */
+function softenWandEdge(lab: LabImage, md: Uint8Array, st: Uint8Array, ref: Lab, tol: number): void {
   const { width: w, height: h, data } = lab;
+  const tol2 = tol * tol;
   for (let y = 0; y < h; y++) {
     const row = y * w;
     for (let x = 0; x < w; x++) {
       const i = row + x;
       if (st[i] === ST_FILLED) continue;
-      // Selected 4-neighbours; out-of-image sides count as selected for pinhole detection.
+      // Count in-image 4-neighbours and how many of them are selected.
       let sel = 0;
       let inImage = 0;
-      if (x > 0) { inImage++; if (st[i - 1] === ST_FILLED) sel++; }
-      if (x < w - 1) { inImage++; if (st[i + 1] === ST_FILLED) sel++; }
-      if (y > 0) { inImage++; if (st[i - w] === ST_FILLED) sel++; }
-      if (y < h - 1) { inImage++; if (st[i + w] === ST_FILLED) sel++; }
+      if (x > 0) {
+        inImage++;
+        if (st[i - 1] === ST_FILLED) sel++;
+      }
+      if (x < w - 1) {
+        inImage++;
+        if (st[i + 1] === ST_FILLED) sel++;
+      }
+      if (y > 0) {
+        inImage++;
+        if (st[i - w] === ST_FILLED) sel++;
+      }
+      if (y < h - 1) {
+        inImage++;
+        if (st[i + w] === ST_FILLED) sel++;
+      }
       if (sel === 0) continue;
       if (sel === inImage) {
         // Single-pixel pinhole (noise speck, nail hole): paint covers it.
@@ -176,9 +223,10 @@ function softenWandEdge(lab: LabImage, md: Uint8Array, st: Uint8Array, ref: Lab)
       }
       const o = i * 3;
       const pl = data[o] - ref.l, pa = data[o + 1] - ref.a, pb = data[o + 2] - ref.b;
+      const p2 = pl * pl + pa * pa + pb * pb;
       // "Other" color: the unselected 8-neighbour (or the pixel itself) farthest from the seed color.
       let vl = pl, va = pa, vb = pb;
-      let best = pl * pl + pa * pa + pb * pb;
+      let best = p2;
       for (let dy = -1; dy <= 1; dy++) {
         const yy = y + dy;
         if (yy < 0 || yy >= h) continue;
@@ -200,12 +248,19 @@ function softenWandEdge(lab: LabImage, md: Uint8Array, st: Uint8Array, ref: Lab)
       }
       if (best < 1e-6) continue;
       // Position of p along seed → other: 0 at the seed color, 1 at the other color.
-      const t = (pl * vl + pa * va + pb * vb) / best;
-      const alpha = 1 - t;
+      const dot = pl * vl + pa * va + pb * vb;
+      const t = dot / best;
+      const perp2 = p2 - (dot * dot) / best;
+      let alpha: number;
+      if (t >= 0 && t <= 1 && perp2 <= 0.25 * p2 + 0.25 * tol2) alpha = 1 - t;
+      else alpha = tol > 0 ? (1.5 * tol - Math.sqrt(p2)) / (0.5 * tol) : 0;
       if (alpha > 0) md[i] = Math.round(Math.min(1, alpha) * 255);
     }
   }
 }
+
+/** Neighbours within this ΔE76 of the clicked pixel count as noise around the same color. */
+const REFERENCE_NOISE_DE = 8;
 
 export interface SmartBrushOptions extends BrushOptions {
   /** Max ΔE from the reference color. */
@@ -289,7 +344,8 @@ function smartCapsule(
 /**
  * One smart-brush stamp: like stampBrush but only affects pixels whose color is
  * within tolerance of `reference` (default: the color under (x, y), averaged
- * over its 3×3 neighbourhood to ignore sensor noise; clamped to the image).
+ * with its similar 3×3 neighbours to ignore sensor noise without mixing in
+ * the color across a nearby edge; clamped to the image).
  * Coverage ramps down over the last 25% of the tolerance, giving soft but
  * clean wall/trim separation.
  * Returns the reference used so a drag stroke can keep it constant.
@@ -309,7 +365,7 @@ export function smartBrushStamp(
     }
     const cx = Math.min(lab.width - 1, Math.max(0, Math.floor(x)));
     const cy = Math.min(lab.height - 1, Math.max(0, Math.floor(y)));
-    ref = sampleLab(lab, cx, cy, 1);
+    ref = sampleLabSimilar(lab, cx, cy, 1, REFERENCE_NOISE_DE);
   }
   smartCapsule(lab, mask, x, y, x, y, opts, ref);
   return ref;

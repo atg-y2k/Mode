@@ -7,7 +7,7 @@
  * left, so lit faces are top-left and shadow sides bottom-right.
  */
 import { PathW, SvgDoc, el, ellipsePath, g, leafPath, path, rect, smoothClosed, smoothOpen, taper, use, type Attrs, type Stop } from './svg';
-import { clamp, f, hexToHsl, luminance, tone, type Pt, type Rng } from './util';
+import { clamp, f, hexToHsl, luminance, mix, tone, type Pt, type Rng } from './util';
 
 // ---------------------------------------------------------------------------
 // Tones
@@ -19,6 +19,9 @@ export interface FoliageTones {
   mid: string;
   light: string;
   hi: string;
+  /** Fill for whole leaves / fronds on the lit side: between mid and light, so a contrasting
+   * highlight color (variegation) reads as a mix instead of solid off-color leaves. */
+  leaf: string;
 }
 
 /** Five-step tone ramp from the main foliage color (+ optional highlight color). */
@@ -30,6 +33,7 @@ export function foliageTones(foliage: string, foliage2?: string): FoliageTones {
     mid: foliage,
     light,
     hi: tone(light, 0.3),
+    leaf: mix(foliage, light, 0.55),
   };
 }
 
@@ -281,7 +285,7 @@ export function leafSpecks(rng: Rng, clumps: Clump[], t: FoliageTones, amount = 
       const lit = dx * LIGHT.x + dy * LIGHT.y;
       const ang = rng() * Math.PI * 2;
       const len = s * rng.range(0.7, 1.25);
-      const d = leafPath({ x: c.x + dx * c.r, y: c.y + dy * c.r * sy }, ang, len, len * 0.55, 0, 1);
+      const d = speckPath(c.x + dx * c.r, c.y + dy * c.r * sy, ang, len, len * 0.5);
       if (lit > 0.35) {
         if (rng.chance(0.3)) lay.add(t.hi, d, 0.75);
         else lay.add(t.light, d, 0.8);
@@ -289,6 +293,34 @@ export function leafSpecks(rng: Rng, clumps: Clump[], t: FoliageTones, amount = 
     }
   }
   return lay.render();
+}
+
+/** Tiny two-quad leaf mark (cheaper than leafPath; for texture specks). */
+export function speckPath(x: number, y: number, ang: number, len: number, width: number): string {
+  const c = Math.cos(ang);
+  const s = Math.sin(ang);
+  const tx = x + c * len;
+  const ty = y + s * len;
+  const mx = x + c * len * 0.5;
+  const my = y + s * len * 0.5;
+  return new PathW(1)
+    .M(x, y)
+    .Q(mx - s * width, my + c * width, tx, ty)
+    .Q(mx + s * width, my - c * width, x, y)
+    .Z()
+    .toString();
+}
+
+/** Regular star polygon (n points) centered at (x, y). */
+export function starPath(x: number, y: number, rOuter: number, rInner: number, n: number, rot: number): string {
+  const p = new PathW(1);
+  for (let i = 0; i < n * 2; i++) {
+    const a = rot + (i * Math.PI) / n;
+    const r = i % 2 ? rInner : rOuter;
+    if (i === 0) p.M(x + Math.cos(a) * r, y + Math.sin(a) * r);
+    else p.L(x + Math.cos(a) * r, y + Math.sin(a) * r);
+  }
+  return p.Z().toString();
 }
 
 // ---------------------------------------------------------------------------
@@ -339,6 +371,14 @@ export class FlowerPainter {
   blossom(x: number, y: number, s: number): void {
     const t = this.tones;
     const a0 = this.rng() * Math.PI * 2;
+    if (s < 6) {
+      // Small at any display size: a scalloped disc reads the same and is far cheaper.
+      this.circ(t.shade, x + s * 0.18, y + s * 0.22, s);
+      this.lay.add(t.base, starPath(x, y, s * 0.95, s * 0.7, 5, a0));
+      this.circ(t.light, x - s * 0.25, y - s * 0.28, s * 0.32, 0.9);
+      this.circ(t.center, x, y, s * 0.22);
+      return;
+    }
     this.circ(t.shade, x + s * 0.14, y + s * 0.18, s * 1.02);
     for (let k = 0; k < 5; k++) {
       const a = a0 + (k * Math.PI * 2) / 5;
@@ -349,19 +389,17 @@ export class FlowerPainter {
   }
 
   /** Rounded head of many small florets (hydrangea, phlox, lilac, yarrow). */
-  cluster(x: number, y: number, s: number, florets = 14): void {
+  cluster(x: number, y: number, s: number, florets = 14, sy = 0.85): void {
     const t = this.tones;
-    this.circ(t.shade, x + s * 0.06, y + s * 0.08, s);
+    this.lay.add(t.shade, ellipsePath(x + s * 0.06, y + s * 0.08, s, s * sy));
     for (let i = 0; i < florets; i++) {
       const a = this.rng() * Math.PI * 2;
       const rr = Math.sqrt(this.rng()) * s * 0.74;
-      const fx = x + Math.cos(a) * rr;
-      const fy = y + Math.sin(a) * rr;
-      const lit = (Math.cos(a) * LIGHT.x + Math.sin(a) * LIGHT.y) * (rr / s);
-      const fill = lit > 0.15 ? t.light : lit < -0.35 ? t.shade : t.base;
-      const fr = s * this.rng.range(0.2, 0.27);
-      this.circ(fill, fx, fy, fr);
-      this.circ(t.shade, fx + fr * 0.1, fy + fr * 0.1, fr * 0.28, 0.9);
+      const dx = Math.cos(a);
+      const dy = Math.sin(a);
+      const lit = (dx * LIGHT.x + dy * LIGHT.y) * (rr / s);
+      const fill = lit > 0.12 ? t.light : lit < -0.35 ? t.shade : t.base;
+      this.circ(fill, x + dx * rr, y + dy * rr * sy, s * this.rng.range(0.19, 0.25));
     }
   }
 
@@ -407,12 +445,9 @@ export class FlowerPainter {
     const t = this.tones;
     const n = this.rng.chance(0.5) ? 5 : 6;
     const a0 = this.rng() * Math.PI * 2;
-    for (let k = 0; k < n; k++) {
-      const a = a0 + (k * Math.PI * 2) / n;
-      this.lay.add(t.shade, leafPath({ x: x + s * 0.1, y: y + s * 0.12 }, a, s, s * 0.6, 0, 1));
-      this.lay.add(Math.cos(a) * LIGHT.x + Math.sin(a) * LIGHT.y > 0.3 ? t.light : t.base, leafPath({ x, y }, a, s * 0.92, s * 0.55, 0, 1));
-    }
-    this.circ(t.center, x, y, s * 0.18);
+    this.lay.add(t.shade, starPath(x + s * 0.12, y + s * 0.15, s, s * 0.45, n, a0));
+    this.lay.add(t.base, starPath(x, y, s * 0.92, s * 0.42, n, a0));
+    this.circ(t.center, x, y, s * 0.2);
   }
 
   render(): string[] {

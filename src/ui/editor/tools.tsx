@@ -227,11 +227,25 @@ export function nextBrushRadius(radius: number, dir: 1 | -1): number {
   return Math.round(Math.max(2, Math.min(400, next)));
 }
 
+const NON_TEXT_INPUTS = new Set(['range', 'checkbox', 'radio', 'button', 'submit', 'reset', 'color', 'file', 'image']);
+
+/** Elements that take typed text: single-key shortcuts must not fire there. */
 export function isTypingTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
   if (target.isContentEditable) return true;
   const tag = target.tagName;
-  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+  if (tag === 'TEXTAREA' || tag === 'SELECT') return true;
+  return tag === 'INPUT' && !NON_TEXT_INPUTS.has((target as HTMLInputElement).type);
+}
+
+/** Focusable controls that use arrows / Enter / Space / Delete themselves. */
+export function isControlTarget(target: EventTarget | null): boolean {
+  return (
+    target instanceof HTMLElement &&
+    !!target.closest(
+      'button, a[href], input, select, textarea, [role="slider"], [role="tab"], [role="radio"], [role="switch"], [role="menuitem"], [contenteditable="true"]',
+    )
+  );
 }
 
 /** A modal dialog or menu owns the keyboard. */

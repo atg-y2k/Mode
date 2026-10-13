@@ -24,6 +24,7 @@ import type { z } from 'zod';
 import {
   API_PATHS,
   AnalyzeRequestSchema,
+  ApiErrorBodySchema,
   AssetListRequestSchema,
   AssetListResultSchema,
   DesignSuggestionSchema,
@@ -32,6 +33,7 @@ import {
   RenderRequestSchema,
   SpaceAnalysisResultSchema,
   SuggestRequestSchema,
+  type ApiErrorCode,
   type GenerateAssetRequest,
   type GeneratedAsset,
   type HealthResponse,
@@ -46,7 +48,7 @@ import {
   type ClaudeUsage,
   type StructuredCall,
 } from './claude';
-import type { ServerConfig } from './config';
+import { IMAGE_PROVIDER_LABELS, type ServerConfig } from './config';
 import { parseImageDataUrl, toDataUrl, type ImageData64 } from './dataUrl';
 import { ApiHttpError, STATUS_CLIENT_CLOSED, aiDisabled, badRequest, imageProviderDisabled, redact } from './errors';
 import { createImageProvider, type ImageProvider } from './imageProvider';
@@ -91,9 +93,41 @@ export interface AppDeps {
   log?: (line: string) => void;
   /** Clock for the rate limiter (tests). */
   now?: () => number;
+  /**
+   * Registers additional routes (e.g. the Studio API) after the shared /api
+   * middleware (access token, body limit, logging) and before the /api 404
+   * and static fallbacks.
+   */
+  extraRoutes?: (app: Hono<AppEnv>, ctx: RouteContext) => void;
 }
 
-type AppEnv = { Variables: { errorCode: string; note: string } };
+export type AppEnv = { Variables: { errorCode: string; note: string } };
+
+/** Shared services handed to `extraRoutes`. */
+export interface RouteContext {
+  config: ServerConfig;
+  log: (line: string) => void;
+  /** Counts one AI call against the client's rate limit; throws a 429 ApiHttpError when over it. */
+  consumeAiCall: (c: Context<AppEnv>) => void;
+  /** The Claude client in use (lazily created), or null when AI is off. */
+  claudeClient: () => ClaudeClientLike | null;
+  /** Adds a note (e.g. token usage) to this request's log line. */
+  noteForLog: (c: Context<AppEnv>, note: string) => void;
+}
+
+const API_ERROR_CODES = new Set<string>(ApiErrorBodySchema.shape.error.shape.code.options);
+
+/** Errors from other server modules that carry an API error code and status (duck-typed). */
+function toApiHttpError(err: unknown): ApiHttpError | null {
+  if (err instanceof ApiHttpError) return err;
+  if (typeof err !== 'object' || err === null) return null;
+  const e = err as { code?: unknown; status?: unknown; message?: unknown; retryAfterSec?: unknown };
+  if (typeof e.code !== 'string' || !API_ERROR_CODES.has(e.code)) return null;
+  if (typeof e.status !== 'number' || e.status < 400 || e.status > 599) return null;
+  return new ApiHttpError(e.code as ApiErrorCode, typeof e.message === 'string' ? e.message : 'Request failed.', e.status, {
+    retryAfterSec: typeof e.retryAfterSec === 'number' ? e.retryAfterSec : null,
+  });
+}
 
 /** Claude rejects images over 5 MB. */
 const CLAUDE_MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -115,9 +149,13 @@ interface Deadline {
   timedOut: () => boolean;
 }
 
-function deadline(parent: AbortSignal, ms: number): Deadline {
+/** A time limit chained to the request (or to an outer deadline). */
+function deadline(parent: AbortSignal | Deadline, ms: number): Deadline {
   const timer = AbortSignal.timeout(ms);
-  return { signal: AbortSignal.any([parent, timer]), timedOut: () => timer.aborted };
+  if (parent instanceof AbortSignal) {
+    return { signal: AbortSignal.any([parent, timer]), timedOut: () => timer.aborted };
+  }
+  return { signal: AbortSignal.any([parent.signal, timer]), timedOut: () => timer.aborted || parent.timedOut() };
 }
 
 function sha256(text: string): Buffer {
@@ -171,10 +209,17 @@ export function createApp(deps: AppDeps) {
   // ---- dependencies -------------------------------------------------------
 
   const aiEnabled = config.aiEnabled && deps.claude !== null;
+  let claudeClient: ClaudeClientLike | null = null;
+  const getClaudeClient = (): ClaudeClientLike | null => {
+    if (!aiEnabled) return null;
+    claudeClient ??= deps.claude ?? createAnthropicClient(config);
+    return claudeClient;
+  };
   let claudeService: ClaudeService | null = null;
   const claude = (): ClaudeService | null => {
-    if (!aiEnabled) return null;
-    claudeService ??= createClaudeService(deps.claude ?? createAnthropicClient(config), config.claudeModel);
+    const client = getClaudeClient();
+    if (!client) return null;
+    claudeService ??= createClaudeService(client, config.claudeModel);
     return claudeService;
   };
   const requireClaude = (): ClaudeService => {
@@ -326,6 +371,12 @@ export function createApp(deps: AppDeps) {
       imageProvider: imageProvider
         ? { enabled: true, name: imageProvider.name, model: imageProvider.model }
         : { enabled: false, name: null, model: null },
+      imageProviders: config.imageProviders.map((p) => ({
+        id: p.id,
+        name: IMAGE_PROVIDER_LABELS[p.id],
+        model: p.model,
+        isDefault: p.isDefault,
+      })),
     };
     return c.json(body);
   });
@@ -427,7 +478,7 @@ export function createApp(deps: AppDeps) {
     if (service) {
       try {
         const { system } = await catalogContext();
-        const planDeadline = deadline(d.signal, DEADLINES.photoPlan);
+        const planDeadline = deadline(d, DEADLINES.photoPlan);
         const out = await service.structured({
           task: 'generate-asset:photo',
           schema: PhotoAssetPlanSchema,
@@ -491,7 +542,7 @@ export function createApp(deps: AppDeps) {
     if (service && image.base64.length <= CLAUDE_MAX_IMAGE_BYTES) {
       try {
         const { system } = await catalogContext();
-        const promptDeadline = deadline(d.signal, DEADLINES.renderPrompt);
+        const promptDeadline = deadline(d, DEADLINES.renderPrompt);
         const out = await service.structured({
           task: 'render-prompt',
           schema: RenderPromptSchema,
@@ -517,7 +568,23 @@ export function createApp(deps: AppDeps) {
     return c.json(body);
   });
 
-  const knownApiPaths = new Set<string>(Object.values(API_PATHS));
+  deps.extraRoutes?.(app, {
+    config,
+    log,
+    consumeAiCall,
+    claudeClient: getClaudeClient,
+    noteForLog: (c, note) => c.set('note', note),
+  });
+
+  // Wrong method on one of the routes above gets 405; everything else 404.
+  const knownApiPaths = new Set<string>([
+    API_PATHS.health,
+    API_PATHS.analyze,
+    API_PATHS.suggest,
+    API_PATHS.assetList,
+    API_PATHS.generateAsset,
+    API_PATHS.render,
+  ]);
   app.all('/api/*', (c) => {
     if (knownApiPaths.has(c.req.path)) throw new ApiHttpError('bad_request', `${c.req.method} is not supported here.`, 405);
     throw new ApiHttpError('bad_request', `Unknown API endpoint: ${c.req.path}`, 404);
@@ -558,8 +625,9 @@ export function createApp(deps: AppDeps) {
 
   app.onError((err, c) => {
     let apiErr: ApiHttpError;
-    if (err instanceof ApiHttpError) {
-      apiErr = err;
+    const known = toApiHttpError(err);
+    if (known) {
+      apiErr = known;
     } else if (err instanceof HTTPException) {
       apiErr =
         err.status === 413

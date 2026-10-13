@@ -223,6 +223,41 @@ export function labToSrgb8Into(l: number, a: number, b: number, out: Float32Arra
   out[o + 2] = linearToSrgb8(I_ZR * x + I_ZG * y + I_ZB * z);
 }
 
+/**
+ * In-place-safe batch version of labToSrgb8Into: `count` Lab triples from
+ * `lab` -> sRGB 0..255 floats (unrounded, clipped per channel) into `out`
+ * (may be the same array). Constants are hoisted for the hot loop.
+ */
+export function labArrayToSrgb8(lab: Float32Array, out: Float32Array, count: number): void {
+  const lut = LINEAR_TO_SRGB8_LUT;
+  const S = LIN_LUT_SIZE;
+  const eps = LAB_EPS, kappa = LAB_KAPPA, lThresh = LAB_KAPPA * LAB_EPS;
+  const xn = XN, yn = YN, zn = ZN;
+  const xr = I_XR, xg = I_XG, xb = I_XB;
+  const yr = I_YR, yg = I_YG, yb = I_YB;
+  const zr = I_ZR, zg = I_ZG, zb = I_ZB;
+  const invKappa = 1 / kappa;
+  for (let i = 0, o = 0; i < count; i++, o += 3) {
+    const l = lab[o];
+    const fy = (l + 16) * (1 / 116);
+    const fx = fy + lab[o + 1] * 0.002;
+    const fz = fy - lab[o + 2] * 0.005;
+    const fx3 = fx * fx * fx;
+    const fz3 = fz * fz * fz;
+    const x = xn * (fx3 > eps ? fx3 : (116 * fx - 16) * invKappa);
+    const y = yn * (l > lThresh ? fy * fy * fy : l * invKappa);
+    const z = zn * (fz3 > eps ? fz3 : (116 * fz - 16) * invKappa);
+    // linear RGB, clipped to [0, 1], then the interpolated transfer-curve table.
+    const r = Math.min(1, Math.max(0, xr * x + xg * y + xb * z)) * S;
+    const g = Math.min(1, Math.max(0, yr * x + yg * y + yb * z)) * S;
+    const b = Math.min(1, Math.max(0, zr * x + zg * y + zb * z)) * S;
+    const kr = r | 0, kg = g | 0, kb = b | 0;
+    out[o] = lut[kr] + (lut[kr + 1] - lut[kr]) * (r - kr);
+    out[o + 1] = lut[kg] + (lut[kg + 1] - lut[kg]) * (g - kg);
+    out[o + 2] = lut[kb] + (lut[kb + 1] - lut[kb]) * (b - kb);
+  }
+}
+
 function channel01(v: number): number {
   if (!(v > 0)) return 0;
   return v >= 255 ? 1 : v / 255;

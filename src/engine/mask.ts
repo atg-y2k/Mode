@@ -600,11 +600,22 @@ function invertBuffer(a: Uint8Array): void {
 }
 
 /**
+ * Shape of morphology step `i`: 8-neighbourhood ("square") steps make up
+ * ~40% of the steps, spread evenly, the rest are 4-neighbourhood ("cross").
+ * n steps then form an octagon with vertices near (n, 0.4n) — close to a
+ * regular octagon around a disc of radius n (plain alternation overshoots
+ * the disc area by ~20%).
+ */
+function stepShape(i: number): 'cross' | 'square' {
+  return Math.floor((i + 1) * SQUARE_STEP_RATIO) > Math.floor(i * SQUARE_STEP_RATIO) ? 'square' : 'cross';
+}
+const SQUARE_STEP_RATIO = 0.4;
+
+/**
  * Grayscale dilation (max) or erosion (min) by an octagonal approximation of
- * a disc of `radius` px: alternating 4- and 8-neighbourhood steps (erosion =
- * dilation of the inverse). Soft edges keep their profile, shifted. A
- * fractional radius blends in the last step. Work is limited to the mask
- * bounds plus the reach.
+ * a disc of `radius` px (see stepShape; erosion = dilation of the inverse).
+ * Soft edges keep their profile, shifted. A fractional radius blends in the
+ * last step. Work is limited to the mask bounds plus the reach.
  */
 function morph(m: Mask, radius: number, isMax: boolean): void {
   if (!Number.isFinite(radius) || radius <= 0) return;
@@ -622,11 +633,11 @@ function morph(m: Mask, radius: number, isMax: boolean): void {
   for (let y = 0; y < rh; y++) a.set(m.data.subarray((ry + y) * m.width + rx, (ry + y) * m.width + rx + rw), y * rw);
   if (!isMax) invertBuffer(a);
   for (let s = 0; s < steps; s++) {
-    dilateStep(a, b, tmp, rw, rh, s % 2 === 0 ? 'cross' : 'square');
+    dilateStep(a, b, tmp, rw, rh, stepShape(s));
     [a, b] = [b, a];
   }
   if (frac > 1e-6) {
-    dilateStep(a, b, tmp, rw, rh, steps % 2 === 0 ? 'cross' : 'square');
+    dilateStep(a, b, tmp, rw, rh, stepShape(steps));
     for (let i = 0; i < a.length; i++) a[i] = Math.round(a[i] + (b[i] - a[i]) * frac);
   }
   if (!isMax) invertBuffer(a);

@@ -24,9 +24,11 @@ const server = serve(
   (info) => {
     const host = config.host ?? 'localhost';
     const ai = config.aiEnabled ? `on (${config.claudeModel})` : 'off (set ANTHROPIC_API_KEY to enable)';
-    const images = config.imageProvider ? `${config.imageProvider} (${config.openaiImageModel})` : 'off';
+    const images = config.imageProviders.length
+      ? config.imageProviders.map((p) => `${p.id} (${p.model})${p.isDefault ? ' [default]' : ''}`).join(', ')
+      : 'off';
     console.log(`[mode] server listening on http://${host}:${info.port}`);
-    console.log(`[mode] AI: ${ai} · image provider: ${images} · access token: ${config.accessToken ? 'required' : 'not required'}`);
+    console.log(`[mode] AI: ${ai} · image providers: ${images} · access token: ${config.accessToken ? 'required' : 'not required'}`);
     console.log(
       config.staticDir
         ? `[mode] serving the web app from ${config.staticDir}`

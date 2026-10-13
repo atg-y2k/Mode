@@ -67,6 +67,21 @@ export interface GradOpts {
   spread?: 'pad' | 'reflect' | 'repeat';
 }
 
+/**
+ * Minimum size of the larger output dimension. Drawings use compact design
+ * coordinates (the viewBox); flat items get larger intrinsic width/height so
+ * consumers that rasterize at the natural size still get crisp pixels.
+ */
+export const MIN_EXTENT = 360;
+
+/** Intrinsic output size for a drawing of w × h design units (see MIN_EXTENT). */
+export function outputSize(w: number, h: number): { width: number; height: number } {
+  const rw = Math.max(1, Math.round(w));
+  const rh = Math.max(1, Math.round(h));
+  const s = Math.max(1, MIN_EXTENT / Math.max(rw, rh));
+  return { width: Math.max(1, Math.round(rw * s)), height: Math.max(1, Math.round(rh * s)) };
+}
+
 export class SvgDoc {
   private readonly defs: string[] = [];
   private readonly body: string[] = [];
@@ -170,12 +185,22 @@ export class SvgDoc {
     return id;
   }
 
+  /** Intrinsic width attribute of the output (viewBox stays in design units). */
+  get outWidth(): number {
+    return outputSize(this.w, this.h).width;
+  }
+
+  /** Intrinsic height attribute of the output. */
+  get outHeight(): number {
+    return outputSize(this.w, this.h).height;
+  }
+
   toString(): string {
     const w = Math.round(this.w);
     const h = Math.round(this.h);
     const defs = this.defs.length ? `<defs>${this.defs.join('')}</defs>` : '';
     return (
-      `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">` +
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${this.outWidth}" height="${this.outHeight}" viewBox="0 0 ${w} ${h}">` +
       defs +
       this.body.join('') +
       '</svg>'
@@ -259,6 +284,12 @@ export class PathW {
   }
   C(x1: number, y1: number, x2: number, y2: number, x: number, y: number): this {
     this.out += 'c' + this.nums([this.dx(x1), this.dy(y1), this.dx(x2), this.dy(y2), this.dx(x), this.dy(y)]);
+    this.moveTo(x, y);
+    return this;
+  }
+  /** Elliptical arc to (x, y). */
+  A(rx: number, ry: number, rot: number, large: 0 | 1, sweep: 0 | 1, x: number, y: number): this {
+    this.out += 'a' + this.nums([this.rd(rx), this.rd(ry), rot]) + ` ${large} ${sweep} ` + this.nums([this.dx(x), this.dy(y)]);
     this.moveTo(x, y);
     return this;
   }

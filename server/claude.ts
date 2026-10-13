@@ -251,8 +251,16 @@ export function mapClaudeError(err: unknown, model: string, timedOut = false): u
       502,
     );
   }
+  if (err instanceof Error && /could not resolve authentication/i.test(err.message)) {
+    // The SDK raises a plain Error (no typed class) when MODE_AI=on finds no credentials.
+    return new ApiHttpError(
+      'ai_disabled',
+      'AI is switched on but the server has no Anthropic credentials. Set ANTHROPIC_API_KEY in .env (or run `ant auth login`) and restart the server.',
+      503,
+    );
+  }
   if (err instanceof Anthropic.AnthropicError) {
-    // Client-side SDK errors, e.g. no credentials could be resolved (MODE_AI=on without a key).
+    // Other client-side SDK errors.
     return new ApiHttpError('upstream_error', `Claude request failed: ${redact(err.message, 200)}`, 502);
   }
   return err;
