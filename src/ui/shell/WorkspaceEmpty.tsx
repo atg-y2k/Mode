@@ -106,7 +106,7 @@ export function AddPhotosDropZone({ space }: { space: Space }) {
               ? 'Drop to add them.'
               : level === 'ready' || level === 'planning-only'
                 ? `Drop images here or choose them. Mode maps each photo automatically — ${outdoors ? 'facade, door, walkway, lawn, beds and paths' : 'walls, floor, ceiling, cabinetry and furniture'} — so you can start designing right away.`
-                : 'Drop images here or choose them. JPEG, PNG, WebP and HEIC (Safari) work; large photos are scaled down on this device.'}
+                : 'Drop images here or choose them. JPEG, PNG and WebP work; large photos are scaled down on this device.'}
           </p>
         </div>
         <Button variant="primary" size="lg" icon={<Camera className="size-5" />} onClick={() => pickPhotos(space.id)}>

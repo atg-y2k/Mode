@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { captureFromTags, readPhotoCapture } from './capture';
+import { captureFromTags, isoBoxesSound, readPhotoCapture } from './capture';
 import { jpegWithExif } from './exifFixture';
 
 /**
@@ -41,6 +41,39 @@ describe('readPhotoCapture (exifr lite)', () => {
     expect(await readPhotoCapture(new Blob([new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])]))).toBeUndefined();
     expect(await readPhotoCapture(new Blob([new Uint8Array([0xff, 0xd8, 0xff, 0xe1, 0x00])]))).toBeUndefined();
     expect(await readPhotoCapture(new Blob([]))).toBeUndefined();
+  });
+});
+
+/** An ISO-BMFF file: a 'ftyp heic' box, then `rest` (box headers as [size, kind] or raw zeros). */
+function isoFile(rest: ([number, string] | number)[]): Uint8Array {
+  const parts: number[] = [0, 0, 0, 24, ...[...'ftypheic\0\0\0\0mif1heic'].map((c) => c.charCodeAt(0))];
+  for (const r of rest) {
+    if (typeof r === 'number') parts.push(...new Array<number>(r).fill(0));
+    else {
+      const [size, kind] = r;
+      parts.push((size >>> 24) & 255, (size >>> 16) & 255, (size >>> 8) & 255, size & 255, ...[...kind].map((c) => c.charCodeAt(0)));
+      parts.push(...new Array<number>(Math.max(0, size - 8)).fill(0));
+    }
+  }
+  return new Uint8Array(parts);
+}
+
+describe('HEIC files exifr would loop on', () => {
+  it('skips a box of size 0 before the metadata (truncated or zero-padded download) instead of freezing', async () => {
+    const zeroPadded = isoFile([40]);
+    expect(isoBoxesSound(zeroPadded)).toBe(false);
+    expect(await readPhotoCapture(new Blob([zeroPadded as BlobPart], { type: 'image/heic' }))).toBeUndefined();
+  });
+
+  it('accepts sound boxes up to the metadata, and rejects a walk that runs off the end or never finds it', () => {
+    expect(isoBoxesSound(isoFile([[16, 'free'], [12, 'meta']]))).toBe(true);
+    expect(isoBoxesSound(isoFile([[400, 'mdat']]))).toBe(false);
+    expect(isoBoxesSound(isoFile([[16, 'free'], [4, 'junk'], [12, 'meta']]))).toBe(false);
+    expect(isoBoxesSound(isoFile([[16, 'free']]))).toBe(false);
+  });
+
+  it('still parses a well-formed HEIC without EXIF quickly', async () => {
+    expect(await readPhotoCapture(new Blob([isoFile([[16, 'free'], [12, 'meta']]) as BlobPart]))).toBeUndefined();
   });
 });
 

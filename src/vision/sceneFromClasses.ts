@@ -401,7 +401,7 @@ function separateFreestandingWalls(classes: ClassMap, grid: Uint8Array, kinds: Z
 /**
  * Kind fixes that need the whole picture: the main building vs neighbours
  * (and slivers such as a chimney split off by the roof, dropped), the front
- * door vs other / garage doors, and walks CLIPSeg took for drives.
+ * door vs other / garage doors, and walks CLIPSeg took for drives or patios.
  */
 function reclassify(found: Found[], W: number, interior: boolean): Found[] {
   if (interior) return found;
@@ -423,7 +423,7 @@ function reclassify(found: Found[], W: number, interior: boolean): Found[] {
     else d.kind = 'door';
   }
   const kept = found.filter((f) => !drop.has(f));
-  walksFromDrives(kept, W);
+  walksFromDrivesAndPatios(kept, W);
   return kept;
 }
 
@@ -467,20 +467,27 @@ const ENTRY_KINDS = new Set<ZoneKind>(['front-door', 'steps', 'porch']);
  * under a fifth of the house's width when the house was found (a walk is
  * 3–5 ft, a drive 10 ft or more) — or when it leads to the front door, steps
  * or porch rather than a garage door.
+ *
+ * "A paved patio" fires on a wide flagstone walk too. A patio-labelled part
+ * is a walkway only when it is a strip leading to the entry: it touches the
+ * front door, steps or porch (not a garage door), its typical width is under
+ * a quarter of the frame, and it runs up the frame for at least 60% of that
+ * width — a walk recedes toward the house, a patio seen from the yard is
+ * wide and shallow.
  */
-function walksFromDrives(found: Found[], W: number): void {
-  const drives = found.filter((f) => f.kind === 'driveway');
-  if (drives.length === 0) return;
+function walksFromDrivesAndPatios(found: Found[], W: number): void {
+  const paved = found.filter((f) => f.kind === 'driveway' || f.kind === 'patio');
+  if (paved.length === 0) return;
   const house = found.filter((f) => f.kind === 'facade' || f.kind === 'roof');
   const houseW = house.length ? Math.max(...house.map((f) => f.comp.x1)) - Math.min(...house.map((f) => f.comp.x0)) + 1 : 0;
   const narrowLimit = houseW >= W * 0.25 ? Math.min(W * 0.12, houseW * 0.2) : W * 0.12;
   const entries = found.filter((f) => ENTRY_KINDS.has(f.kind));
   const garages = found.filter((f) => f.kind === 'garage-door');
-  for (const f of drives) {
+  for (const f of paved) {
     const span = medianRowSpan(f, W);
-    const narrow = span < narrowLimit;
     const toEntry = span < W * 0.25 && entries.some((e) => touches(f, e, W)) && !garages.some((g) => touches(f, g, W));
-    if (narrow || toEntry) f.kind = 'walkway';
+    const strip = f.comp.y1 - f.comp.y0 + 1 >= span * 0.6;
+    if (f.kind === 'driveway' ? span < narrowLimit || toEntry : toEntry && strip) f.kind = 'walkway';
   }
 }
 

@@ -3,6 +3,7 @@
  * downscaled to a working size), decode to pixels, encode, and data URLs.
  */
 import type { ImageDataLike } from '../engine/types';
+import { heicUnsupportedError, looksLikeHeic } from './heic';
 
 /** Long edge of the working resolution used for editing & masks. */
 export const WORKING_MAX_SIZE = 1600;
@@ -134,11 +135,6 @@ interface Decoded {
   close(): void;
 }
 
-function isHeic(file: Blob): boolean {
-  const name = 'name' in file && typeof file.name === 'string' ? file.name : '';
-  return /^image\/hei[cf](-sequence)?$/i.test(file.type) || /\.(heic|heif)$/i.test(name);
-}
-
 async function decodeWithImageElement(blob: Blob): Promise<Decoded> {
   if (typeof Image === 'undefined') throw new Error('No image decoder available');
   const url = URL.createObjectURL(blob);
@@ -178,9 +174,9 @@ async function decode(blob: Blob): Promise<Decoded> {
   return decodeWithImageElement(blob);
 }
 
-/** Readable error for a file the browser could not decode. */
-function decodeError(file: Blob): Error {
-  if (isHeic(file)) return new Error("This browser can't read HEIC photos — export as JPEG or use Safari");
+/** Readable error for a file the browser could not decode (a HEIC photo: how to get a JPEG). */
+async function decodeError(file: Blob): Promise<Error> {
+  if (await looksLikeHeic(file)) return heicUnsupportedError();
   const mb = file.size / (1024 * 1024);
   if (mb > 40) {
     return new Error(`This image is too large for the browser to open (${mb.toFixed(0)} MB). Export a smaller JPEG and try again.`);
@@ -227,7 +223,7 @@ export async function importImageFile(
   try {
     decoded = await decode(file);
   } catch {
-    throw decodeError(file);
+    throw await decodeError(file);
   }
   try {
     const { width, height } = fitSize(decoded.width, decoded.height, maxSize);
@@ -264,7 +260,7 @@ export async function blobToImageData(blob: Blob): Promise<ImageDataLike> {
   try {
     decoded = await decode(blob);
   } catch {
-    throw decodeError(blob);
+    throw await decodeError(blob);
   }
   try {
     const canvas = makeCanvas(decoded.width, decoded.height);
@@ -347,7 +343,7 @@ export async function blobToAIDataUrl(blob: Blob, maxSize = 1568): Promise<strin
   try {
     decoded = await decode(blob);
   } catch {
-    throw decodeError(blob);
+    throw await decodeError(blob);
   }
   try {
     return await canvasSourceToAIDataUrl(decoded.source, decoded.width, decoded.height, maxSize);

@@ -22,10 +22,12 @@ import {
 } from '../../../../shared/types';
 import { getStyle } from '../../../assets/design';
 import { useStore } from '../../../state/store';
+import { canMapOnDevice } from '../../../vision/ui/jobs';
 import { RefineSection } from '../../../vision/ui/RefineSection';
 import { relativeTime } from '../../shell/format';
 import { pickPhotos } from '../../shell/photoImport';
 import { useSceneJob } from '../../shell/sceneJobs';
+import { openSettings } from '../../shell/shellUI';
 import { Badge, Button, ConfirmModal, EmptyState, IconButton, PanelHeader, Section, Select, Spinner, Swatch, Toggle, cn } from '../../common';
 import { clearZoneFocus, deletePath, deleteZone, editBrief, mapScene, refineZoneOutline } from './actions';
 import { appendToPrompt, toggleTargetZone } from './briefOps';
@@ -93,6 +95,8 @@ function SceneView({
 }) {
   const job = useSceneJob(photo.id);
   const aiReady = useAiReady();
+  // No Claude: mapping (and re-mapping) runs on this device instead, when the browser can.
+  const onDevice = !aiReady && canMapOnDevice();
   const [confirmRemap, setConfirmRemap] = useState(false);
   useEffect(() => clearZoneFocus, []);
   const [confirmClear, setConfirmClear] = useState(false);
@@ -106,7 +110,7 @@ function SceneView({
         action={
           scene &&
           !job && (
-            <Button size="sm" className="max-lg:h-9" variant="ghost" icon={<RefreshCw className="size-3.5" />} disabled={!aiReady} onClick={() => setConfirmRemap(true)}>
+            <Button size="sm" className="max-lg:h-9" variant="ghost" icon={<RefreshCw className="size-3.5" />} disabled={!aiReady && !onDevice} onClick={() => setConfirmRemap(true)}>
               Re-map
             </Button>
           )
@@ -116,13 +120,19 @@ function SceneView({
       {job && <MappingProgress queued={job === 'queued'} remapping={!!scene} />}
 
       {!scene ? (
-        <>
-          {/* AI off: the on-device map (vision module) is the way to map, so it comes first. */}
-          {!aiReady && <RefineSection photoId={photo.id} />}
-          {!job && <NotMapped photoId={photo.id} />}
-          {/* On-device tools (vision module): e.g. map the scene without AI. */}
-          {aiReady && <RefineSection photoId={photo.id} />}
-        </>
+        aiReady ? (
+          <>
+            {!job && <NotMapped photoId={photo.id} />}
+            {/* On-device tools (vision module): e.g. map the scene without AI. */}
+            <RefineSection photoId={photo.id} />
+          </>
+        ) : (
+          <>
+            {/* No Claude: the on-device map (vision module) is the way to map, so it comes first and alone. */}
+            <RefineSection photoId={photo.id} />
+            {onDevice ? <ClaudeOptionalNote /> : !job && <NotMapped photoId={photo.id} />}
+          </>
+        )
       ) : (
         <>
           <Overview space={space} photo={photo} scene={scene} />
@@ -161,7 +171,11 @@ function SceneView({
         open={confirmRemap}
         onClose={() => setConfirmRemap(false)}
         title="Map this photo again?"
-        message={`Mode analyzes the photo again and replaces the current areas, paths and architecture notes. Areas picked in your brief will need to be picked again.${pendingNote}`}
+        message={`${
+          onDevice
+            ? 'Mode maps the photo again on this device and replaces the current areas, paths and notes (the on-device map has no style or architecture notes).'
+            : 'Mode analyzes the photo again and replaces the current areas, paths and architecture notes.'
+        } Areas picked in your brief will need to be picked again.${pendingNote}`}
         confirmLabel="Re-map"
         danger={false}
         onConfirm={() => void mapScene(photo.id, true)}
@@ -191,6 +205,29 @@ function MappingProgress({ queued, remapping }: { queued: boolean; remapping: bo
           <p className="mt-0.5 text-muted">Claude is outlining the areas, routes, sun and architecture. Usually 30–90 seconds — you can keep working meanwhile.</p>
         </div>
       </div>
+    </div>
+  );
+}
+
+/** What a Claude key would add to the on-device map: optional, neutral, with the setup help one click away. */
+function ClaudeOptionalNote() {
+  const offline = useStore((s) => s.health?.ok === false);
+  return (
+    <div className="px-4 py-4">
+      {offline ? (
+        <AiUnavailableNote action="map the scene with Claude" />
+      ) : (
+        <Callout
+          icon={<Sparkles className="size-4" aria-hidden />}
+          action={
+            <Button size="sm" variant="ghost" className="max-lg:h-9" onClick={() => openSettings('server')}>
+              How to add a Claude key
+            </Button>
+          }
+        >
+          Optional: with a Claude key, the map also notes the architectural style, materials, sun and routes like “driveway → front door”.
+        </Callout>
+      )}
     </div>
   );
 }

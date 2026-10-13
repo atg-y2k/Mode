@@ -9,6 +9,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ProductResult } from '../../../../shared/api';
 import { DEFAULT_LIGHTING, type Generation, type Photo, type Project, type Recommendation, type SceneMap } from '../../../../shared/types';
+import { NO_DEVICE_MAP_REASON } from './aiErrors';
 
 // Whole panels render here; leave room for slow CI machines.
 vi.setConfig({ testTimeout: 30_000 });
@@ -70,6 +71,15 @@ vi.mock('../../shell/sceneJobs', () => ({
 // The vision module's on-device tools are mounted by the Scene panel; their own tests cover them.
 vi.mock('../../../vision/ui/RefineSection', () => ({
   RefineSection: ({ photoId }: { photoId: string }) => <div data-testid="refine-section">{photoId}</div>,
+}));
+// The free on-device map (used when Claude is off): whether this browser can run it, and the call.
+const vision = { supported: true };
+const AI_OFF = { ok: true, ai: { enabled: false, model: null }, imageProvider: { enabled: false, name: null, model: null } };
+const mapSceneOffline = vi.fn(async () => undefined);
+vi.mock('../../../vision/ui/jobs', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../vision/ui/jobs')>()),
+  canMapOnDevice: () => vision.supported,
+  mapSceneOffline: (...args: unknown[]) => (mapSceneOffline as (...a: unknown[]) => Promise<void>)(...args),
 }));
 
 const fetchRecommendations = vi.fn();
@@ -211,6 +221,10 @@ beforeEach(async () => {
   vi.resetModules();
   startRun.mockClear();
   requestSceneAnalysis.mockClear();
+  mapSceneOffline.mockClear();
+  vision.supported = true;
+  // Like the real queue: Claude mapping only starts when AI is on.
+  requestSceneAnalysis.mockImplementation(() => useStore.getState().health?.ai.enabled === true);
   // ZIP → zone + centre without fetching public/data/zones.json (or phzmapi.org) in tests.
   (await import('../../../site/zip')).setZipTable({ '20817': ['7a', 38.99, -77.15] });
   ({ useStore } = await import('../../../state/store'));
@@ -258,7 +272,8 @@ describe('DesignPanel', () => {
     // Prompt + generate.
     fireEvent.change(screen.getByLabelText('Describe the changes you want'), { target: { value: 'Warm, welcoming entry' } });
     expect(draft().prompt).toBe('Warm, welcoming entry');
-    fireEvent.click(screen.getByRole('button', { name: /Generate 3 variations/ }));
+    // One variation by default (each is its own hand-off when there is no image key).
+    fireEvent.click(screen.getByRole('button', { name: /Generate 1 variation$/ }));
     await waitFor(() => expect(startRun).toHaveBeenCalledWith({ photoId: 'pho_1', mode: 'variations' }));
   });
 
@@ -271,6 +286,42 @@ describe('DesignPanel', () => {
     fireEvent.click(screen.getByRole('radio', { name: /Keep currentSame width as the walk today/ }));
     expect(draft().elements[0].choices.width).toEqual(['keep-width']);
     expect(screen.queryByText(/Room to curve and widen/)).toBeNull();
+  });
+
+  // The lawn moved in the photo (x0..x1); the walk is at x 100–300.
+  const withLawnAt = (x0: number, x1: number) => {
+    const p = makeProject();
+    p.spaces[0].photos[0].scene!.zones[1].polygon = [{ x: x0, y: 500 }, { x: x1, y: 500 }, { x: x1, y: 780 }, { x: x0, y: 780 }];
+    useStore.setState({ project: p });
+  };
+  const clearWhere = async (targetZoneIds: string[]) => {
+    const { editBrief } = await import('./actions');
+    act(() =>
+      editBrief('pho_1', (b) => {
+        b.elements[0].zoneIds = [];
+        b.elements[0].pathIds = [];
+        b.targetZoneIds = targetZoneIds;
+      }),
+    );
+  };
+
+  it('a Pathway with no "Where" of its own and the walk and lawn picked on the photo: the lawn is room enough', async () => {
+    withLawnAt(300, 900);
+    render(<panels.DesignPanel />);
+    fireEvent.click(screen.getByRole('button', { name: 'Pathway' }));
+    await clearWhere(['z_walk', 'z_lawn']);
+    expect(screen.getByText(/Room to curve and widen: the lawn alongside the walk may change too/)).toBeTruthy();
+    expect(screen.queryByText(/wider or curvier than the area that may change/)).toBeNull();
+  });
+
+  it('letting the lawn change for a Pathway with no "Where" keeps the walk it grows from', async () => {
+    withLawnAt(700, 1100);
+    render(<panels.DesignPanel />);
+    fireEvent.click(screen.getByRole('button', { name: 'Pathway' }));
+    await clearWhere(['z_walk']);
+    expect(screen.getByText(/wider or curvier than the area that may change/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Let the lawn beside it change' }));
+    expect(draft().elements[0].zoneIds).toEqual(['z_walk', 'z_lawn']);
   });
 
   it('compares options of one question on the photo', async () => {
@@ -312,6 +363,18 @@ describe('DesignPanel', () => {
     expect(await screen.findByText('Match the brick steps')).toBeTruthy();
     expect(screen.getByText('What mood?')).toBeTruthy();
     expect(draft().elements[0].choices.mood).toEqual([]);
+  });
+
+  it('without a Claude key, offers tailoring as an optional extra (no setup details, no warning)', async () => {
+    useStore.setState({ health: { ok: true, ai: { enabled: false, model: null }, imageProvider: { enabled: false, name: null, model: null } } });
+    const { useShellUI } = await import('../../shell/shellUI');
+    render(<panels.DesignPanel />);
+    fireEvent.click(screen.getByRole('button', { name: 'Pathway' }));
+    expect(screen.getByText(/^Optional: with a Claude key, Mode picks options that suit this house/)).toBeTruthy();
+    expect(screen.queryByText(/ANTHROPIC_API_KEY|Needs AI|\.env/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Tailor options' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'How to add a Claude key' }));
+    expect(useShellUI.getState()).toMatchObject({ settingsOpen: true, settingsTab: 'server' });
   });
 });
 
@@ -373,13 +436,47 @@ describe('ScenePanel', () => {
     expect(screen.queryByRole('button', { name: /^Make “Front yard” a/ })).toBeNull();
   });
 
-  it('puts the on-device map first when AI is off', () => {
-    useStore.setState({ project: makeProject(false), health: { ok: true, ai: { enabled: false, model: null }, imageProvider: { enabled: false, name: null, model: null } } });
+  it('without a Claude key, offers one clear way to map: on this device', () => {
+    useStore.setState({ project: makeProject(false), health: AI_OFF });
+    render(<panels.ScenePanel />);
+    const onDevice = screen.getByTestId('refine-section');
+    expect(screen.getAllByTestId('refine-section')).toHaveLength(1);
+    // No contradicting "needs AI" block with a disabled button next to it.
+    expect(screen.queryByText('Map this photo')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Map the scene' })).toBeNull();
+    expect(screen.queryByText(/Turn on AI|AI features are off|ANTHROPIC_API_KEY/)).toBeNull();
+    // The key stays reachable, after the on-device map, as optional information.
+    const note = screen.getByText(/^Optional: with a Claude key/);
+    expect(onDevice.compareDocumentPosition(note) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'How to add a Claude key' })).toBeTruthy();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('without a key and without on-device support, keeps the calm explanation', () => {
+    vision.supported = false;
+    useStore.setState({ project: makeProject(false), health: AI_OFF });
     render(<panels.ScenePanel />);
     const onDevice = screen.getByTestId('refine-section');
     const title = screen.getByText('Map this photo');
     expect(onDevice.compareDocumentPosition(title) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(screen.getAllByTestId('refine-section')).toHaveLength(1);
+    expect((screen.getByRole('button', { name: 'Map the scene' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText('Map the scene with a Claude key')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'How to add a Claude key' })).toBeTruthy();
+    expect(screen.queryByText(/Turn on AI|ANTHROPIC_API_KEY/)).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('re-maps on this device when Claude is off', async () => {
+    useStore.setState({ health: AI_OFF });
+    render(<panels.ScenePanel />);
+    fireEvent.click(screen.getByRole('button', { name: 'Re-map' }));
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByText(/maps the photo again on this device/)).toBeTruthy();
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Re-map' }));
+    });
+    expect(mapSceneOffline).toHaveBeenCalledWith('pho_1', { replace: true });
+    expect(requestSceneAnalysis).toHaveBeenCalledWith('pho_1', { force: true });
   });
 
   it('offers to map a photo without a scene', () => {
@@ -387,6 +484,83 @@ describe('ScenePanel', () => {
     render(<panels.ScenePanel />);
     fireEvent.click(screen.getByRole('button', { name: 'Map the scene' }));
     expect(requestSceneAnalysis).toHaveBeenCalledWith('pho_1', { force: false });
+  });
+});
+
+describe('Map the scene without a Claude key', () => {
+  const toasts = () => useStore.getState().toasts;
+  beforeEach(() => useStore.setState({ project: makeProject(false), health: AI_OFF }));
+
+  it('maps on this device from the Design panel, the element’s “Where” and the Suggest tab — no key error', async () => {
+    const design = render(<panels.DesignPanel />);
+    fireEvent.click(screen.getByRole('button', { name: 'Pathway' }));
+    const buttons = screen.getAllByRole('button', { name: 'Map the scene' });
+    expect(buttons).toHaveLength(2); // Areas to change + the Pathway's Where
+    for (const b of buttons) {
+      await act(async () => {
+        fireEvent.click(b);
+      });
+    }
+    design.unmount();
+    render(<panels.SuggestionsPanel />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Map the scene' }));
+    });
+    expect(mapSceneOffline).toHaveBeenCalledTimes(3);
+    expect(mapSceneOffline).toHaveBeenCalledWith('pho_1', { replace: false });
+    expect(toasts().filter((t) => t.kind === 'error')).toEqual([]);
+    expect(toasts().map((t) => t.message).join(' ')).not.toMatch(/ANTHROPIC_API_KEY|AI features are off/);
+  });
+
+  it('maps on this device when the server can’t be reached either', async () => {
+    useStore.setState({ health: { ...AI_OFF, ok: false } });
+    const { mapScene } = await import('./actions');
+    await mapScene('pho_1');
+    expect(mapSceneOffline).toHaveBeenCalledWith('pho_1', { replace: false });
+  });
+
+  it('explains calmly when this browser can’t map on the device', async () => {
+    vision.supported = false;
+    const { mapScene } = await import('./actions');
+    await mapScene('pho_1');
+    expect(mapSceneOffline).not.toHaveBeenCalled();
+    expect(toasts().at(-1)).toMatchObject({ kind: 'info', message: NO_DEVICE_MAP_REASON });
+  });
+
+  it('shows the on-device map in progress instead of the button', async () => {
+    const { useVisionJobs } = await import('../../../vision/ui/jobs');
+    useVisionJobs.setState({ job: { photoId: 'pho_1', kind: 'map', phase: 'mapping', done: 0, total: 0 } });
+    try {
+      const design = render(<panels.DesignPanel />);
+      fireEvent.click(screen.getByRole('button', { name: 'Pathway' }));
+      expect(screen.queryByRole('button', { name: 'Map the scene' })).toBeNull();
+      expect(screen.getByText(/^Mapping the scene… you can pick areas/)).toBeTruthy();
+      expect(screen.getByText(/^Mapping the scene… areas to choose from/)).toBeTruthy();
+      design.unmount();
+      render(<panels.SuggestionsPanel />);
+      expect(screen.queryByRole('button', { name: 'Map the scene' })).toBeNull();
+      expect(screen.getByText(/^Mapping the scene… suggestions/)).toBeTruthy();
+    } finally {
+      useVisionJobs.setState({ job: null });
+    }
+  });
+
+  it('doesn’t start twice while the device is busy', async () => {
+    const { useVisionJobs } = await import('../../../vision/ui/jobs');
+    useVisionJobs.setState({ job: { photoId: 'pho_1', kind: 'map', phase: 'mapping', done: 0, total: 0 } });
+    try {
+      const { mapScene } = await import('./actions');
+      await mapScene('pho_1');
+      expect(mapSceneOffline).not.toHaveBeenCalled();
+      expect(toasts().at(-1)).toMatchObject({ kind: 'info', message: expect.stringMatching(/^Already working on this photo/) });
+      // Sharpening this photo isn't a map: a re-map clicked meanwhile says it didn't start.
+      useVisionJobs.setState({ job: { photoId: 'pho_1', kind: 'sharpen', phase: 'sharpening', done: 0, total: 3 } });
+      await mapScene('pho_1', true);
+      expect(mapSceneOffline).not.toHaveBeenCalled();
+      expect(toasts().at(-1)).toMatchObject({ kind: 'info', message: 'Sharpening this photo’s outlines on this device — map it again when that finishes.' });
+    } finally {
+      useVisionJobs.setState({ job: null });
+    }
   });
 });
 
@@ -692,6 +866,7 @@ describe('Branching history', () => {
     seedTree();
     render(<panels.HistoryPanel />);
     expect(screen.getByTitle(/^ChatGPT: Rough fit/).textContent).toBe('GPT');
+    expect(screen.getByTitle(/^ChatGPT: Rough fit/).getAttribute('title')).not.toMatch(/matching features|\d/);
     expect(screen.getByTitle('Made with API').textContent).toBe('API');
     expect(screen.getByText(/Alignment needs a look: Rough fit/)).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Branch from Wide flagstone' }));

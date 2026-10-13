@@ -206,8 +206,12 @@ describe('createProvidersFromEnv', () => {
     expect(missing.defaultProvider).toBeNull();
     expect(missing.warnings[0]).toContain('OPENAI_API_KEY');
 
-    const off = createProvidersFromEnv({ OPENAI_API_KEY: 'sk', IMAGE_PROVIDER: 'none' });
+    // "none" / "off" turns every provider off, not just the default: a request naming one can't use the key.
+    const off = createProvidersFromEnv({ OPENAI_API_KEY: 'sk', GEMINI_API_KEY: 'g', IMAGE_PROVIDER: 'none' });
     expect(off.defaultProvider).toBeNull();
+    expect(off.providers).toEqual({ openai: undefined, gemini: undefined });
+    expect(off.warnings).toEqual([]);
+    expect(createProvidersFromEnv({ OPENAI_API_KEY: 'sk', IMAGE_PROVIDER: 'OFF' }).providers.openai).toBeUndefined();
   });
 });
 

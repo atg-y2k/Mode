@@ -21,11 +21,12 @@ import * as db from '../../../state/persistence';
 import { findPhoto, findVariation, useStore } from '../../../state/store';
 import { cn, ConfirmModal } from '../../common';
 import { useBlobUrl, useElementSize } from '../hooks';
+import { sceneForRun } from '../maskFromZones';
 import { acceptStaged, closeStaging, rejectStaged, retryStricter, skipPlanned, UNCHANGED_MESSAGE } from './actions';
 import { AlignmentBadge, AppIcon, useFlash } from './bits';
 import { eventWindow, writeText } from './clipboard';
 import { openElement } from '../actions';
-import { alignmentSummary, appLabel, changesTouchArea, findPlanned, footprintHint, type PlannedRef } from './planned';
+import { alignmentSummary, alignmentTooltip, appLabel, changesTouchArea, findPlanned, footprintHint, type PlannedRef } from './planned';
 import { handoffSession, setExtras, useHandoffSession, type ImportExtras } from './session';
 
 function fitBox(areaW: number, areaH: number, aspect: number): { w: number; h: number } {
@@ -301,13 +302,21 @@ function StagingContent({ photo, stagingRef }: { photo: Photo; stagingRef: Plann
   const watermark = !!(staged.checks?.watermark ?? extras?.watermark);
   const alignNote = staged.review?.alignNote ?? extras?.alignNote;
   const hasHeat = !!extras && extras.changeMap.width > 0;
-  // Why the alignment wasn't trusted (engine's note), after the usual advice.
-  const detail = summary && report && !report.aligned && alignNote ? `${summary.detail} Reason: ${alignNote.replace(/[.\s]+$/, '')}.` : summary?.detail;
-  // Warnings and alignment notes are never cut short on phones; the rest can be expanded.
-  const clampable = summary?.tone !== 'warning' && !alignNote;
+  const detail = summary?.detail;
+  // Plain words on screen; the measurements (and why the alignment wasn't trusted, the engine's note) on hover.
+  const technical = summary
+    ? `${alignmentTooltip(summary)}${report && !report.aligned && alignNote ? `\nReason: ${alignNote.replace(/[.\s]+$/, '')}.` : ''}`
+    : undefined;
+  // Warnings are never cut short on phones; the rest can be expanded.
+  const clampable = summary?.tone !== 'warning';
   const accept = () => (unchanged ? setConfirmAccept(true) : acceptStaged(stagingRef));
   // A wider / curvier choice that ran past the area: the brief needs room, not a stricter prompt.
-  const grew = footprintHint(generation.brief, report, changesTouchArea(extras?.blobs ?? staged.review?.blobs, generation.target, photo) ?? true);
+  const grew = footprintHint(
+    generation.brief,
+    report,
+    changesTouchArea(extras?.blobs ?? staged.review?.blobs, generation.target, photo) ?? true,
+    sceneForRun(photo.scene, generation),
+  );
   const suggestStricter = !!summary?.suggestStricter && !grew;
 
   return (
@@ -394,7 +403,7 @@ function StagingContent({ photo, stagingRef }: { photo: Photo; stagingRef: Plann
           </p>
         )}
         {summary && (
-          <p className={cn('flex items-start gap-1.5 text-xs leading-relaxed', summary.tone === 'warning' ? 'text-gold' : 'text-white/70')} title={detail}>
+          <p className={cn('flex items-start gap-1.5 text-xs leading-relaxed', summary.tone === 'warning' ? 'text-gold' : 'text-white/70')} title={technical}>
             {summary.tone === 'warning' && <ShieldAlert className="mt-px size-3.5 shrink-0" />}
             <span className="min-w-0">
               {/* Clamp an inner span (line-clamp conflicts with the paragraph's flex); phones can expand it. */}

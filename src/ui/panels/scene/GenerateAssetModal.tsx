@@ -13,6 +13,7 @@ import { ApiError, generateAsset, isAbortError } from '../../../lib/api';
 import { trimTransparent } from '../../../lib/backgroundRemoval';
 import { blobToImageData, dataUrlToBlob, imageDataToBlob } from '../../../lib/imageImport';
 import { useStore } from '../../../state/store';
+import { openSettings } from '../../shell/shellUI';
 import { Button, cn, Field, Modal, Select, Spinner, TextArea } from '../../common';
 import { AssetDetailsForm } from './AssetDetailsForm';
 import {
@@ -46,9 +47,9 @@ function errorText(err: unknown): string {
   if (err instanceof ApiError) {
     switch (err.code) {
       case 'ai_disabled':
-        return 'AI is turned off on the server. Add ANTHROPIC_API_KEY to the server’s .env file and restart it.';
+        return 'Generating items needs a Claude key, which is optional and not set up. You can add your own photo of the item instead.';
       case 'image_provider_disabled':
-        return 'Photo mode needs an image provider (OPENAI_API_KEY or GEMINI_API_KEY in .env). Try Illustration instead.';
+        return 'The Photo style needs an OpenAI or Gemini key (optional). Try Illustration instead.';
       case 'refused':
         return 'The AI declined this request. Try describing the item differently.';
       case 'rate_limited':
@@ -307,24 +308,33 @@ function GenerateBody({
             AI features run on the Mode API server. Start it (npm run dev starts it with the app), then check again.
           </Callout>
         ) : !aiOn ? (
+          // An optional feature that's off: neutral, with the setup steps one click away in Settings.
           <Callout
-            tone="warning"
-            title="AI is off"
+            title="Generating items needs a Claude key"
             action={
               <>
-                <Button size="sm" loading={rechecking} onClick={() => void recheck()}>
-                  Check again
-                </Button>
                 {onUploadInstead && (
-                  <Button size="sm" variant="ghost" icon={<Upload className="size-4" />} onClick={onUploadInstead}>
+                  <Button size="sm" icon={<Upload className="size-4" />} onClick={onUploadInstead}>
                     Add your own photo instead
                   </Button>
                 )}
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    safeClose();
+                    openSettings('server');
+                  }}
+                >
+                  How to add a Claude key
+                </Button>
+                <Button size="sm" variant="ghost" loading={rechecking} onClick={() => void recheck()}>
+                  Check again
+                </Button>
               </>
             }
           >
-            Generating items uses Claude on the Mode server. Add <code className="font-mono">ANTHROPIC_API_KEY</code> to the server’s
-            <code className="font-mono"> .env</code> file and restart it.
+            A Claude key is optional — everything else in Mode works without one.
           </Callout>
         ) : null}
 
@@ -404,7 +414,7 @@ function GenerateBody({
                   'Photo',
                   'Photoreal cut-out from the image provider · about a minute',
                   ImageIcon,
-                  health && aiOn && !photoOn ? 'Needs an image provider — add OPENAI_API_KEY or GEMINI_API_KEY to .env' : undefined,
+                  health && aiOn && !photoOn ? 'Needs an OpenAI or Gemini key (optional) — see Settings → AI & server' : undefined,
                 )}
               </div>
             </div>

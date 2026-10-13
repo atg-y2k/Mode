@@ -6,7 +6,7 @@
  * the main button copies (the MARKED photo by default — a visual cue plus
  * the text beats text alone), and optional per-app aspect-ratio overrides.
  * Plus the effective render mode: API mode falls back to hand-off while the
- * server has no image provider.
+ * server has no image provider — and the variation count that follows it.
  */
 import { useSyncExternalStore } from 'react';
 import type { HealthResponse } from '../../../../shared/api';
@@ -55,6 +55,15 @@ export function hasImageProviders(health: HealthResponse | null | undefined): bo
 export function effectiveRenderMode(studio: Pick<StudioState, 'renderMode'>, health: HealthResponse | null | undefined): StudioState['renderMode'] {
   if (studio.renderMode === 'api' && health && !hasImageProviders(health)) return 'handoff';
   return studio.renderMode;
+}
+
+/** Variations per run: the user's pick, else 1 per hand-off (each is its own round trip) and 3 when an image API renders. */
+export function variationCountOf(
+  studio: Pick<StudioState, 'variationCount' | 'renderMode'>,
+  health: HealthResponse | null | undefined,
+  renderMode = effectiveRenderMode(studio, health),
+): number {
+  return studio.variationCount ?? (renderMode === 'api' ? 3 : 1);
 }
 
 let installed = false;

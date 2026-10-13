@@ -12,8 +12,10 @@ import { elementsForSetting } from '../../../assets/design';
 import { useStore } from '../../../state/store';
 import { pickPhotos } from '../../shell/photoImport';
 import { useSceneJob } from '../../shell/sceneJobs';
+import { useDeviceMapping } from '../../../vision/ui/jobs';
 import { Button, EmptyState, IconButton, PanelHeader, Section, Segmented, TextArea, Toggle } from '../../common';
 import { generationBlocker } from '../generate';
+import { variationCountOf } from '../handoff/prefs';
 import { addElement, clearZoneFocus, editBrief, generateBrief, mapScene, openRunGrid, typeBrief } from './actions';
 import { hasCustomIdeas, includedIdeaIds, isBriefEmpty, resetIdeas, toggleIdea, toggleTargetZone } from './briefOps';
 import { useStudioContext } from './context';
@@ -239,7 +241,10 @@ function ElementPalette({ setting, brief, onAdd }: { setting: 'interior' | 'exte
 
 function AreasSection({ photo, scene, brief }: { photo: Photo; scene: SceneMap | undefined; brief: DesignBrief }) {
   const showZones = useStore((s) => s.studio.showZones);
-  const sceneJob = useSceneJob(photo.id);
+  // Claude's map or the free on-device one (both hooks always run).
+  const claudeMapping = useSceneJob(photo.id);
+  const deviceMapping = useDeviceMapping(photo.id);
+  const sceneJob = !!claudeMapping || deviceMapping;
   const [all, setAll] = useState(false);
   const focus = (id: string | null) => useStore.getState().setStudio({ focusZoneId: id });
   const zones = useMemo(() => (scene?.zones ?? []).filter(isDesignZone), [scene]);
@@ -420,7 +425,7 @@ function InspirationSection({ project, space, photoId, brief }: { project: Proje
 // ---------------------------------------------------------------------------
 
 function GenerateFooter({ photo, brief }: { photo: Photo; brief: DesignBrief }) {
-  const count = useStore((s) => s.studio.variationCount);
+  const count = useStore((s) => variationCountOf(s.studio, s.health));
   const health = useStore((s) => s.health);
   const viewing = useStore((s) => s.studio.viewVariationId);
   // Primitive / store-owned selections only (a fresh object per call would re-render forever).

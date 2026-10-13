@@ -334,21 +334,26 @@ export function AiJobStatus({ jobKey, hint, onRetry, className }: { jobKey: stri
   return null;
 }
 
-/** Explains why AI features are unavailable (nothing while they are usable). */
+/**
+ * Explains why AI features are unavailable (nothing while they are usable).
+ * Claude being off is neutral information (it's optional); an unreachable
+ * server is a warning.
+ */
 export function AiUnavailableNote({ action, className }: { /** e.g. "get suggestions" */ action: string; className?: string }) {
   const health = useStore((s) => s.health);
   const availability = aiAvailability(health);
   if (availability.state === 'ready' || availability.state === 'unknown') return null;
+  const off = availability.state === 'off';
   return (
     <Callout
-      tone="warning"
+      tone={off ? 'info' : 'warning'}
       icon={<Sparkles className="size-4" aria-hidden />}
-      title={availability.state === 'offline' ? `Can't ${action} right now` : `Turn on AI to ${action}`}
+      title={off ? `${action.charAt(0).toUpperCase()}${action.slice(1)} with a Claude key` : `Can't ${action} right now`}
       className={className}
       action={
         <>
           <Button size="sm" className="max-lg:h-9" onClick={() => openSettings('server')}>
-            How to turn on AI
+            {off ? 'How to add a Claude key' : 'AI & server settings'}
           </Button>
           <Button size="sm" className="max-lg:h-9" variant="ghost" onClick={() => void useStore.getState().refreshHealth()}>
             Check again

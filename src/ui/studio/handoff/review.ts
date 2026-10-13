@@ -39,6 +39,15 @@ export interface ReviewRequest {
 
 export const useReview = create<{ current: ReviewRequest | null }>(() => ({ current: null }));
 
+/** Shown when the server planned without Claude (its template of the brief): plain information, Claude is optional. */
+export const TEMPLATE_PLAN_NOTE =
+  'Planned from your choices — edit any instruction before sending. Adding a Claude key (optional) makes tailored plans and plant checks.';
+
+/** The review footer for `n` hand-offs: each is its own chat. */
+export function handoffFooter(n: number): string {
+  return n === 1 ? '1 hand-off — start a new chat for it.' : `${n} hand-offs — each in a new chat. You can do some now and the rest later.`;
+}
+
 let hosts = 0;
 let waiting: { generationId: string; resolve: (items: ReviewItem[] | null) => void } | null = null;
 

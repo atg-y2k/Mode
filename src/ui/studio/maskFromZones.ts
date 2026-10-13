@@ -13,6 +13,7 @@
 import type { DesignBrief, ElementSpec, Generation, Pt, RunTarget, SceneMap, ScenePath, SceneZone, ZoneKind } from '../../../shared/types';
 import { combineMasks, createMask, featherMask, fillPolygon, growMask, isMaskEmpty, strokeBrush } from '../../engine/mask';
 import type { Mask } from '../../engine/types';
+import { getElementDef } from '../../assets/design';
 
 type ZoneShape = Pick<SceneZone, 'polygon' | 'maskId'>;
 type PathShape = Pick<ScenePath, 'points' | 'widthPx'>;
@@ -142,6 +143,8 @@ export function maskForBrief(
 
 /** Ground a footprint-changing element may spill into. */
 export const ROOM_GROUND_KINDS: readonly ZoneKind[] = ['lawn', 'planting-bed', 'yard-border'];
+/** Paved areas picked on the photo that an element with no "Where" of its own grows from (never lawn, beds, the house or steps). */
+export const ROOM_SURFACE_KINDS: readonly ZoneKind[] = ['walkway', 'driveway', 'sidewalk', 'patio'];
 /** Long edge (px) the room is computed at; scaled up after (the feather hides the steps). */
 const ROOM_SIZE = 512;
 /** The room reaches at most this share of the photo's long edge from the element. */
@@ -150,6 +153,27 @@ const ROOM_MAX_SHARE = 0.12;
 /** Whether one of the element's choices changes its footprint (wider, curvier, larger). */
 export function growChoice(el: Pick<ElementSpec, 'dimensions' | 'choices'>): boolean {
   return el.dimensions.some((d) => (el.choices[d.id] ?? []).some((id) => d.options.find((o) => o.id === id)?.footprint === 'grow'));
+}
+
+/**
+ * Zones and paths an element's footprint room grows from: its own "Where"
+ * (ids still in the scene) or, when it has none, the paved areas picked on
+ * the photo for the brief (walk, drive, patio — not lawn or beds): those of
+ * the element's own kind (a Pathway's walk, not the picked drive), else all
+ * of them (a walk the on-device map called a patio).
+ */
+export function growthSources(
+  el: Pick<ElementSpec, 'type' | 'zoneIds' | 'pathIds'>,
+  brief: Pick<DesignBrief, 'targetZoneIds'>,
+  scene: Pick<SceneMap, 'zones' | 'paths'>,
+): { zoneIds: string[]; pathIds: string[] } {
+  const zoneIds = el.zoneIds.filter((id) => scene.zones.some((z) => z.id === id));
+  const pathIds = el.pathIds.filter((id) => scene.paths.some((p) => p.id === id));
+  if (zoneIds.length || pathIds.length) return { zoneIds, pathIds };
+  const picked = scene.zones.filter((z) => brief.targetZoneIds.includes(z.id) && ROOM_SURFACE_KINDS.includes(z.kind));
+  const own = getElementDef(el.type).zoneKinds;
+  const matching = picked.filter((z) => own.includes(z.kind));
+  return { zoneIds: (matching.length ? matching : picked).map((z) => z.id), pathIds: [] };
 }
 
 /** Rough width (px) of a strip-like outline: 2·area / perimeter (≈ w for a long w-wide strip). */
@@ -239,27 +263,27 @@ function upscaleRoom(small: Mask, k: number, width: number, height: number): Mas
 
 /**
  * Footprint room of a brief in a scene: for each element with a 'grow'
- * choice under 'Only selected areas', its zones and paths dilated by about
+ * choice under 'Only selected areas', its zones and paths (growthSources:
+ * its "Where", else the paved areas picked on the photo) dilated by about
  * one walk width, ∩ the editable ground zones beside them (lawn, beds,
  * borders), never covering anything else (house, steps, trees, sky…).
  * Null when nothing grows; `room: null, empty: true` when no ground is
- * beside it — the UI warns that the new shape will be clipped.
+ * beside it — the UI warns that the new shape will be clipped. `picked`:
+ * ground beside it that the brief already targets (it may change as it is,
+ * so it needs no room; with only that, `room: null, empty: false`).
  */
 export function footprintRoom(
   scene: SceneMap | undefined,
   brief: DesignBrief,
   size: { width: number; height: number } = scene ? sceneSize(scene) : { width: 0, height: 0 },
-): { elementIds: string[]; room: NonNullable<RunTarget['room']> | null; empty: boolean } | null {
+): { elementIds: string[]; room: NonNullable<RunTarget['room']> | null; empty: boolean; picked: Pick<SceneZone, 'id' | 'label' | 'kind'>[] } | null {
   if (!scene || brief.scope === 'whole') return null;
-  const zoneSet = new Set(scene.zones.map((z) => z.id));
-  const pathSet = new Set(scene.paths.map((p) => p.id));
   const elementIds: string[] = [];
   const zoneIds = new Set<string>();
   const pathIds = new Set<string>();
   for (const el of brief.elements) {
     if (!growChoice(el)) continue;
-    const z = el.zoneIds.filter((id) => zoneSet.has(id));
-    const p = el.pathIds.filter((id) => pathSet.has(id));
+    const { zoneIds: z, pathIds: p } = growthSources(el, brief, scene);
     if (!z.length && !p.length) continue;
     elementIds.push(el.id);
     for (const id of z) zoneIds.add(id);
@@ -267,24 +291,31 @@ export function footprintRoom(
   }
   if (!elementIds.length) return null;
   const targets = new Set(briefTargetIds(brief, scene).zoneIds);
-  const ground = scene.zones.filter((z) => ROOM_GROUND_KINDS.includes(z.kind) && z.editable !== false && !targets.has(z.id) && z.polygon.length >= 3);
+  const isGround = (z: SceneZone) => ROOM_GROUND_KINDS.includes(z.kind) && z.polygon.length >= 3;
+  const ground = scene.zones.filter((z) => isGround(z) && z.editable !== false && !targets.has(z.id));
+  // Ground already picked counts as room for the emptiness check, but stays out of the room itself (it is a target).
+  const pickedGround = scene.zones.filter((z) => isGround(z) && targets.has(z.id));
   const blockers = scene.zones.filter((z) => !targets.has(z.id) && !ROOM_GROUND_KINDS.includes(z.kind) && z.polygon.length >= 3);
   const r = computeRoom(size.width, size.height, {
     zones: scene.zones.filter((z) => zoneIds.has(z.id)),
     paths: scene.paths.filter((p) => pathIds.has(p.id)),
-    ground: ground.map((z) => z.polygon),
+    ground: [...ground, ...pickedGround].map((z) => z.polygon),
     blockers: blockers.map((z) => z.polygon),
   });
-  if (!r || isMaskEmpty(r.mask)) return { elementIds, room: null, empty: true };
+  if (!r || isMaskEmpty(r.mask)) return { elementIds, room: null, empty: true, picked: [] };
+  const roomIdx = r.ground.filter((i) => i < ground.length);
+  const picked = r.ground.filter((i) => i >= ground.length).map((i) => pickedGround[i - ground.length]).map((z) => ({ id: z.id, label: z.label, kind: z.kind }));
+  if (!roomIdx.length) return { elementIds, room: null, empty: false, picked };
   return {
     elementIds,
     room: {
       zoneIds: [...zoneIds],
       pathIds: [...pathIds],
-      zones: r.ground.map((i) => ({ id: ground[i].id, label: ground[i].label, kind: ground[i].kind, polygon: ground[i].polygon })),
+      zones: roomIdx.map((i) => ({ id: ground[i].id, label: ground[i].label, kind: ground[i].kind, polygon: ground[i].polygon })),
       blockers: r.blockers.map((i) => blockers[i].polygon),
     },
     empty: false,
+    picked,
   };
 }
 

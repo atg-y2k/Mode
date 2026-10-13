@@ -12,8 +12,12 @@ export type AiAvailability =
   | { state: 'offline'; reason: string }
   | { state: 'off'; reason: string };
 
-export const AI_OFF_REASON = 'AI features are off. Add ANTHROPIC_API_KEY to the .env file next to the app and restart the server.';
+/** Claude is off: neutral, no setup details (those live in Settings → AI & server, "How to add a Claude key"). */
+export const AI_OFF_REASON = 'This needs Claude, which is off. A Claude key is optional — everything else in Mode works without one.';
 export const SERVER_OFFLINE_REASON = "Can't reach the Mode server. Make sure it's running (npm run dev starts it with the app).";
+/** Claude is off and this browser can't run the on-device map either. */
+export const NO_DEVICE_MAP_REASON =
+  "This browser can't map photos on this device. Outline the areas to change with the lasso on the photo instead — or add a Claude key (optional) to map them for you.";
 
 export function aiAvailability(health: HealthResponse | null | undefined): AiAvailability {
   if (!health) return { state: 'unknown' };
@@ -45,7 +49,7 @@ export function friendlyAiError(err: unknown, what = 'finish this'): string | nu
       case 'ai_disabled':
         return AI_OFF_REASON;
       case 'image_provider_disabled':
-        return 'Photoreal images need an image provider. Add OPENAI_API_KEY or GEMINI_API_KEY to .env and restart the server.';
+        return 'Photoreal images straight from Mode need an OpenAI or Gemini key (optional). Without one, hand the edit off to your ChatGPT or Gemini app.';
       case 'refused':
         return `The AI declined to ${what}. Try rephrasing your request or using a different photo.`;
       case 'rate_limited':

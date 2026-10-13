@@ -90,25 +90,32 @@ describe('watch status and on/off', () => {
   });
 
   it('says how to grant access when macOS blocks the Downloads folder (EPERM)', async () => {
+    let listed = 0;
     const blocked = new DownloadsWatcher({
       dir,
       watchFactory: factory,
       platform: 'darwin',
       probeDir: () => {
+        listed++;
         throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' });
       },
       log: () => undefined,
     });
     const app = new Hono();
     registerHandoffRoutes(app, { watcher: blocked, accessTokenRequired: false, isLocalRequest: () => true, log: () => undefined });
+    // The passive GET doesn't list the folder: macOS asks for Downloads access only once the user turns watching on.
     const status = (await (await app.request(API_PATHS.handoffWatch)).json()) as Record<string, unknown>;
-    expect(status).toMatchObject({ available: false, on: false });
-    expect(status.reason).toMatch(/System Settings → Privacy & Security → Files & Folders/);
+    expect(status).toMatchObject({ available: true, on: false });
+    expect(listed).toBe(0);
     const res = await post(app, API_PATHS.handoffWatch, { on: true });
     expect(res.status).toBe(409);
-    expect(ApiErrorBodySchema.parse(await res.json()).error.message).toMatch(/Files & Folders/);
+    expect(ApiErrorBodySchema.parse(await res.json()).error.message).toMatch(/System Settings → Privacy & Security → Files & Folders/);
+    expect(listed).toBe(1);
     expect(blocked.on).toBe(false);
     expect(factory.instances).toHaveLength(0);
+    // Turning it off again doesn't list it either.
+    expect(await (await post(app, API_PATHS.handoffWatch, { on: false })).json()).toMatchObject({ on: false });
+    expect(listed).toBe(1);
     await blocked.close();
   });
 

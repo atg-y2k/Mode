@@ -151,7 +151,8 @@ export function loadConfig(env: Env = process.env, cwd: string = process.cwd()):
   const providerRaw = str(env, 'IMAGE_PROVIDER')?.toLowerCase() ?? null;
   const imagesOff = providerRaw === 'none' || providerRaw === 'off';
   const openaiApiKey = str(env, 'OPENAI_API_KEY');
-  const geminiApiKey = str(env, 'GEMINI_API_KEY');
+  // GOOGLE_API_KEY is Google's own name for the same key (the Studio providers accept it too).
+  const geminiApiKey = str(env, 'GEMINI_API_KEY') ?? str(env, 'GOOGLE_API_KEY');
   const openaiImageModel = str(env, 'OPENAI_IMAGE_MODEL') ?? DEFAULT_OPENAI_IMAGE_MODEL;
   const geminiImageModel = str(env, 'GEMINI_IMAGE_MODEL') ?? DEFAULT_GEMINI_IMAGE_MODEL;
   const available: { id: ImageProviderId; model: string }[] = [];

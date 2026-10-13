@@ -35,6 +35,7 @@ export { paletteFeasibility, profileFeasibility, invasiveNote, shortPlantName, t
 export {
   getElementDef,
   newElementSpec,
+  preselectedWhere,
   mergeDimensions,
   optionVisualFromDraft,
   withPlantFeasibility,

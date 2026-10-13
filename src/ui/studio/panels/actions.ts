@@ -11,10 +11,11 @@ import type { Mask } from '../../../engine/types';
 import { fetchElementOptions, fetchRecommendations, locationForApi } from '../../../lib/studio';
 import * as runtime from '../../../state/runtime';
 import { findPhoto, findVariation, selectActivePhoto, useStore, type AppState } from '../../../state/store';
+import { canMapOnDevice, mapSceneOffline, useVisionJobs } from '../../../vision/ui/jobs';
 import { errorText } from '../../shell/format';
 import { requestSceneAnalysis } from '../../shell/sceneJobs';
 import { sceneSummaryText, startRun, type StartRunOptions } from '../generate';
-import { AI_OFF_REASON, SERVER_OFFLINE_REASON } from './aiErrors';
+import { NO_DEVICE_MAP_REASON, SERVER_OFFLINE_REASON } from './aiErrors';
 import { runAiJob } from './aiJobs';
 import { briefFromRecommendation, forgetSceneIds, mergeRecommendation, replaceDimensions } from './briefOps';
 import { aiImageOf, climateForAi, elementFactory, ideaLines, showPhotoOnMobile } from './context';
@@ -126,7 +127,7 @@ async function start(opts: StartRunOptions): Promise<string | null> {
   }
 }
 
-/** Generates N variations of the photo's brief (count from studio.variationCount). */
+/** Generates N variations of the photo's brief (count: the user's pick, else automatic by render mode — variationCountOf). */
 export function generateBrief(photoId: string): Promise<string | null> {
   return start({ photoId, mode: 'variations' });
 }
@@ -261,7 +262,11 @@ export function generateRecommendation(photoId: string, rec: Recommendation): Pr
 // Scene
 // ---------------------------------------------------------------------------
 
-/** Queues scene mapping (re-mapping when `force`). Explains why when it can't start. */
+/**
+ * Queues scene mapping (re-mapping when `force`). Without Claude it maps on
+ * this device instead (free; the photo's "Map on this device"), and only
+ * explains when neither can run.
+ */
 export async function mapScene(photoId: string, force = false): Promise<void> {
   if (requestSceneAnalysis(photoId, { force })) return;
   const s = state();
@@ -270,9 +275,28 @@ export async function mapScene(photoId: string, force = false): Promise<void> {
     if (requestSceneAnalysis(photoId, { force })) return;
   }
   const h = state().health;
-  if (!h?.ok) state().notify(SERVER_OFFLINE_REASON, 'error');
-  else if (!h.ai.enabled) state().notify(AI_OFF_REASON, 'error');
-  // Otherwise it is already queued or running.
+  if (h?.ok && h.ai.enabled) return; // already queued or running
+  if (canMapOnDevice()) mapOnDevice(photoId, force);
+  else if (!h?.ok) state().notify(SERVER_OFFLINE_REASON, 'error');
+  else state().notify(NO_DEVICE_MAP_REASON, 'info');
+}
+
+/** The free on-device map; the SegFormer licence question, when still open, comes first in the Scene panel. */
+function mapOnDevice(photoId: string, replace: boolean): void {
+  const busy = useVisionJobs.getState().job;
+  if (busy) {
+    // A sharpen of this photo isn't the map that was asked for: say so, rather than "already working on it".
+    const message =
+      busy.photoId !== photoId
+        ? 'Busy with another photo on this device — try again when it finishes.'
+        : busy.kind === 'map'
+          ? 'Already working on this photo on this device — the progress shows on the photo.'
+          : `Sharpening this photo’s outlines on this device — ${replace ? 'map it again' : 'map it'} when that finishes.`;
+    state().notify(message, 'info');
+    return;
+  }
+  void mapSceneOffline(photoId, { replace });
+  if (useVisionJobs.getState().job?.photoId === photoId) state().notify('Mapping the scene on this device — free, no key needed. You can keep working.', 'info');
 }
 
 /** Deletes a zone and every reference to it in the photo's brief (one undo step). */

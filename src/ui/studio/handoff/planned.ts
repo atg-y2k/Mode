@@ -4,8 +4,8 @@
  * returned files are assigned to them, and how a variation's provenance and
  * alignment read in the UI. No store access — unit-tested in node.
  */
-import type { AlignmentReport, DesignBrief, Generation, HandoffApp, PlannedVariation, Photo, Project, VariationSource } from '../../../../shared/types';
-import { growChoice } from '../maskFromZones';
+import type { AlignmentReport, DesignBrief, Generation, HandoffApp, PlannedVariation, Photo, Project, SceneMap, VariationSource } from '../../../../shared/types';
+import { growChoice, growthSources } from '../maskFromZones';
 
 /** A planned item and where it lives. */
 export interface PlannedRef {
@@ -151,8 +151,10 @@ export interface AlignmentSummary {
   tone: AlignmentTone;
   /** Badge text, e.g. "Aligned", "Model changed 2 areas outside — protected". */
   label: string;
-  /** One or two sentences for the tooltip / staging card. */
+  /** One or two plain sentences for the staging card and tooltips. */
   detail: string;
+  /** The measurements behind it (pixels, matching features, colour difference): tooltips only. */
+  numbers: string;
   /** Worth flagging on a small tile. */
   warn: boolean;
   /** Suggest the stricter prompt. */
@@ -167,12 +169,15 @@ const de = (x: number) => (Math.round(x * 10) / 10).toFixed(1);
  * change blobs) is only known right after import; the share is persisted.
  */
 export function alignmentSummary(report: AlignmentReport, outsideAreas?: number): AlignmentSummary {
-  const drift = `colour drift ΔE ${de(report.driftBefore)} → ${de(report.driftAfter)}`;
+  const numbers = report.aligned
+    ? `Lined up within ${de(report.residualPx)} px using ${report.inliers} matching features · colour difference ΔE ${de(report.driftBefore)} → ${de(report.driftAfter)}`
+    : `${report.inliers} matching features — too few to line it up, so it was fitted by size`;
   if (!report.aligned) {
     return {
       tone: 'warning',
       label: 'Rough fit',
-      detail: `The result didn't line up reliably with your photo (${report.inliers} matching features), so it was fitted by size only. Check the edges of the change, or try again in a new chat.`,
+      detail: "This result didn't line up reliably with your photo, so it was fitted by size only. Check the edges of the change, or try again in a new chat.",
+      numbers,
       warn: true,
       suggestStricter: true,
     };
@@ -181,7 +186,8 @@ export function alignmentSummary(report: AlignmentReport, outsideAreas?: number)
     return {
       tone: 'warning',
       label: 'Scene redrawn — protected',
-      detail: `The model changed ${pct(report.outsideChanged)} of the area that should have stayed the same. Mode restored it from your photo, but the edit may not blend well — a stricter prompt in a new chat usually helps.`,
+      detail: `It redrew ${pct(report.outsideChanged)} of the scene that should have stayed the same. Mode put that back from your photo, but the change may not blend in well — a stricter prompt in a new chat usually helps.`,
+      numbers,
       warn: true,
       suggestStricter: true,
     };
@@ -191,7 +197,8 @@ export function alignmentSummary(report: AlignmentReport, outsideAreas?: number)
     return {
       tone: 'info',
       label: `Model changed ${what} outside — protected`,
-      detail: `Those changes were dropped: everything outside the outline comes from your photo. Aligned within ${de(report.residualPx)} px; ${drift}.`,
+      detail: 'Lined up with your photo. Changes outside the outline were dropped: everything there is your original photo.',
+      numbers,
       warn: report.driftAfter > DRIFT_WARN,
       suggestStricter: false,
     };
@@ -199,8 +206,9 @@ export function alignmentSummary(report: AlignmentReport, outsideAreas?: number)
   if (report.driftAfter > DRIFT_WARN) {
     return {
       tone: 'warning',
-      label: `Colour drift ΔE ${de(report.driftAfter)}`,
-      detail: `Aligned within ${de(report.residualPx)} px, but the colours still differ from your photo after correction (${drift}). The edit may look slightly off-tone.`,
+      label: 'Colours a little off',
+      detail: 'Lined up with your photo, but its colours still differ from your photo after matching, so the change may look slightly off-tone.',
+      numbers,
       warn: true,
       suggestStricter: false,
     };
@@ -208,10 +216,16 @@ export function alignmentSummary(report: AlignmentReport, outsideAreas?: number)
   return {
     tone: 'success',
     label: 'Aligned',
-    detail: `Lined up within ${de(report.residualPx)} px using ${report.inliers} matching features; ${drift}. Everything outside the outline is your original photo.`,
+    detail: 'Lined up with your photo and colours matched. Everything outside the outline is your original photo.',
+    numbers,
     warn: false,
     suggestStricter: false,
   };
+}
+
+/** Tooltip text: the plain summary, then the measurements. */
+export function alignmentTooltip(s: Pick<AlignmentSummary, 'detail' | 'numbers'>): string {
+  return `${s.detail}\n${s.numbers}`;
 }
 
 /**
@@ -219,15 +233,23 @@ export function alignmentSummary(report: AlignmentReport, outsideAreas?: number)
  * footprint-changing choice (a wider or curvier path…): the new shape most
  * likely ran past the area that may change — a stricter prompt won't fix
  * that, letting the ground beside it change will. Null otherwise.
+ * With the run's `scene`, an element with no "Where" of its own counts when
+ * a walk, drive or patio was picked on the photo (growthSources).
  */
 export function footprintHint(
   brief: DesignBrief,
   report: AlignmentReport | undefined,
   /** Whether the notable outside changes touch the run's area (unknown → assume they do). */
   touchesArea = true,
+  scene?: Pick<SceneMap, 'zones' | 'paths'>,
 ): { message: string; elementId: string } | null {
   if (!report || brief.scope === 'whole' || report.outsideChanged < NOTICEABLE_SHARE || !touchesArea) return null;
-  const el = brief.elements.find((e) => growChoice(e) && (e.zoneIds.length > 0 || e.pathIds.length > 0));
+  const grows = (e: DesignBrief['elements'][number]) => {
+    if (!scene) return e.zoneIds.length > 0 || e.pathIds.length > 0;
+    const s = growthSources(e, brief, scene);
+    return s.zoneIds.length + s.pathIds.length > 0;
+  };
+  const el = brief.elements.find((e) => growChoice(e) && grows(e));
   if (!el) return null;
   const noun = el.type === 'driveway' ? 'drive' : el.type === 'patio' ? 'patio' : 'path';
   return { message: `The new ${noun} ran past the area that may change. Let the lawn beside it change and retry.`, elementId: el.id };

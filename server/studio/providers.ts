@@ -403,11 +403,15 @@ export interface ProvidersFromEnv {
 /**
  * OPENAI_API_KEY (+ OPENAI_IMAGE_MODEL, OPENAI_BASE_URL, OPENAI_INPUT_FIDELITY),
  * GEMINI_API_KEY or GOOGLE_API_KEY (+ GEMINI_IMAGE_MODEL), IMAGE_PROVIDER picks
- * the default among the configured ones (else OpenAI, then Gemini).
+ * the default among the configured ones (else OpenAI, then Gemini), or turns
+ * them all off ("none" / "off").
  */
 export function createProvidersFromEnv(env: Env = process.env, fetchImpl?: typeof fetch): ProvidersFromEnv {
   const warnings: string[] = [];
   const providers: Record<ImageProviderId, ImageProvider | undefined> = { openai: undefined, gemini: undefined };
+  const wanted = envStr(env, 'IMAGE_PROVIDER')?.toLowerCase() ?? null;
+  // Off entirely, as server/config.ts and /api/health say: a request naming a provider can't use a key that is set.
+  if (wanted === 'none' || wanted === 'off') return { providers, defaultProvider: null, warnings };
 
   const openaiKey = envStr(env, 'OPENAI_API_KEY');
   if (openaiKey) {
@@ -430,16 +434,13 @@ export function createProvidersFromEnv(env: Env = process.env, fetchImpl?: typeo
     });
   }
 
-  const wanted = envStr(env, 'IMAGE_PROVIDER')?.toLowerCase() ?? null;
   let defaultProvider: ImageProviderId | null = null;
   if (wanted === 'openai' || wanted === 'gemini') {
     if (providers[wanted]) defaultProvider = wanted;
     else warnings.push(`IMAGE_PROVIDER=${wanted} but its API key is not set (${wanted === 'openai' ? 'OPENAI_API_KEY' : 'GEMINI_API_KEY'}).`);
-  } else if (wanted && wanted !== 'none' && wanted !== 'off') {
+  } else if (wanted) {
     warnings.push(`IMAGE_PROVIDER="${wanted}" is not supported (use openai or gemini).`);
   }
-  if (wanted !== 'none' && wanted !== 'off') {
-    defaultProvider ??= providers.openai ? 'openai' : providers.gemini ? 'gemini' : null;
-  }
+  defaultProvider ??= providers.openai ? 'openai' : providers.gemini ? 'gemini' : null;
   return { providers, defaultProvider, warnings };
 }

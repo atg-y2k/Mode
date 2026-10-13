@@ -34,6 +34,29 @@ function sniff(head: Uint8Array): Kind {
   return null;
 }
 
+/**
+ * True when the top-level boxes of an ISO-BMFF (HEIC) file lead soundly to its
+ * 'meta' box. exifr walks them without checking sizes: a box of size 0 (a
+ * truncated or zero-padded download) makes it loop forever and freezes the
+ * tab, so such files are skipped before exifr sees them.
+ */
+export function isoBoxesSound(bytes: Uint8Array): boolean {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let offset = 0;
+  while (offset + 8 <= bytes.length) {
+    if (String.fromCharCode(...bytes.subarray(offset + 4, offset + 8)) === 'meta') return true;
+    let size = view.getUint32(offset);
+    if (size === 1) {
+      // 64-bit size right after the header.
+      if (offset + 16 > bytes.length) return false;
+      size = Number(view.getBigUint64(offset + 8));
+      if (size < 16) return false;
+    } else if (size < 8) return false;
+    offset += size;
+  }
+  return false;
+}
+
 const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 
 /** "+02:00" / "-0400" → minutes east of UTC. */
@@ -149,7 +172,9 @@ export async function readPhotoCapture(file: Blob): Promise<PhotoCapture | undef
       }
     }
     if (file.size > MAX_FULL_READ_BYTES) return undefined;
-    return captureFromTags(await parse(await file.arrayBuffer(), EXIFR_OPTIONS));
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    if (kind === 'heic' && !isoBoxesSound(bytes)) return undefined;
+    return captureFromTags(await parse(bytes, EXIFR_OPTIONS));
   } catch {
     return undefined;
   }

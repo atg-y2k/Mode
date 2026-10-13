@@ -1,20 +1,22 @@
 /**
  * Scene panel section for the free on-device vision: "Sharpen outlines on
  * this device (free)" (EdgeTAM + SegFormer turn the AI's rough outlines into
- * exact masks, with per-area agreement), and "Map the scene without AI" when
+ * exact masks, with per-area agreement), and "Map on this device (free)" when
  * Claude is off. One primary action, progress with the download size, clear
  * fallbacks when the browser can't run the models, and the SegFormer
  * licence: an explicit opt-in before its first use (NVIDIA non-commercial
- * weights), remembered on this device and changeable under "Models &
- * licenses". Declined, everything still works with the Apache-2.0 models.
+ * weights), asked as a plain choice ("Sharper detection" / "Standard
+ * detection", licence wording under "Licence details"), remembered on this
+ * device and changeable under "Models & licenses". Declined, everything
+ * still works with the Apache-2.0 models.
  */
-import { CircleAlert, Cpu, ExternalLink, MousePointerClick, ScanSearch, ShieldAlert, WandSparkles, X } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { CircleAlert, Cpu, ExternalLink, MousePointerClick, ScanSearch, WandSparkles, X } from 'lucide-react';
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
+import { CONTEXT_ZONE_KINDS, type SceneZone } from '../../../shared/types';
 import { findPhoto, isSketchZone, useStore } from '../../state/store';
 import { Badge, Button, Section, cn } from '../../ui/common';
 import { cancelVision, formatMB, MODELS, taskDownload, visionBackend, visionUnsupportedReason, type VisionStatus } from '../index';
 import { SEGFORMER_LICENSE, setSegformerChoice, type SegformerChoice } from '../license';
-import { modelBytes } from '../models';
 import { agreementLevel } from '../scoring';
 import { refreshCachedModels, useCachedModels, useSegformerChoice, useVisionStatus } from './hooks';
 import {
@@ -57,8 +59,10 @@ export function RefineSection({ photoId }: { photoId: string }) {
   const scene = photo.scene;
   const claudeOff = !!health && (!health.ok || !health.ai.enabled);
   const aiZones = scene?.zones.some((z) => !isSketchZone(z)) ?? false;
-  const pending = sharpenableZones(photo);
-  const sharpenable = sharpenableZones(photo, true);
+  // Counted like the Scene panel's area list (not the sky or the street, though those are sharpened too).
+  const listed = (z: SceneZone) => z.editable && !CONTEXT_ZONE_KINDS.includes(z.kind);
+  const pendingCount = sharpenableZones(photo).filter(listed).length;
+  const sharpenable = sharpenableZones(photo, true).filter(listed).length;
   const myJob = job?.photoId === photoId ? job : null;
   const otherBusy = !!job && !myJob;
   const interior = space.kind === 'interior';
@@ -79,14 +83,14 @@ export function RefineSection({ photoId }: { photoId: string }) {
       ) : myJob ? (
         <JobProgress job={myJob} status={status} />
       ) : consent && !segformer ? (
-        <SegformerConsent consent={consent} cached={cached} />
+        <SegformerConsent consent={consent} cached={cached} interior={interior} />
       ) : (
         <>
-          {scene && sharpenable.length > 0 && (
+          {scene && sharpenable > 0 && (
             <SharpenBlock
               photoId={photoId}
-              pendingCount={pending.length}
-              total={sharpenable.length}
+              pendingCount={pendingCount}
+              total={sharpenable}
               disabled={otherBusy}
               cached={cached}
             />
@@ -94,7 +98,7 @@ export function RefineSection({ photoId }: { photoId: string }) {
           {(!scene || !aiZones) && (
             <OfflineMapBlock photoId={photoId} prominent={claudeOff} interior={interior} disabled={otherBusy} cached={cached} hasScene={!!scene} />
           )}
-          {scene && sharpenable.length === 0 && aiZones && (
+          {scene && sharpenable === 0 && aiZones && (
             <p className="text-xs text-muted">Every area’s outline is hand-edited in Fine-tune — nothing to sharpen.</p>
           )}
           {otherBusy && <p className="text-xs text-muted">Busy with another photo — this can run when it finishes.</p>}
@@ -152,7 +156,9 @@ function SharpenBlock({
     <div className="flex flex-col gap-2">
       <p className="text-sm leading-relaxed text-text">
         {allSharp
-          ? `All ${total} area${total === 1 ? '' : 's'} have precise outlines.`
+          ? total === 1
+            ? 'The area has a precise outline.'
+            : `All ${total} areas have precise outlines.`
           : 'Snap each area’s rough outline to the real edges in the photo, so changes stay exactly inside it.'}
       </p>
       {allSharp ? (
@@ -204,10 +210,10 @@ function OfflineMapBlock({
   return (
     <div className="flex flex-col gap-2">
       <p className="text-sm leading-relaxed text-text">
-        {hasScene ? 'Add the main areas of this photo' : 'Claude is off, but this device can still map the photo'}: {finds} — outlined precisely, no AI or account needed.
+        {hasScene ? 'Add the main areas of this photo' : 'Map this photo on this device'}: Mode finds the {finds} and outlines them precisely — free and private, no key or account needed.
       </p>
       <Button variant="primary" className="self-start" icon={<ScanSearch className="size-4" />} disabled={disabled} onClick={() => void mapSceneOffline(photoId)}>
-        Map the scene without AI
+        Map on this device (free)
       </Button>
       <p className="text-[11px] leading-snug text-subtle">
         {downloadLine(interior ? 'mapInterior' : 'mapExterior', cached)} {backendLine()}
@@ -313,18 +319,25 @@ function Note({ icon, children }: { icon: ReactNode; children: ReactNode }) {
 }
 
 /**
- * The SegFormer licence, shown before its first use (C5): what the NVIDIA
- * licence allows, what works without it, and an explicit choice. The parked
- * action runs right after either answer.
+ * The SegFormer licence, shown before its first use (C5), as a choice a
+ * homeowner can judge: sharper detection (non-commercial weights) or
+ * standard detection (no restrictions), each with what it downloads for the
+ * parked action; the licence wording itself sits under "Licence details".
+ * Nothing downloads before a choice; the parked action runs right after
+ * either answer.
  */
-function SegformerConsent({ consent, cached }: { consent: PendingConsent; cached: Partial<Record<string, boolean>> | null }) {
+function SegformerConsent({ consent, cached, interior }: { consent: PendingConsent; cached: Partial<Record<string, boolean>> | null; interior: boolean }) {
   const seg = MODELS.segformer;
-  const backend = visionBackend();
-  const size = cached?.segformer ? null : formatMB(modelBytes('segformer', backend?.backend ?? 'wasm', backend?.f16 ?? false));
-  const what = consent.action === 'map' ? 'map the scene' : 'sharpen the outlines';
+  const task = consent.action === 'map' || consent.action === 'remap' ? (interior ? 'mapInterior' : 'mapExterior') : 'refine';
+  // Each choice's own total (standard maps with CLIPSeg instead, so it isn't always the smaller one).
+  const download = (semantic: boolean) => {
+    const d = taskDownload(task, cached ?? {}, semantic);
+    return d.bytes ? ` (${d.label} download)` : '';
+  };
+  const what = consent.action === 'map' ? 'map the scene' : consent.action === 'remap' ? 'map the scene again' : 'sharpen the outlines';
   // The action may have been parked from the photo ("Map on this device") with the
   // question below the fold: bring the whole card into view and move focus to it
-  // (the card, not "Agree", so nothing nudges towards accepting the licence).
+  // (the card, not a choice, so nothing nudges towards accepting the licence).
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const el = ref.current;
@@ -340,49 +353,76 @@ function SegformerConsent({ consent, cached }: { consent: PendingConsent; cached
       ref={ref}
       role="group"
       aria-labelledby="mode-segformer-title"
+      aria-describedby="mode-segformer-desc"
       tabIndex={-1}
-      className="flex flex-col gap-2.5 rounded-xl border border-warning/40 bg-warning/10 px-3 py-3 outline-none"
+      className="flex flex-col gap-2.5 rounded-xl border border-accent/30 bg-accent-soft px-3 py-3 outline-none"
     >
       <div className="flex items-start gap-2">
-        <ShieldAlert className="mt-0.5 size-4 shrink-0 text-warning" aria-hidden />
+        <ScanSearch className="mt-0.5 size-4 shrink-0 text-accent" aria-hidden />
         <div className="min-w-0">
           <p id="mode-segformer-title" className="text-sm font-medium text-text">
-            One question before the first download
+            One choice before the first download
           </p>
-          <p className="mt-1 text-xs leading-relaxed text-text">
-            {seg.name} {seg.purpose}. Its weights are under the{' '}
+          <p id="mode-segformer-desc" className="mt-1 text-xs leading-relaxed text-muted">
+            How should this device detect the areas in your photo?
+          </p>
+        </div>
+      </div>
+      <div className="flex flex-col gap-2">
+        <ConsentChoice title={`Sharper detection${download(true)}`} onClick={() => resolveSegformerConsent('accepted')}>
+          Free for personal, non-commercial use — fine for your own home, not for paid or client work.
+        </ConsentChoice>
+        <ConsentChoice title={`Standard detection${download(false)}`} onClick={() => resolveSegformerConsent('declined')}>
+          No restrictions. Areas may be found a little less precisely.
+        </ConsentChoice>
+        <Button size="sm" variant="ghost" className="self-start max-lg:h-9" onClick={dismissSegformerConsent}>
+          Cancel
+        </Button>
+      </div>
+      <details className="text-[11px] leading-snug text-muted">
+        <summary className="cursor-pointer select-none rounded font-medium hover:text-text focus-visible:outline-2 focus-visible:outline-accent">Licence details</summary>
+        <div className="mt-1.5 flex flex-col gap-1.5">
+          <p>
+            Sharper detection adds {seg.name}, which {seg.purpose}. Its weights are under the{' '}
             <a href={SEGFORMER_LICENSE.url} target="_blank" rel="noreferrer" className="font-medium text-accent underline-offset-2 hover:underline">
               {SEGFORMER_LICENSE.name}
               <ExternalLink className="ml-0.5 inline size-3 align-[-1px]" aria-hidden />
             </a>
-            : <strong className="font-semibold">{SEGFORMER_LICENSE.summary.replace(/\.$/, '')}</strong>.
+            : <strong className="font-semibold text-text">{SEGFORMER_LICENSE.summary.replace(/\.$/, '')}</strong>.
           </p>
-          <p className="mt-1 text-xs leading-relaxed text-muted">{SEGFORMER_LICENSE.detail}</p>
-          <p className="mt-1 text-xs leading-relaxed text-muted">{SEGFORMER_LICENSE.without}</p>
+          <p>{SEGFORMER_LICENSE.detail}</p>
+          <p>{SEGFORMER_LICENSE.without}</p>
         </div>
-      </div>
-      <div className="flex flex-wrap gap-2">
-        <Button size="sm" variant="primary" className="max-lg:h-9" onClick={() => resolveSegformerConsent('accepted')}>
-          Agree &amp; use SegFormer{size ? ` (+${size})` : ''}
-        </Button>
-        <Button size="sm" variant="secondary" className="max-lg:h-9" onClick={() => resolveSegformerConsent('declined')}>
-          Continue without it
-        </Button>
-        <Button size="sm" variant="ghost" className="max-lg:h-9" onClick={dismissSegformerConsent}>
-          Cancel
-        </Button>
-      </div>
+      </details>
       <p className="text-[11px] leading-snug text-subtle">
-        Then Mode will {what}. Your answer is remembered on this device — change it any time under “Models &amp; licenses”.
+        Then Mode will {what}; the models download once, then work offline. Your choice is remembered on this device — change it any time under “Models &amp; licenses”.
       </p>
     </div>
   );
 }
 
+/** One answer of the licence question: a plain title (the button's name) and what it means (its description). */
+function ConsentChoice({ title, children, onClick }: { title: string; children: ReactNode; onClick: () => void }) {
+  const id = useId();
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-describedby={id}
+      className="flex flex-col items-start gap-0.5 rounded-lg border border-line bg-surface px-3 py-2 text-left transition-colors hover:bg-surface-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+    >
+      <span className="text-sm font-medium text-text">{title}</span>
+      <span id={id} aria-hidden className="text-xs leading-snug text-muted">
+        {children}
+      </span>
+    </button>
+  );
+}
+
 const CHOICE_TEXT: Record<SegformerChoice | 'unset', string> = {
-  accepted: 'SegFormer in use (licence accepted)',
-  declined: 'SegFormer off — EdgeTAM + CLIPSeg only',
-  unset: 'SegFormer is non-commercial use only',
+  accepted: 'Sharper detection (SegFormer, licence accepted)',
+  declined: 'Standard detection (SegFormer off)',
+  unset: 'Sharper detection is for non-commercial use',
 };
 
 function LicenseNote({ choice }: { choice: SegformerChoice | null }) {

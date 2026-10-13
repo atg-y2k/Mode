@@ -1,9 +1,10 @@
 /**
  * Starts the Mode server: the API on $PORT (or $API_PORT, default 8787) and,
- * when NODE_ENV=production, the built web app from ./dist with SPA fallback.
+ * when NODE_ENV=production (or with --production), the built web app from
+ * ./dist with SPA fallback.
  *
  *   npm run dev:api   tsx watch, API only (Vite serves the app and proxies /api)
- *   npm start         production: one process serves app + API
+ *   npm start         production (--production): one process serves app + API
  */
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -15,6 +16,9 @@ import { createHandoffDepsFromEnv, registerHandoffRoutes } from './handoff/route
 import { registerSiteRoutes } from './site/routes';
 import { createStudioDepsFromEnv, registerStudioRoutes } from './studio/routes';
 
+// `npm start` passes --production: an npm script can't set NODE_ENV=... in Windows' cmd.
+// loadConfig reads NODE_ENV when it is called, so this comes first.
+if (process.argv.slice(2).includes('--production')) process.env.NODE_ENV = 'production';
 const config = loadConfig();
 for (const warning of config.warnings) console.warn(`[mode] warning: ${warning}`);
 if (config.staticDir && !existsSync(join(config.staticDir, 'index.html'))) {
@@ -73,7 +77,7 @@ const server = serve(
     console.log(
       config.staticDir
         ? `[mode] serving the web app from ${config.staticDir}`
-        : '[mode] API only (development): open the app from Vite at http://localhost:5173',
+        : '[mode] API only (development): open the app at the address Vite prints (normally http://localhost:5173)',
     );
   },
 );

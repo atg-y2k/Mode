@@ -45,6 +45,7 @@ import type { ImageProviderId } from '../../../shared/api';
 import type { ClimateProfile, HandoffApp, ProjectLocation } from '../../../shared/types';
 import { HANDOFF_RATIOS } from '../../handoff/prepare';
 import { ARCHITECTURAL_STYLES, DESIGN_THEMES } from '../../assets/design';
+import { userPlatform } from '../../lib/heic';
 import { fetchClimate } from '../../lib/studio';
 import { ZONE_SOURCE_LABELS } from '../../site/format';
 import { useInvasivesReady, useZipLookup } from '../../site/hooks';
@@ -466,8 +467,11 @@ function GenerationTab() {
               </span>
             ) : (
               <>
-                No image provider is configured on this server. Add <Code>OPENAI_API_KEY</Code> or <Code>GEMINI_API_KEY</Code> to{' '}
-                <Code>.env</Code> and restart — see <em>AI &amp; server</em>.
+                Automatic renders need an OpenAI or Gemini key (optional). Without one, Mode hands each edit to your ChatGPT or Gemini app — set that up
+                above.{' '}
+                <button type="button" onClick={() => setSettingsTab('server')} className="font-medium text-accent underline-offset-2 hover:underline">
+                  How to add a key
+                </button>
               </>
             )}
           </div>
@@ -747,30 +751,70 @@ function ServerTab() {
         </ul>
       </Group>
 
-      {level !== 'ready' && (
-        <Group title="Turn on AI features" description="Keys stay on the server — the browser never sees them.">
-          <ol className="flex list-decimal flex-col gap-2 pl-5 text-sm text-muted marker:text-subtle">
-            <li>
-              Create a <Code>.env</Code> file next to <Code>package.json</Code> (copy <Code>.env.example</Code>).
-            </li>
-            <li>
-              Add your keys:
-              <pre className="mt-1.5 overflow-x-auto rounded-lg bg-stage p-3 font-mono text-xs leading-relaxed text-white/90">
-                {`ANTHROPIC_API_KEY=sk-ant-…   # scene mapping, planning, suggestions
-OPENAI_API_KEY=sk-…          # photoreal variations (OpenAI)
-GEMINI_API_KEY=…             # photoreal variations (Gemini)
-IMAGE_PROVIDER=openai        # optional default: openai | gemini`}
-              </pre>
-            </li>
-            <li>
-              Restart the server (<Code>npm run dev</Code> or <Code>npm start</Code>), then press <em>Check again</em>.
-            </li>
-          </ol>
-        </Group>
-      )}
+      {level !== 'ready' && <AddKeyGroup imageKey={level === 'planning-only'} />}
 
       <TokenSettings />
     </>
+  );
+}
+
+/**
+ * How to add a key — the one place that names `.env` and its variables:
+ * Claude's key while Claude is off, else an image key (optional). The same
+ * steps as the README, for this computer.
+ */
+function AddKeyGroup({ imageKey }: { imageKey: boolean }) {
+  const platform = userPlatform();
+  const commands = [
+    ...(platform !== 'windows' ? [{ os: 'macOS', lines: 'cp -n .env.example .env\nopen -e .env' }] : []),
+    ...(platform !== 'mac' ? [{ os: 'Windows', lines: 'copy .env.example .env\nnotepad .env' }] : []),
+  ];
+  return (
+    <Group title={imageKey ? 'Add an image key (optional)' : 'Add a Claude key'} description="Keys stay with the Mode server on this computer — the browser never sees them.">
+      <ol className="flex list-decimal flex-col gap-2 pl-5 text-sm text-muted marker:text-subtle">
+        <li>
+          {imageKey ? (
+            <>
+              Create an OpenAI key (platform.openai.com/api-keys) or a Gemini key (aistudio.google.com/apikey).
+            </>
+          ) : (
+            <>Create a key at console.anthropic.com (API keys). Its use is billed to your Anthropic account.</>
+          )}
+        </li>
+        <li>
+          In the terminal that runs Mode, press <kbd className="font-sans font-medium text-text">Ctrl+C</kbd> to stop it
+          {platform === 'mac' ? '' : ' (on Windows, answer Y)'}, then open Mode&apos;s settings file. The first line makes the file: skip it if you
+          already have one.
+          {commands.map((c) => (
+            <div key={c.os} className="mt-1.5">
+              {commands.length > 1 && <span className="text-xs font-medium text-text">{c.os}</span>}
+              <pre className="mt-1 overflow-x-auto rounded-lg bg-stage p-3 font-mono text-xs leading-relaxed text-white/90">{c.lines}</pre>
+            </div>
+          ))}
+        </li>
+        <li>
+          {imageKey ? (
+            <>
+              Remove the <Code>#</Code> at the start of the <Code>OPENAI_API_KEY=</Code> or <Code>GEMINI_API_KEY=</Code> line and paste your key right after
+              the <Code>=</Code>. Save the file.
+            </>
+          ) : (
+            <>
+              Paste your key right after <Code>ANTHROPIC_API_KEY=</Code> and save the file.
+            </>
+          )}
+        </li>
+        <li>
+          Start Mode again with <Code>npm run dev</Code>, then press <em>Check again</em>.
+        </li>
+      </ol>
+      {!imageKey && (
+        <p className="text-xs leading-relaxed text-muted">
+          OpenAI and Gemini keys are optional: with one, Mode renders images itself instead of handing each edit to your ChatGPT or Gemini app. They go in
+          the same file.
+        </p>
+      )}
+    </Group>
   );
 }
 

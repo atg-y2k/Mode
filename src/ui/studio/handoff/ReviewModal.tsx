@@ -5,7 +5,7 @@
  * for hand-offs how many pastes this costs. Send continues the run; Edit
  * brief or closing cancels it. Mounted once by the Workspace (every pane).
  */
-import { Loader2, Pencil, Send, ShieldCheck, Sparkles, TriangleAlert, Undo2, X } from 'lucide-react';
+import { Info, Loader2, Pencil, Send, ShieldCheck, Sparkles, TriangleAlert, Undo2, X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { CONTEXT_ZONE_KINDS, type Generation, type HandoffApp, type Photo } from '../../../../shared/types';
 import type { PreparedHandoff } from '../../../handoff';
@@ -13,13 +13,13 @@ import { findPhoto, useStore } from '../../../state/store';
 import { Button, Modal, cn } from '../../common';
 import { PlantNoteChips } from '../Feasibility';
 import { cancelRun } from '../generate';
-import { briefTargetIds, footprintRoom, growChoice, sceneForRun } from '../maskFromZones';
+import { briefTargetIds, footprintRoom, growChoice, growthSources, sceneForRun } from '../maskFromZones';
 import { AppIcon, TargetPreview } from './bits';
 import { countToday, useHandoffLog, usageHint } from './log';
 import { currentReferences, packPrompt, preparedExport } from './pack';
 import { pasteImage } from './prefs';
 import { appLabel } from './planned';
-import { declineReview, registerReviewHost, submitReview, useReview, type ReviewItem, type ReviewRequest } from './review';
+import { declineReview, handoffFooter, registerReviewHost, submitReview, TEMPLATE_PLAN_NOTE, useReview, type ReviewItem, type ReviewRequest } from './review';
 
 function useObjectUrl(blob: Blob | null): string | null {
   const [url, setUrl] = useState<string | null>(null);
@@ -64,14 +64,23 @@ function protectedLabels(photo: Photo, g: Generation): { zones: string[]; keep: 
   const { zoneIds, pathIds } = briefTargetIds(g.brief, scene);
   const whole = g.brief.scope === 'whole' || zoneIds.length + pathIds.length === 0;
   const targeted = new Set(zoneIds);
-  const roomZones = g.target ? (g.target.room?.zones ?? []) : (footprintRoom(scene, g.brief, photo)?.room?.zones ?? []);
+  // The live room only for runs from before targets were frozen. With no room, `fr.empty` tells "no ground beside it" (clipped) from "already picked".
+  const fr = g.target?.room ? null : footprintRoom(scene, g.brief, photo);
+  const roomZones = g.target ? (g.target.room?.zones ?? []) : (fr?.room?.zones ?? []);
   const roomIds = new Set(roomZones.map((z) => z.id));
   const zones = (scene?.zones ?? []).filter((z) => !targeted.has(z.id) && !roomIds.has(z.id) && !CONTEXT_ZONE_KINDS.includes(z.kind)).map((z) => z.label);
-  const growing = g.brief.elements.filter((e) => growChoice(e) && (e.zoneIds.length > 0 || e.pathIds.length > 0));
+  // Elements that grow from somewhere: their own "Where", else a walk / drive / patio picked on the photo.
+  const growing = scene
+    ? g.brief.elements.filter((e) => {
+        if (!growChoice(e)) return false;
+        const s = growthSources(e, g.brief, scene);
+        return s.zoneIds.length + s.pathIds.length > 0;
+      })
+    : [];
   const noun = ({ pathway: 'walk', driveway: 'drive', patio: 'patio' } as Record<string, string>)[growing[0]?.type ?? ''] ?? 'area';
   const room = [...new Set(roomZones.map((z) => `${z.kind === 'lawn' ? 'Lawn' : z.label || 'Ground'} beside the ${noun}`))];
   const grows = !whole && growing.length > 0;
-  return { zones: [...new Set(zones)], keep: scene?.keep ?? [], whole, room, clipped: grows && roomZones.length === 0 };
+  return { zones: [...new Set(zones)], keep: scene?.keep ?? [], whole, room, clipped: grows && roomZones.length === 0 && fr?.empty === true };
 }
 
 export function ReviewModal() {
@@ -136,9 +145,7 @@ function ReviewDialog({ review }: { review: ReviewRequest }) {
             Edit brief
           </Button>
           <span className="min-w-0 flex-1 text-xs text-muted max-sm:hidden">
-            {hand
-              ? `${n} hand-off${n === 1 ? '' : 's'} — each in a new chat. You can do some now and the rest later.`
-              : 'Nothing is sent to the image API until you press Render.'}
+            {hand ? handoffFooter(n) : 'Nothing is sent to the image API until you press Render.'}
           </span>
           <Button variant="ghost" onClick={cancel}>
             Cancel
@@ -269,8 +276,10 @@ function ReviewDialog({ review }: { review: ReviewRequest }) {
                 </div>
               )}
               {review.planSource === 'template' && (
-                <p className="rounded-lg bg-warning/10 px-3 py-2 text-xs leading-relaxed text-warning">
-                  Claude isn’t connected, so each instruction follows a simple template of your brief. Edit them freely before sending.
+                // Claude is optional: plain information, not a warning.
+                <p className="flex items-start gap-1.5 rounded-lg bg-surface-2 px-3 py-2 text-xs leading-relaxed text-muted">
+                  <Info className="mt-px size-3.5 shrink-0" aria-hidden />
+                  <span>{TEMPLATE_PLAN_NOTE}</span>
                 </p>
               )}
               {review.plantNotes && review.plantNotes.length > 0 && <PlantNoteChips notes={review.plantNotes} max={8} />}

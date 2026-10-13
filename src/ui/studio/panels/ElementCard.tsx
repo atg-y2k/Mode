@@ -11,11 +11,14 @@ import { feasibilityContext, getElementDef, guidanceFor, swatchSpanIn, withPlant
 import { useInvasivesReady } from '../../../site/hooks';
 import { findPhoto, useStore } from '../../../state/store';
 import { useSceneJob } from '../../shell/sceneJobs';
+import { useDeviceMapping } from '../../../vision/ui/jobs';
+import { openSettings } from '../../shell/shellUI';
 import { Button, IconButton, TextInput, cn } from '../../common';
 import { generationBlocker } from '../generate';
-import { footprintRoom, growChoice, ROOM_GROUND_KINDS } from '../maskFromZones';
+import { footprintRoom, growChoice, growthSources, ROOM_GROUND_KINDS } from '../maskFromZones';
 import { elementFeasibilityContext } from '../planRequest';
 import { compareOptions, editBrief, mapScene, tailorElement, tailorJobKey, typeBrief } from './actions';
+import { aiAvailability, aiUsable, SERVER_OFFLINE_REASON } from './aiErrors';
 import { clearAiJob, useAiJob } from './aiJobs';
 import { chooseOption, defaultCompareSelection, isChosen, moveElement, removeElement, toggleElementPath, toggleElementZone, worstChosenFeasibility } from './briefOps';
 import { FeasibilityHeader } from './FeasibilityHeader';
@@ -23,7 +26,7 @@ import { growthExamples } from './growth';
 import { GrowthSlider } from './GrowthSlider';
 import { elementIcon } from './icons';
 import { isPlantingElement, siteHeader, spotZones } from './siteHeader';
-import { AiJobStatus, AiProgress, Callout, Chip, FEASIBILITY_META, FeasibilityBadge, InlineText, OptionVisualView, useAiReady } from './ui';
+import { AiJobStatus, AiProgress, Callout, Chip, FEASIBILITY_META, FeasibilityBadge, InlineText, OptionVisualView } from './ui';
 import { zonesForElement } from './zones';
 
 export interface ElementCardProps {
@@ -243,9 +246,11 @@ function FootprintNote({ el, photoId, scene }: { el: ElementSpec; photoId: strin
   }, [el, scene, scope, targets, photo?.width, photo?.height]); // eslint-disable-line react-hooks/exhaustive-deps
   if (!info || !scene) return null;
   const noun = FOOTPRINT_NOUN[el.type] ?? 'area';
-  if (!info.empty && info.room) {
-    const lawn = info.room.zones.some((z) => z.kind === 'lawn');
-    const names = lawn ? 'the lawn' : info.room.zones.map((z) => z.label.toLowerCase()).slice(0, 2).join(' and ') || 'the ground';
+  if (!info.empty) {
+    // Room beside it, or ground beside it that is already picked on the photo.
+    const beside = [...(info.room?.zones ?? []), ...info.picked];
+    const lawn = beside.some((z) => z.kind === 'lawn');
+    const names = lawn ? 'the lawn' : beside.map((z) => z.label.toLowerCase()).slice(0, 2).join(' and ') || 'the ground';
     return (
       <p className="flex items-start gap-1.5 text-xs leading-relaxed text-muted" role="note">
         <MoveHorizontal className="mt-px size-3.5 shrink-0 text-accent" aria-hidden />
@@ -255,16 +260,18 @@ function FootprintNote({ el, photoId, scene }: { el: ElementSpec; photoId: strin
       </p>
     );
   }
-  // Nothing beside it to grow into: the ground zones nearest to the element, to let them change.
-  const own = scene.zones.filter((z) => el.zoneIds.includes(z.id));
+  // Nothing beside it to grow into: the ground zones nearest to what it grows from (its "Where", or the walk picked on the photo), to let them change.
+  const src = growthSources(el, { targetZoneIds: targets ?? [] }, scene);
+  const own = scene.zones.filter((z) => src.zoneIds.includes(z.id));
   const center = (pts: { x: number; y: number }[]) => pts.reduce((a, p) => ({ x: a.x + p.x / pts.length, y: a.y + p.y / pts.length }), { x: 0, y: 0 });
-  const anchors = [...own.map((z) => center(z.polygon)), ...scene.paths.filter((p) => el.pathIds.includes(p.id)).map((p) => center(p.points))];
+  const anchors = [...own.map((z) => center(z.polygon)), ...scene.paths.filter((p) => src.pathIds.includes(p.id)).map((p) => center(p.points))];
   const dist = (pts: { x: number; y: number }[]) => {
     const c = center(pts);
     return Math.min(...anchors.map((a) => Math.hypot(a.x - c.x, a.y - c.y)));
   };
+  // Ground already picked can't help (it isn't beside it, or there'd be no note).
   const nearby = scene.zones
-    .filter((z) => ROOM_GROUND_KINDS.includes(z.kind) && z.editable && !el.zoneIds.includes(z.id) && z.polygon.length >= 3)
+    .filter((z) => ROOM_GROUND_KINDS.includes(z.kind) && z.editable && !el.zoneIds.includes(z.id) && !targets?.includes(z.id) && z.polygon.length >= 3)
     .sort((a, b) => dist(a.polygon) - dist(b.polygon))
     .slice(0, 2);
   return (
@@ -278,7 +285,10 @@ function FootprintNote({ el, photoId, scene }: { el: ElementSpec; photoId: strin
             onClick={() =>
               editBrief(photoId, (b) => {
                 const t = b.elements.find((e) => e.id === el.id);
-                if (t) for (const z of nearby) if (!t.zoneIds.includes(z.id)) toggleElementZone(t, z.id);
+                if (!t) return;
+                // With no "Where" of its own it grew from the walk picked on the photo: keep that walk in its "Where" too.
+                for (const id of [...src.zoneIds, ...nearby.map((z) => z.id)]) if (!t.zoneIds.includes(id)) toggleElementZone(t, id);
+                for (const id of src.pathIds) if (!t.pathIds.includes(id)) toggleElementPath(t, id);
               })
             }
           >
@@ -295,7 +305,9 @@ function FootprintNote({ el, photoId, scene }: { el: ElementSpec; photoId: strin
 
 function WherePicker({ el, photoId, scene, relevantKinds }: { el: ElementSpec; photoId: string; scene: SceneMap | undefined; relevantKinds: readonly ZoneKind[] }) {
   const [showAll, setShowAll] = useState(false);
-  const sceneJob = useSceneJob(photoId);
+  const claudeMapping = useSceneJob(photoId);
+  const deviceMapping = useDeviceMapping(photoId);
+  const sceneJob = !!claudeMapping || deviceMapping;
   const { relevant, other } = useMemo(() => zonesForElement(scene, relevantKinds), [scene, relevantKinds]);
   const focus = (id: string | null) => useStore.getState().setStudio({ focusZoneId: id });
 
@@ -558,7 +570,10 @@ function ChosenDetails({ options }: { options: ElementOption[] }) {
 function TailorSection({ el, photoId }: { el: ElementSpec; photoId: string }) {
   const key = tailorJobKey(el.id);
   const job = useAiJob(key);
-  const aiReady = useAiReady();
+  const availability = aiAvailability(useStore((s) => s.health));
+  const aiReady = aiUsable(availability);
+  // No Claude key: an optional extra, said plainly (the setup steps live in Settings).
+  const keyOff = availability.state === 'off';
   const [asking, setAsking] = useState(false);
   const [ask, setAsk] = useState('');
   const run = () => tailorElement(photoId, el.id, ask);
@@ -573,7 +588,11 @@ function TailorSection({ el, photoId }: { el: ElementSpec; photoId: string }) {
         <div className="min-w-0 flex-1 text-xs">
           <p className="font-medium text-text">Tailor to my photo</p>
           <p className="mt-0.5 text-muted">
-            {aiReady ? 'Get options picked for this house — its style, materials, light and your idea board.' : 'Needs AI: add ANTHROPIC_API_KEY to .env and restart the server.'}
+            {aiReady
+              ? 'Get options picked for this house — its style, materials, light and your idea board.'
+              : keyOff
+                ? 'Optional: with a Claude key, Mode picks options that suit this house — its style, materials, light and your idea board.'
+                : SERVER_OFFLINE_REASON}
           </p>
         </div>
       </div>
@@ -594,9 +613,15 @@ function TailorSection({ el, photoId }: { el: ElementSpec; photoId: string }) {
         />
       )}
       <div className="flex flex-wrap gap-2">
-        <Button size="sm" className="max-lg:h-9" variant="soft" icon={<Sparkles className="size-3.5" />} disabled={!aiReady} onClick={run}>
-          {job?.status === 'done' ? 'Tailor again' : 'Tailor options'}
-        </Button>
+        {keyOff ? (
+          <Button size="sm" className="max-lg:h-9" variant="ghost" onClick={() => openSettings('server')}>
+            How to add a Claude key
+          </Button>
+        ) : (
+          <Button size="sm" className="max-lg:h-9" variant="soft" icon={<Sparkles className="size-3.5" />} disabled={!aiReady} onClick={run}>
+            {job?.status === 'done' ? 'Tailor again' : 'Tailor options'}
+          </Button>
+        )}
         {!asking && aiReady && (
           <Button size="sm" className="max-lg:h-9" variant="ghost" onClick={() => setAsking(true)}>
             Ask something specific

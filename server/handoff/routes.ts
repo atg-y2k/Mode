@@ -2,8 +2,10 @@
  * Manual hand-off helper routes (shared/api.ts §Manual hand-off helpers):
  *
  *   GET  /api/handoff/watch       → { available, dir, on, reason? }  (reason: why not available —
- *                                 no folder, or no permission: on macOS the Files & Folders setting)
- *   POST /api/handoff/watch       { on: boolean } → { available, dir, on }  (409 + reason when it can't)
+ *                                 no folder. It never lists the folder: on macOS that asks for
+ *                                 Downloads access, which waits until the user turns watching on)
+ *   POST /api/handoff/watch       { on: boolean } → { available, dir, on }  (409 + reason when it can't:
+ *                                 no folder, or no permission — on macOS the Files & Folders setting)
  *   GET  /api/handoff/events      Server-Sent Events while watching:
  *                                   `ready`   { available, dir, on }  (first event)
  *                                   `file`    { id, name, size, mtime } (id: = sequence number)
@@ -108,6 +110,7 @@ export function registerHandoffRoutes<E extends Env>(app: Hono<E>, deps: Handoff
         return c.json(watcher.status());
       }
       // No folder, or no permission to read it (macOS privacy settings): 409 with the fix.
+      // Listing the folder here (the user asked to watch it) is what shows macOS's access prompt.
       const unavailable = watcher.unavailableReason();
       if (unavailable) throw new ApiHttpError('bad_request', unavailable, 409);
       try {

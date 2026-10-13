@@ -148,6 +148,58 @@ describe('zonesFromClasses', () => {
     expect(strip(95, true)).toContain('driveway');
   });
 
+  describe('a "paved patio" (CLIPSeg) that is really the front walk', () => {
+    /**
+     * Steps below the door (y 95–101), then a paved part under "a paved
+     * patio" from `y0` down to `y1`, `top` px wide at its far end and
+     * `bottom` px at its near end (perspective), centred on the door.
+     */
+    const paved = ({ top, bottom, y1 = 150, y0 = 101, garage = false }: { top: number; bottom: number; y1?: number; y0?: number; garage?: boolean }) => {
+      const classes = houseScene();
+      const W = classes.width;
+      const paint = (x0: number, ya: number, x1: number, yb: number, c: number) => {
+        for (let y = ya; y < yb; y++) for (let x = x0; x < x1; x++) classes.labels[y * W + x] = c;
+      };
+      paint(92, 95, 108, 150, ADE.grass); // no other walk
+      paint(88, 95, 112, 101, ADE.stairs);
+      if (garage) paint(60, 101, 86, 115, ADE.door); // wider than tall, beside the paving: a garage door
+      const patio = new Float32Array(W * classes.height);
+      for (let y = y0; y < y1; y++) {
+        const half = Math.round((top + ((bottom - top) * (y - y0)) / Math.max(1, y1 - 1 - y0)) / 2);
+        for (let x = 100 - half; x < 100 + half; x++) {
+          classes.labels[y * W + x] = ADE.path;
+          patio[y * W + x] = 0.9;
+        }
+      }
+      return zonesFromClasses(classes, photo, false, { width: W, height: classes.height, probs: { patio } });
+    };
+
+    it('a wide flagstone walk from the steps toward the street becomes the walkway', () => {
+      // 28 → 44 px (14–22% of the frame), 49 rows: a strip receding to the steps.
+      const zones = paved({ top: 28, bottom: 44 });
+      expect(zones.map((z) => z.kind)).toContain('steps');
+      const walk = zones.find((z) => z.kind === 'walkway');
+      expect(walk?.label).toBe('Walkway');
+      expect(pointInPolygon({ x: 100 * 8, y: 130 * 8 }, walk!.polygon)).toBe(true);
+      expect(zones.map((z) => z.kind)).not.toContain('patio');
+    });
+
+    it('keeps a real patio: shallow, wide, off on its own or at a garage door', () => {
+      // At the steps but wide and shallow (44 px across, 18 rows deep).
+      expect(paved({ top: 44, bottom: 44, y1: 119 }).map((z) => z.kind)).toEqual(expect.arrayContaining(['patio', 'steps']));
+      expect(paved({ top: 44, bottom: 44, y1: 119 }).map((z) => z.kind)).not.toContain('walkway');
+      // At the steps but over a quarter of the frame wide.
+      expect(paved({ top: 56, bottom: 64 }).map((z) => z.kind)).not.toContain('walkway');
+      // Strip-shaped, but not reaching the steps or door.
+      expect(paved({ top: 28, bottom: 44, y0: 112 }).map((z) => z.kind)).toContain('patio');
+      expect(paved({ top: 28, bottom: 44, y0: 112 }).map((z) => z.kind)).not.toContain('walkway');
+      // Touching a garage door too.
+      const garage = paved({ top: 28, bottom: 44, garage: true }).map((z) => z.kind);
+      expect(garage).toContain('garage-door');
+      expect(garage).toContain('patio');
+    });
+  });
+
   it('maps interiors and ignores CLIPSeg there', () => {
     const W = 120;
     const H = 90;

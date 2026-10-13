@@ -40,16 +40,19 @@ export default defineConfig({
         ANTHROPIC_API_KEY: '',
         OPENAI_API_KEY: '',
         GEMINI_API_KEY: '',
+        GOOGLE_API_KEY: '',
         MODE_ACCESS_TOKEN: '',
       },
       reuseExistingServer,
       timeout: 60_000,
     },
     {
-      // Vite proxies /api to the server above.
+      // Vite proxies /api to the server above. Its proxy follows the API's
+      // port as server/config.ts reads it (PORT first), so a PORT in the
+      // developer's .env can't send it elsewhere.
       command: `npx vite --port ${PORT} --strictPort`,
       url: `http://localhost:${PORT}`,
-      env: { API_PORT: String(API_PORT) },
+      env: { PORT: String(API_PORT) },
       reuseExistingServer,
       timeout: 60_000,
     },

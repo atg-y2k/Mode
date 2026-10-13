@@ -30,11 +30,17 @@ vi.mock('./persistence', async (importOriginal) => {
   };
 });
 
-// Photo import decodes images in a browser; here it returns fixed pixels.
-vi.mock('../lib/imageImport', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../lib/imageImport')>()),
-  importImageFile: async () => ({ blob: new Blob(['full']), thumb: new Blob(['thumb']), width: 40, height: 30 }),
-}));
+// Photo import decodes images in a browser; here it returns fixed pixels (and, like Chrome, can't open .heic).
+vi.mock('../lib/imageImport', async (importOriginal) => {
+  const { heicUnsupportedError } = await import('../lib/heic');
+  return {
+    ...(await importOriginal<typeof import('../lib/imageImport')>()),
+    importImageFile: async (file: File) => {
+      if (/\.heic$/i.test(file.name)) throw heicUnsupportedError('mac');
+      return { blob: new Blob(['full']), thumb: new Blob(['thumb']), width: 40, height: 30 };
+    },
+  };
+});
 
 function deferred() {
   let open!: () => void;
@@ -166,6 +172,30 @@ describe('setScene', () => {
     const sc = currentPhoto().scene!;
     expect(sc.zones.map((z) => z.id)).toEqual(['lawn2', 'sk']);
     expect(sc.paths.map((p) => p.id)).toEqual(['path-sk']);
+  });
+
+  it('the first map fills the "Where" of elements added before it (only empty ones, only the first map)', async () => {
+    const { newElementSpec } = await import('../assets/design');
+    const s = useStore.getState();
+    const early = newElementSpec('pathway');
+    const picked = { ...newElementSpec('planting-bed'), zoneIds: ['mine'] };
+    s.updateDraft('p1', (b) => void b.elements.push(early, picked));
+    expect(early.zoneIds).toEqual([]);
+    const walk = zone('walk', { kind: 'walkway' });
+    const path = { id: 'p_main', label: 'Walk', from: 'drive', to: 'door', description: '', points: [], widthPx: 40, kind: 'existing' as const };
+    s.setScene('p1', scene([zone('lawn'), walk, zone('sky', { kind: 'sky', editable: false })], [path]));
+    const [a, b] = currentPhoto().draft!.elements;
+    expect(a).toMatchObject({ zoneIds: ['walk'], pathIds: ['p_main'] });
+    expect(b.zoneIds).toEqual(['mine']);
+    // One undo step with the map.
+    useStore.getState().undo();
+    expect(currentPhoto().scene).toBeUndefined();
+    expect(currentPhoto().draft!.elements[0].zoneIds).toEqual([]);
+    useStore.getState().redo();
+    // A re-map leaves a "Where" the user emptied as it is.
+    useStore.getState().updateDraft('p1', (d) => void ((d.elements[0].zoneIds = []), (d.elements[0].pathIds = [])));
+    useStore.getState().setScene('p1', scene([zone('lawn'), walk], [path]));
+    expect(currentPhoto().draft!.elements[0]).toMatchObject({ zoneIds: [], pathIds: [] });
   });
 });
 
@@ -344,6 +374,17 @@ describe('async adds stay in the project (and space) they started in', () => {
     expect(io.written).toHaveLength(2); // the second file was never imported
     for (const id of io.written) expect(await db.getBlob(id)).toBeUndefined();
     expect(useStore.getState().toasts.some((t) => t.kind === 'error' && /closed before the photos finished/.test(t.message))).toBe(true);
+  });
+
+  it('explains once how to get JPEGs when this browser can\'t open HEIC photos', async () => {
+    const spaceId = useStore.getState().project!.spaces[0].id;
+    useStore.setState({ toasts: [] });
+    const ids = await useStore.getState().addPhotos(spaceId, [new File(['a'], 'IMG_0001.HEIC'), new File(['b'], 'ok.jpg'), new File(['c'], 'IMG_0002.heic')]);
+    expect(ids).toHaveLength(1);
+    const errors = useStore.getState().toasts.filter((t) => t.kind === 'error');
+    expect(errors).toHaveLength(1);
+    expect(errors[0].message).toMatch(/^IMG_0001\.HEIC and IMG_0002\.heic weren’t added\. This browser can't open HEIC photos/);
+    expect(errors[0].message).toContain('Preview and choose File → Export');
   });
 
   it('reports nothing added when the space is deleted mid-import', async () => {

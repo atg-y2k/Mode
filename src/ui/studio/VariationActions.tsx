@@ -13,6 +13,7 @@ import { findPhoto, pendingRunsFrom, useStore } from '../../state/store';
 import { Button, cn } from '../common';
 import { downloadVariation, runOrNotify, viewVariation } from './actions';
 import { ProvenanceLine } from './handoff/bits';
+import { variationCountOf } from './handoff/prefs';
 import { Popover } from './Popover';
 import { setStudioUI } from './ui';
 
@@ -56,7 +57,7 @@ export function RefineForm({
   tone?: 'surface' | 'stage';
 }) {
   const [text, setText] = useState('');
-  const count = useStore((s) => s.studio.variationCount);
+  const count = useStore((s) => variationCountOf(s.studio, s.health));
   const submit = () => {
     const feedback = text.trim();
     if (!feedback) return;

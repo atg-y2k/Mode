@@ -16,7 +16,7 @@ import { generationBlocker } from './generate';
 import { setDefaultHandoffApp } from './handoff/actions';
 import { usePendingHandoffs } from './handoff/hooks';
 import { appLabel } from './handoff/planned';
-import { effectiveRenderMode, hasImageProviders } from './handoff/prefs';
+import { effectiveRenderMode, hasImageProviders, variationCountOf } from './handoff/prefs';
 import { setHandoffSession } from './handoff/session';
 import { briefTargetIds } from './maskFromZones';
 import { NO_IDEAS } from './panels/briefOps';
@@ -137,6 +137,7 @@ export function PromptDock({ photo, space }: { photo: Photo; space: Space | unde
   const base = findVariation(photo, studio.viewVariationId);
   const renderMode = effectiveRenderMode(studio, health);
   const hand = renderMode === 'handoff';
+  const count = variationCountOf(studio, health, renderMode);
   const blocker = generationBlocker({ health, studio }, renderMode);
   const providers = health?.imageProviders ?? [];
   const apiAvailable = hasImageProviders(health);
@@ -222,7 +223,7 @@ export function PromptDock({ photo, space }: { photo: Photo; space: Space | unde
     >
       <Sparkles className="size-4" />
       Generate
-      <span className="hidden @md:inline">{studio.variationCount > 1 ? ` ${studio.variationCount}` : ''}</span>
+      <span className="hidden @md:inline">{count > 1 ? ` ${count}` : ''}</span>
     </button>
   );
 
@@ -416,7 +417,7 @@ export function PromptDock({ photo, space }: { photo: Photo; space: Space | unde
           <label className="inline-flex h-8 items-center rounded-lg bg-surface-2 px-1.5 text-xs" title="Variations per run">
             <span className="sr-only">Variations per run</span>
             <select
-              value={studio.variationCount}
+              value={count}
               onChange={(e) => useStore.getState().setStudio({ variationCount: Number(e.target.value) })}
               className="h-7 cursor-pointer rounded-md bg-transparent text-xs font-medium text-text focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
             >

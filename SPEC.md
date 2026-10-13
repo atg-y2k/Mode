@@ -316,7 +316,9 @@ truly need a contract change, work around it locally and list it under
   with fallback to <img>; high-quality downscale (step down by halves then
   final drawImage with imageSmoothingQuality 'high'); OffscreenCanvas when
   available. Friendly errors (e.g. HEIC on non-Safari: “This browser can't
-  read HEIC photos — export as JPEG or use Safari”).
+  open HEIC photos … add a JPEG copy instead”, with the steps for this
+  computer — never "open Mode in Safari": projects live in each browser's
+  own storage).
 - backgroundRemoval per contract (tests on synthetic images).
 - assetList: ONLY area.ts (the shopping list was dropped — see §0).
 - persistence must cover Studio data (§0 overrides) and migrate old saves.
@@ -324,7 +326,8 @@ truly need a contract change, work around it locally and list it under
 ### 3.7 server — `server/*`, `src/lib/api.ts` (+ tests)
 - Hono app (server/app.ts exporting `createApp(deps)` for tests; server/index.ts
   starts @hono/node-server on PORT ?? API_PORT ?? 8787 and, when
-  NODE_ENV=production, serves ./dist with SPA fallback).
+  NODE_ENV=production, serves ./dist with SPA fallback; `npm start` passes
+  --production, which sets it).
 - config (env): ANTHROPIC_API_KEY (AI enabled when set or MODE_AI=on),
   CLAUDE_MODEL (default 'claude-opus-5-5'), IMAGE_PROVIDER ('openai' | unset),
   OPENAI_API_KEY, OPENAI_IMAGE_MODEL (default 'gpt-image-1'), OPENAI_BASE_URL,
@@ -560,7 +563,8 @@ truly need a contract change, work around it locally and list it under
   run progress overlay.
 - Bottom dock: the prompt bar (multi-line prompt bound to the photo's
   draft.prompt, chips for targeted zones/elements/ideas, scope toggle "Only
-  selected areas / Whole image", variation count, provider, Generate) and
+  selected areas / Whole image", variation count — until picked, 1 per
+  hand-off and 3 with an image API — provider, Generate) and
   the variations strip (newest run first; each run labeled with its plan;
   thumbnails with favorite star, compare-run option labels, status
   placeholders while rendering, failed tiles with retry). Click a

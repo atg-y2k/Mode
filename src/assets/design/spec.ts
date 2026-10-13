@@ -154,6 +154,22 @@ function defaultChoice(dim: ElementDimension, zoneKnown: boolean): string[] {
 }
 
 /**
+ * The "Where" an element of `type` starts with in `scene`: the editable
+ * zones of its zoneKinds, and for a Pathway the scene's paths (existing /
+ * sketched ones, else suggested ones).
+ */
+export function preselectedWhere(type: ElementType, scene: Pick<SceneMap, 'zones' | 'paths'>): { zones: SceneZone[]; pathIds: string[] } {
+  const def = getElementDef(type);
+  const zones = scene.zones.filter((z) => z.editable && !CONTEXT_ZONE_KINDS.includes(z.kind) && def.zoneKinds.includes(z.kind));
+  let pathIds: string[] = [];
+  if (type === 'pathway') {
+    const real = scene.paths.filter((p) => p.kind !== 'suggested');
+    pathIds = (real.length > 0 ? real : scene.paths).map((p) => p.id);
+  }
+  return { zones, pathIds };
+}
+
+/**
  * A new ElementSpec for the brief: default label, deep copy of the built-in
  * dimensions, default choices, and zoneIds preselected from the scene by the
  * element's zoneKinds (editable zones only). A Pathway also preselects the
@@ -165,14 +181,7 @@ function defaultChoice(dim: ElementDimension, zoneKnown: boolean): string[] {
  */
 export function newElementSpec(type: ElementType, scene?: SceneMap, ctx?: FeasibilityContext): ElementSpec {
   const def = getElementDef(type);
-  const zones = scene
-    ? scene.zones.filter((z) => z.editable && !CONTEXT_ZONE_KINDS.includes(z.kind) && def.zoneKinds.includes(z.kind))
-    : [];
-  let pathIds: string[] = [];
-  if (scene && type === 'pathway') {
-    const real = scene.paths.filter((p) => p.kind !== 'suggested');
-    pathIds = (real.length > 0 ? real : scene.paths).map((p) => p.id);
-  }
+  const { zones, pathIds } = scene ? preselectedWhere(type, scene) : { zones: [], pathIds: [] };
 
   let dimensions = cloneDimensions(def.dimensions);
   if (ctx) {

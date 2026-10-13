@@ -44,9 +44,11 @@ import {
   type Variation,
 } from '../../shared/types';
 import { findAsset } from '../assets/catalog';
+import { preselectedWhere } from '../assets/design';
 import { evictAssetImage } from '../engine/assetImages';
 import { copyMaskInto, createMask, type MaskMode } from '../engine/mask';
 import { getHealth } from '../lib/api';
+import { HEIC_UNSUPPORTED } from '../lib/heic';
 import { downloadBlob, importImageFile } from '../lib/imageImport';
 import * as db from './persistence';
 import * as runtime from './runtime';
@@ -90,8 +92,8 @@ export interface StudioState {
   focusZoneId: string | null;
   /** Sketch tool in the viewer: draw a path (centerline) or an area to target. */
   sketch: 'none' | 'path' | 'area';
-  /** Variations per run (1..6). */
-  variationCount: number;
+  /** Variations per run (1..6); null = automatic (handoff/prefs variationCountOf: 1 per hand-off, 3 with an image API). */
+  variationCount: number | null;
   /**
    * How runs render: 'handoff' = the user pastes each prepared image + prompt into
    * the ChatGPT or Gemini app (their subscription) and brings the result back;
@@ -819,7 +821,8 @@ export const useStore = create<AppState>()((set, get) => {
       showZones: true,
       focusZoneId: null,
       sketch: 'none',
-      variationCount: 3,
+      // Automatic until picked: one per hand-off (each is its own round trip), three with an image API.
+      variationCount: null,
       renderMode: 'handoff',
       handoffApp: 'chatgpt',
       provider: null,
@@ -1091,6 +1094,8 @@ export const useStore = create<AppState>()((set, get) => {
       };
       const ids: string[] = [];
       let lost = false;
+      // iPhone HEIC photos this browser can't open: one message with the how-to for all of them.
+      const heic: { names: string[]; message: string } = { names: [], message: '' };
       // GPS / compass heading / capture time come from the ORIGINAL file: importing
       // re-encodes the photo, which strips EXIF. Loaded on demand; never blocks an import.
       const readCapture = (file: File) =>
@@ -1131,8 +1136,15 @@ export const useStore = create<AppState>()((set, get) => {
           }, { history: false });
           ids.push(photoId);
         } catch (err) {
-          get().notify(`${file.name}: ${(err as Error).message}`, 'error');
+          if ((err as Error).name === HEIC_UNSUPPORTED) {
+            heic.names.push(file.name);
+            heic.message = (err as Error).message;
+          } else get().notify(`${file.name}: ${(err as Error).message}`, 'error');
         }
+      }
+      if (heic.names.length) {
+        const which = heic.names.length === 1 ? heic.names[0] : heic.names.length === 2 ? heic.names.join(' and ') : `${heic.names[0]} and ${heic.names.length - 1} more`;
+        get().notify(`${which} ${heic.names.length === 1 ? 'wasn’t' : 'weren’t'} added. ${heic.message}`, 'error');
       }
       if (lost) get().notify('The project or space closed before the photos finished importing.', 'error');
       if (!targetExists()) return [];
@@ -1467,6 +1479,15 @@ export const useStore = create<AppState>()((set, get) => {
           } else {
             ph.scene = scene as Draft<SceneMap> | undefined;
           }
+          // The first map: elements added before it (or while it ran) get the "Where" they'd have had if added after.
+          if (scene && ph.scene && !prev?.zones.some((z) => !isSketchZone(z))) {
+            for (const el of ph.draft?.elements ?? []) {
+              if (el.zoneIds.length || el.pathIds.length) continue;
+              const where = preselectedWhere(el.type, ph.scene);
+              el.zoneIds = where.zones.map((z) => z.id);
+              el.pathIds = where.pathIds;
+            }
+          }
         }));
     },
 
@@ -1723,7 +1744,9 @@ export const useStore = create<AppState>()((set, get) => {
     notify(message, kind = 'info') {
       const id = newId('tst');
       set((s) => ({ toasts: [...s.toasts.slice(-3), { id, message, kind }] }));
-      setTimeout(() => get().dismissToast(id), kind === 'error' ? 7000 : 3500);
+      // Long messages (steps to follow) stay long enough to read, up to 20 s.
+      const ms = Math.min(20_000, Math.max(kind === 'error' ? 7000 : 3500, message.length * 60));
+      setTimeout(() => get().dismissToast(id), ms);
     },
 
     dismissToast(id) {

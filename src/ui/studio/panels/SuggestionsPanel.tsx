@@ -12,6 +12,7 @@ import { findVariation, useStore } from '../../../state/store';
 import { relativeTime } from '../../shell/format';
 import { pickPhotos } from '../../shell/photoImport';
 import { useSceneJob } from '../../shell/sceneJobs';
+import { useDeviceMapping } from '../../../vision/ui/jobs';
 import { Button, EmptyState, PanelHeader, Section, TextInput } from '../../common';
 import { generationBlocker } from '../generate';
 import { addRecommendationToBrief, clearZoneFocus, fetchSuggestions, generateRecommendation, mapScene, suggestionsJobKey } from './actions';
@@ -48,7 +49,9 @@ function Suggestions({ photo, scene, setting }: { photo: Photo; scene: SceneMap 
   const aiReady = useAiReady();
   useEffect(() => clearZoneFocus, []);
   const job = useAiJob(suggestionsJobKey(photo.id));
-  const sceneJob = useSceneJob(photo.id);
+  const claudeMapping = useSceneJob(photo.id);
+  const deviceMapping = useDeviceMapping(photo.id);
+  const sceneJob = !!claudeMapping || deviceMapping;
   const viewing = useStore((s) => s.studio.viewVariationId);
   const recs = photo.recommendations;
   const running = job?.status === 'running';

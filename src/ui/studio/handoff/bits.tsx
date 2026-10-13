@@ -11,7 +11,7 @@ import { findVariation } from '../../../state/store';
 import { cn } from '../../common';
 import { useBlobUrl } from '../hooks';
 import { targetMaskFor } from './pack';
-import { alignmentSummary, appLabel, sourceLabel, sourceTag, type AlignmentSummary } from './planned';
+import { alignmentSummary, alignmentTooltip, appLabel, sourceLabel, sourceTag, type AlignmentSummary } from './planned';
 
 export function AppIcon({ app, className }: { app: HandoffApp | undefined; className?: string }) {
   return app === 'gemini' ? <Sparkle className={cn('size-3.5', className)} aria-hidden /> : <MessageCircle className={cn('size-3.5', className)} aria-hidden />;
@@ -35,7 +35,7 @@ export function AlignmentBadge({ report, areas, tone = 'surface', className }: {
   return (
     <span
       className={cn('inline-flex h-6 max-w-full items-center gap-1 rounded-full px-2 text-[11px] font-semibold', (tone === 'stage' ? STAGE_TONES : TONES)[s.tone], className)}
-      title={s.detail}
+      title={alignmentTooltip(s)}
     >
       <Icon className="size-3.5 shrink-0" />
       <span className="truncate">{s.label}</span>
@@ -56,7 +56,7 @@ export function SourceTag({ source, className }: { source: VariationSource | und
   return (
     <span
       className={cn('pointer-events-none inline-flex h-4 items-center gap-0.5 rounded bg-black/55 px-1 text-[9px] font-semibold uppercase tracking-wide text-white', className)}
-      title={summary ? `${label}\n${summary.detail}` : label}
+      title={summary ? `${label}\n${alignmentTooltip(summary)}` : label}
       aria-label={label}
     >
       {summary?.warn && <TriangleAlert className="size-2.5 text-gold" aria-hidden />}
@@ -71,7 +71,7 @@ export function ProvenanceLine({ source, tone = 'surface' }: { source: Variation
   if (!label) return null;
   const summary = summaryOf(source);
   return (
-    <div className={cn('flex min-w-0 items-center gap-1.5 text-[11px]', tone === 'stage' ? 'text-white/70' : 'text-muted')} title={summary?.detail}>
+    <div className={cn('flex min-w-0 items-center gap-1.5 text-[11px]', tone === 'stage' ? 'text-white/70' : 'text-muted')} title={summary ? alignmentTooltip(summary) : undefined}>
       {source?.kind === 'handoff' ? <AppIcon app={source.app} /> : <Info className="size-3.5" aria-hidden />}
       <span className="truncate">
         {source?.kind === 'handoff' ? `Made in ${label}` : 'Rendered with the image API'}

@@ -302,7 +302,8 @@ describe('LibraryPanel', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Generate with AI \(AI is off\)/ }));
     const gen = screen.getByRole('dialog');
-    expect(within(gen).getByText('AI is off')).toBeTruthy();
+    expect(within(gen).getByText('Generating items needs a Claude key')).toBeTruthy();
+    expect(within(gen).queryByText(/ANTHROPIC_API_KEY|\.env/)).toBeNull();
     expect((within(gen).getByRole('button', { name: /^Generate$/ }) as HTMLButtonElement).disabled).toBe(true);
     await act(async () => undefined);
   });

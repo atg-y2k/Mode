@@ -116,7 +116,8 @@ export function provenanceOf(source: VariationSource | undefined): Provenance {
   const a = source.alignment;
   let warning: string | undefined;
   if (a && a.aligned === false) {
-    warning = `Rough fit: the result didn't line up reliably with your photo (${a.inliers} matching features), so it was fitted by size only. Check the edges of the change.`;
+    // Plain words, as on the staging screen (the measurements stay out of everyday text).
+    warning = "Rough fit: the result didn't line up reliably with your photo, so it was fitted by size only. Check the edges of the change.";
   } else if (a && a.outsideChanged > OUTSIDE_CHANGED_WARN) {
     warning = `The model changed ${Math.round(a.outsideChanged * 100)}% of the area that should have stayed the same. Mode restored it from your photo, but the edit may not blend well.`;
   }

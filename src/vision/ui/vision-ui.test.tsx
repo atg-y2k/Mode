@@ -194,7 +194,7 @@ describe('RefineSection', () => {
   it('offers the offline map when Claude is off and nothing is mapped', () => {
     seed(undefined);
     render(<RefineSection photoId="pho_1" />);
-    expect(screen.getByRole('button', { name: /Map the scene without AI/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Map on this device (free)' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: /Sharpen outlines/ })).toBeNull();
     expect(screen.getByText(/Models & licenses/)).toBeTruthy();
   });
@@ -224,13 +224,20 @@ describe('RefineSection', () => {
 
   it('maps without AI and keeps the result', async () => {
     seed(undefined);
-    offlineSceneMap.mockResolvedValue(scene([zone('zone_l', 'lawn', [[0, 40], [100, 40], [100, 80], [0, 80]])]));
-    refineZonesDetailed.mockResolvedValue(new Map());
+    offlineSceneMap.mockResolvedValue(
+      scene([zone('zone_l', 'lawn', [[0, 40], [100, 40], [100, 80], [0, 80]]), zone('zone_sky', 'sky', [[0, 0], [100, 0], [100, 20], [0, 20]], { editable: false })]),
+    );
+    // Both outlines come back sharper; the sky isn't one of the areas the Scene panel lists.
+    const sharp = (id: string) => [id, { refined: true, mask: rectMask(0, 41, 100, 80), polygon: [{ x: 1, y: 41 }, { x: 99, y: 41 }, { x: 99, y: 79 }], agreement: 0.9, iou: 0.9, classShare: 1 }] as const;
+    refineZonesDetailed.mockResolvedValue(new Map([sharp('zone_l'), sharp('zone_sky')]));
     render(<RefineSection photoId="pho_1" />);
-    fireEvent.click(screen.getByRole('button', { name: /Map the scene without AI/ }));
-    await waitFor(() => expect(photo().scene?.zones.map((z) => z.id)).toEqual(['zone_l']));
+    fireEvent.click(screen.getByRole('button', { name: 'Map on this device (free)' }));
+    await waitFor(() => expect(photo().scene?.zones.map((z) => z.id)).toEqual(['zone_l', 'zone_sky']));
     await waitFor(() => expect(useVisionJobs.getState().job).toBeNull());
     expect(offlineSceneMap).toHaveBeenCalledWith('pho_1', expect.anything(), false, true);
+    // Counts the areas the Scene panel lists (not the sky).
+    expect(useStore.getState().toasts.at(-1)?.message).toBe('Mapped 1 area on this device and sharpened 1 — no AI used.');
+    expect(await screen.findByText('The area has a precise outline.')).toBeTruthy();
   });
 });
 
@@ -296,12 +303,22 @@ describe('SegFormer licence (C5)', () => {
     refineZonesDetailed.mockResolvedValue(new Map());
     render(<RefineSection photoId="pho_1" />);
     fireEvent.click(screen.getByRole('button', { name: 'Sharpen outlines on this device (free)' }));
-    // The licence summary with an explicit choice; nothing downloads or runs yet.
-    const card = await screen.findByRole('group', { name: 'One question before the first download' });
-    expect(within(card).getByText('Non-commercial, research or evaluation use only')).toBeTruthy();
-    expect(within(card).getByRole('link', { name: /NVIDIA Source Code License for SegFormer/ })).toBeTruthy();
+    // A plain choice first, the licence wording one click away; nothing downloads or runs yet.
+    const card = await screen.findByRole('group', { name: 'One choice before the first download' });
+    const describedBy = (b: HTMLElement) => document.getElementById(b.getAttribute('aria-describedby') ?? '')?.textContent ?? '';
+    // Each choice says what it downloads for this action (sharpening: EdgeTAM + SegFormer, or EdgeTAM alone).
+    expect(describedBy(within(card).getByRole('button', { name: 'Sharper detection (58 MB download)' }))).toMatch(/^Free for personal, non-commercial use/);
+    expect(describedBy(within(card).getByRole('button', { name: 'Standard detection (29 MB download)' }))).toMatch(/^No restrictions/);
+    const details = within(card).getByText('Licence details').closest('details')!;
+    expect(details.open).toBe(false);
+    fireEvent.click(within(card).getByText('Licence details'));
+    expect(details.open).toBe(true);
+    expect(within(details).getByText('Non-commercial, research or evaluation use only')).toBeTruthy();
+    expect(within(details).getByRole('link', { name: /NVIDIA Source Code License for SegFormer/ })).toBeTruthy();
+    expect(within(details).getByText(/§3\.3/)).toBeTruthy();
+    expect(within(details).getByText(/CLIPSeg \(Apache-2\.0\)/)).toBeTruthy();
     expect(refineZonesDetailed).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button', { name: 'Continue without it' }));
+    fireEvent.click(screen.getByRole('button', { name: /^Standard detection/ }));
     await waitFor(() => expect(refineZonesDetailed).toHaveBeenCalledTimes(1));
     expect(refineZonesDetailed.mock.calls[0][3]).toMatchObject({ semantic: false });
     expect(segformerChoice()).toBe('declined');
@@ -310,8 +327,8 @@ describe('SegFormer licence (C5)', () => {
     // Remembered: the next run doesn't ask again.
     fireEvent.click(screen.getByRole('button', { name: 'Sharpen outlines on this device (free)' }));
     await waitFor(() => expect(refineZonesDetailed).toHaveBeenCalledTimes(2));
-    expect(screen.queryByText(/One question before the first download/)).toBeNull();
-    expect(screen.getByText(/SegFormer off — EdgeTAM \+ CLIPSeg only/)).toBeTruthy();
+    expect(screen.queryByText(/One choice before the first download/)).toBeNull();
+    expect(screen.getByText(/Standard detection \(SegFormer off\)/)).toBeTruthy();
   });
 
   it('uses SegFormer once accepted', async () => {
@@ -320,7 +337,7 @@ describe('SegFormer licence (C5)', () => {
     refineZonesDetailed.mockResolvedValue(new Map());
     render(<RefineSection photoId="pho_1" />);
     fireEvent.click(screen.getByRole('button', { name: 'Sharpen outlines on this device (free)' }));
-    fireEvent.click(await screen.findByRole('button', { name: /Agree & use SegFormer/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /^Sharper detection/ }));
     await waitFor(() => expect(refineZonesDetailed).toHaveBeenCalledTimes(1));
     expect(refineZonesDetailed.mock.calls[0][3]).toMatchObject({ semantic: true });
     expect(segformerChoice()).toBe('accepted');
@@ -337,13 +354,13 @@ describe('SegFormer licence (C5)', () => {
     expect(useVisionJobs.getState().consent).toEqual({ photoId: 'pho_1', action: 'map' });
     expect(useStore.getState().studio.panel).toBe('scene');
     render(<RefineSection photoId="pho_1" />);
-    fireEvent.click(screen.getByRole('button', { name: 'Continue without it' }));
+    fireEvent.click(screen.getByRole('button', { name: /^Standard detection/ }));
     await waitFor(() => expect(offlineSceneMap).toHaveBeenCalledWith('pho_1', expect.anything(), false, false));
     await waitFor(() => expect(useVisionJobs.getState().job).toBeNull());
     expect(useVisionJobs.getState().consent).toBeNull();
   });
 
-  it('brings the question into view and focuses it (not "Agree") when parked from the photo', async () => {
+  it('brings the question into view and focuses it (not a choice) when parked from the photo', async () => {
     setSegformerChoice(null);
     seed(undefined);
     const scrolled = vi.fn();
@@ -355,24 +372,75 @@ describe('SegFormer licence (C5)', () => {
       await act(async () => {
         await mapSceneOffline('pho_1');
       });
-      const card = await screen.findByRole('group', { name: 'One question before the first download' });
+      const card = await screen.findByRole('group', { name: 'One choice before the first download' });
       await waitFor(() => expect(document.activeElement).toBe(card));
       expect(card.tabIndex).toBe(-1);
       expect(scrolled).toHaveBeenCalledWith({ block: 'nearest', behavior: 'smooth' });
       expect(scrolled.mock.contexts[0]).toBe(card);
       // Tab reaches the choice without anything pre-selected.
-      expect(document.activeElement).not.toBe(screen.getByRole('button', { name: /Agree & use SegFormer/ }));
+      expect(document.activeElement).not.toBe(screen.getByRole('button', { name: /^Sharper detection/ }));
     } finally {
       if (had) Element.prototype.scrollIntoView = original;
       else delete (Element.prototype as Partial<Element>).scrollIntoView;
     }
   });
 
+  it('indoors, standard detection is the larger download (it maps with CLIPSeg instead)', async () => {
+    setSegformerChoice(null);
+    seed(undefined);
+    useStore.getState().updateSpace('spc_1', { type: 'kitchen' });
+    await mapSceneOffline('pho_1');
+    render(<RefineSection photoId="pho_1" />);
+    expect(screen.getByRole('button', { name: 'Sharper detection (58 MB download)' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Standard detection (170 MB download)' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+  });
+
+  it('Cancel drops the question without deciding or downloading', async () => {
+    setSegformerChoice(null);
+    seed(undefined);
+    await mapSceneOffline('pho_1');
+    render(<RefineSection photoId="pho_1" />);
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(useVisionJobs.getState().consent).toBeNull();
+    expect(segformerChoice()).toBeNull();
+    expect(offlineSceneMap).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Map on this device (free)' })).toBeTruthy();
+  });
+
+  it('parks a re-map and replaces the existing map once answered', async () => {
+    setSegformerChoice(null);
+    seed(scene([zone('old', 'lawn', [[0, 40], [100, 40], [100, 80], [0, 80]]), zone('mine', 'other', [[0, 0], [9, 0], [9, 9]], { source: 'sketch' })]));
+    offlineSceneMap.mockResolvedValue(scene([zone('zone_new', 'facade', [[20, 0], [80, 0], [80, 30], [20, 30]])]));
+    refineZonesDetailed.mockResolvedValue(new Map());
+    await mapSceneOffline('pho_1', { replace: true });
+    expect(useVisionJobs.getState().consent).toEqual({ photoId: 'pho_1', action: 'remap' });
+    render(<RefineSection photoId="pho_1" />);
+    expect(screen.getByText(/Then Mode will map the scene again;/)).toBeTruthy();
+    // Mapping a yard: standard detection maps with CLIPSeg + EdgeTAM, sharper adds SegFormer.
+    expect(screen.getByRole('button', { name: 'Sharper detection (199 MB download)' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Standard detection (170 MB download)' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: /^Sharper detection/ }));
+    // The new map replaces the old one; the user's own sketch stays.
+    await waitFor(() => expect(photo().scene!.zones.map((z) => z.id)).toEqual(['zone_new', 'mine']));
+    await waitFor(() => expect(useVisionJobs.getState().job).toBeNull());
+  });
+
+  it('keeps a map that is already there unless asked to replace it', async () => {
+    seed(scene([zone('old', 'lawn', [[0, 40], [100, 40], [100, 80], [0, 80]])]));
+    offlineSceneMap.mockResolvedValue(scene([zone('zone_new', 'facade', [[20, 0], [80, 0], [80, 30], [20, 30]])]));
+    refineZonesDetailed.mockResolvedValue(new Map());
+    await mapSceneOffline('pho_1');
+    expect(photo().scene!.zones.map((z) => z.id)).toEqual(['old']);
+    await mapSceneOffline('pho_1', { replace: true });
+    expect(photo().scene!.zones.map((z) => z.id)).toEqual(['zone_new']);
+  });
+
   it('can be changed later under Models & licenses', () => {
     setSegformerChoice('accepted');
     seed(scene([lawn]));
     render(<RefineSection photoId="pho_1" />);
-    expect(screen.getByText(/SegFormer in use \(licence accepted\)/)).toBeTruthy();
+    expect(screen.getByText(/Sharper detection \(SegFormer, licence accepted\)/)).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Stop using it' }));
     expect(segformerChoice()).toBe('declined');
     fireEvent.click(screen.getByRole('button', { name: 'Ask me again' }));

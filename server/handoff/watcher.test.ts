@@ -152,7 +152,9 @@ describe('DownloadsWatcher lifecycle', () => {
   });
 
   it('reads a real folder fine with the default probe', () => {
-    expect(make().status()).toEqual({ available: true, dir: displayPath(dir), on: false });
+    const w = make();
+    expect(w.unavailableReason()).toBeNull();
+    expect(w.status()).toEqual({ available: true, dir: displayPath(dir), on: false });
   });
 
   it('explains a folder macOS privacy settings keep it from reading (EPERM)', async () => {
@@ -161,21 +163,39 @@ describe('DownloadsWatcher lifecycle', () => {
     };
     const factory = fakeWatchFactory();
     const mac = make({ probeDir: eperm, platform: 'darwin', watchFactory: factory });
-    const status = mac.status();
-    expect(status).toMatchObject({ available: false, dir: displayPath(dir), on: false });
-    expect(status.reason).toBe(permissionReason(displayPath(dir), 'darwin'));
-    expect(status.reason).toMatch(/System Settings → Privacy & Security → Files & Folders/);
-    expect(status.reason).toMatch(/Full Disk Access/);
+    const reason = mac.unavailableReason();
+    expect(reason).toBe(permissionReason(displayPath(dir), 'darwin'));
+    expect(reason).toMatch(/System Settings → Privacy & Security → Files & Folders/);
+    expect(reason).toMatch(/Full Disk Access/);
     expect(mac.available()).toBe(false);
     // start() refuses instead of watching silently (chokidar would ignore the permission error and see nothing).
     await expect(mac.start()).rejects.toBeInstanceOf(WatchUnavailableError);
+    await expect(mac.start()).rejects.toThrow(/Files & Folders/);
     expect(factory.instances).toHaveLength(0);
     // Other systems: plain permission advice.
     const linux = make({ probeDir: () => { throw Object.assign(new Error('EACCES'), { code: 'EACCES' }); }, platform: 'linux' });
-    expect(linux.status().reason).toMatch(/isn't allowed to read .*permission denied/);
-    expect(linux.status().reason).not.toMatch(/System Settings/);
+    expect(linux.unavailableReason()).toMatch(/isn't allowed to read .*permission denied/);
+    expect(linux.unavailableReason()).not.toMatch(/System Settings/);
     const odd = make({ probeDir: () => { throw Object.assign(new Error('EIO'), { code: 'EIO' }); } });
-    expect(odd.status().reason).toMatch(/can't read .*\(EIO\)/);
+    expect(odd.unavailableReason()).toMatch(/can't read .*\(EIO\)/);
+  });
+
+  it('status checks never list the folder (on macOS that asks for Downloads access)', async () => {
+    let listed = 0;
+    const factory = fakeWatchFactory();
+    const w = make({ probeDir: () => void listed++, platform: 'darwin', watchFactory: factory });
+    expect(w.status()).toEqual({ available: true, dir: displayPath(dir), on: false });
+    expect(w.unavailableReason(false)).toBeNull();
+    expect(listed).toBe(0);
+    // Turning watching on lists it once; status while watching still doesn't.
+    await w.start();
+    expect(listed).toBe(1);
+    expect(w.status()).toMatchObject({ available: true, on: true });
+    expect(listed).toBe(1);
+    // A folder that is gone is still reported without listing anything.
+    rmSync(dir, { recursive: true, force: true });
+    expect(w.status()).toMatchObject({ available: false, reason: expect.stringMatching(/doesn't exist any more/) });
+    expect(listed).toBe(1);
   });
 
   it('a permission error while watching stops with the same advice', async () => {

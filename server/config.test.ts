@@ -1,4 +1,8 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { apiEnv, apiSettingsFrom } from '../vite.config';
 import { DEFAULT_CLAUDE_MODEL, loadConfig } from './config';
 
 describe('loadConfig', () => {
@@ -70,6 +74,12 @@ describe('loadConfig', () => {
     const fallback = loadConfig({ GEMINI_API_KEY: 'g', IMAGE_PROVIDER: 'openai' });
     expect(fallback.imageProviders[0]).toMatchObject({ id: 'gemini', isDefault: true });
     expect(fallback.warnings.join(' ')).toMatch(/using gemini instead/);
+    // GOOGLE_API_KEY is accepted for Gemini, as by the Studio providers (GEMINI_API_KEY wins).
+    const google = loadConfig({ GOOGLE_API_KEY: 'gk', IMAGE_PROVIDER: 'gemini' });
+    expect(google.geminiApiKey).toBe('gk');
+    expect(google.imageProviders).toEqual([{ id: 'gemini', model: 'gemini-2.5-flash-image', isDefault: true }]);
+    expect(google.warnings).toEqual([]);
+    expect(loadConfig({ GEMINI_API_KEY: 'g', GOOGLE_API_KEY: 'gk' }).geminiApiKey).toBe('g');
     const off = loadConfig({ OPENAI_API_KEY: 'o', IMAGE_PROVIDER: 'none' });
     expect(off.imageProviders).toEqual([]);
     expect(off.imageProvider).toBeNull();
@@ -82,5 +92,53 @@ describe('loadConfig', () => {
     const prod = loadConfig({ NODE_ENV: 'production' }, '/srv/mode');
     expect(prod.production).toBe(true);
     expect(prod.staticDir).toBe('/srv/mode/dist');
+  });
+
+  it("agrees with the Vite dev server's reading (its /api proxy port, the network warning, the hand-off guard)", () => {
+    const envs: Record<string, string>[] = [
+      {},
+      { PORT: '8899' },
+      { API_PORT: '8898' },
+      { PORT: '8080', API_PORT: '9000' },
+      { PORT: 'abc', API_PORT: '9000' },
+      { PORT: ' ', API_PORT: '9001' },
+      { PORT: '0' },
+      { ANTHROPIC_API_KEY: 'x' },
+      { ANTHROPIC_API_KEY: 'x', MODE_AI: 'off' },
+      { ANTHROPIC_API_KEY: 'x', MODE_AI: 'maybe' },
+      { MODE_AI: 'on' },
+      { MODE_AI: 'YES' },
+      { OPENAI_API_KEY: 'o' },
+      { GOOGLE_API_KEY: 'g' },
+      { GEMINI_API_KEY: ' ' },
+      { OPENAI_API_KEY: 'o', IMAGE_PROVIDER: 'none' },
+      { GEMINI_API_KEY: 'g', IMAGE_PROVIDER: 'OFF' },
+      { OPENAI_API_KEY: 'o', IMAGE_PROVIDER: 'bogus' },
+      { MODE_ACCESS_TOKEN: 't' },
+      { MODE_ACCESS_TOKEN: '  ' },
+    ];
+    for (const env of envs) {
+      const c = loadConfig(env);
+      expect(apiSettingsFrom(env), JSON.stringify(env)).toEqual({
+        port: c.port,
+        paidFeatures: c.aiEnabled || c.imageProviders.length > 0,
+        tokenSet: c.accessToken !== null,
+      });
+    }
+  });
+
+  it('the dev proxy reads only .env and the shell, like the API process (never .env.local)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mode-env-'));
+    try {
+      writeFileSync(join(dir, '.env.local'), 'PORT=8899\n');
+      writeFileSync(join(dir, '.env.development'), 'PORT=8898\n');
+      expect(apiSettingsFrom(apiEnv(dir, {})).port).toBe(8787);
+      writeFileSync(join(dir, '.env'), '# keys\nPORT=8788\nANTHROPIC_API_KEY=\n');
+      expect(apiSettingsFrom(apiEnv(dir, {}))).toEqual({ port: 8788, paidFeatures: false, tokenSet: false });
+      // A variable exported in the shell wins over .env, as with --env-file.
+      expect(apiSettingsFrom(apiEnv(dir, { PORT: '9000' })).port).toBe(9000);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -7,6 +7,7 @@ import {
   briefTargetIds,
   footprintRoom,
   growChoice,
+  growthSources,
   maskForBrief,
   maskForRunTarget,
   maskFromTargets,
@@ -293,6 +294,74 @@ describe('footprint room (a wider or curvier path needs ground beside the old on
     const noLawn = { ...walkScene(), zones: walkScene().zones.filter((z) => z.id !== 'lawn') };
     const brief: DesignBrief = { ...emptyBrief(), elements: [{ ...pathway(), zoneIds: ['walk'] }] };
     expect(footprintRoom(noLawn, brief, size)).toMatchObject({ empty: true, room: null });
+  });
+
+  it('grows from the paved area picked on the photo when the element has no "Where" of its own', () => {
+    const el = { ...pathway(), zoneIds: [] };
+    expect(growthSources(el, { targetZoneIds: ['walk'] }, walkScene())).toEqual({ zoneIds: ['walk'], pathIds: [] });
+    const brief: DesignBrief = { ...emptyBrief(), targetZoneIds: ['walk'], elements: [el] };
+    const room = footprintRoom(walkScene(), brief, size)!;
+    expect(room).toMatchObject({ elementIds: [el.id], empty: false });
+    expect(room.room?.zoneIds).toEqual(['walk']);
+    expect(room.room?.zones.map((z) => z.id)).toEqual(['lawn']);
+    // Same area as picking the walk as the Pathway's "Where".
+    const viaWhere: DesignBrief = { ...emptyBrief(), elements: [pathway()] };
+    expect(Array.from(maskForBrief(size, walkScene(), brief)!.data)).toEqual(Array.from(maskForBrief(size, walkScene(), viaWhere)!.data));
+    expect(snapshotRunTarget(brief, walkScene(), size)?.room?.zones.map((z) => z.id)).toEqual(['lawn']);
+    // A walk the on-device map called a patio grows too.
+    const asPatio = { ...walkScene(), zones: walkScene().zones.map((z) => (z.id === 'walk' ? { ...z, kind: 'patio' as const } : z)) };
+    expect(footprintRoom(asPatio, brief, size)?.room?.zoneIds).toEqual(['walk']);
+  });
+
+  it('an element\'s own "Where" still decides what grows (other picked areas do not)', () => {
+    const withDrive = (): SceneMap => ({ ...walkScene(), zones: [...walkScene().zones, rect('drive', 'driveway', 320, 150, 380, PH)] });
+    const el = pathway();
+    expect(el.zoneIds).toEqual(['walk']);
+    const brief: DesignBrief = { ...emptyBrief(), targetZoneIds: ['drive'], elements: [el] };
+    expect(growthSources(el, brief, withDrive())).toEqual({ zoneIds: ['walk'], pathIds: [] });
+    expect(footprintRoom(withDrive(), brief, size)?.room?.zoneIds).toEqual(['walk']);
+    const m = maskForBrief(size, withDrive(), brief)!;
+    expect(at(m, 185 - 22, 250)).toBe(255); // lawn beside the walk
+    expect(at(m, 320 - 22, 250)).toBe(0); // the lawn beside the drive stays
+  });
+
+  it('with no "Where", grows from the picked areas of its own kind (a Pathway from the walk, not the picked drive)', () => {
+    const withDrive = (): SceneMap => ({ ...walkScene(), zones: [...walkScene().zones, rect('drive', 'driveway', 320, 150, 380, PH)] });
+    const el = { ...pathway(), zoneIds: [] };
+    const brief: DesignBrief = { ...emptyBrief(), targetZoneIds: ['walk', 'drive'], elements: [el] };
+    expect(growthSources(el, brief, withDrive())).toEqual({ zoneIds: ['walk'], pathIds: [] });
+    expect(footprintRoom(withDrive(), brief, size)?.room?.zoneIds).toEqual(['walk']);
+    const m = maskForBrief(size, withDrive(), brief)!;
+    expect(at(m, 185 - 22, 250)).toBe(255); // lawn beside the walk
+    expect(at(m, 320 - 22, 250)).toBe(0); // the lawn beside the drive stays
+    expect(at(m, 380 + 10, 250)).toBe(0);
+    // A Driveway grows from the drive instead.
+    const drive = { ...newElementSpec('driveway'), choices: { width: ['drive-double'] }, zoneIds: [] };
+    expect(growChoice(drive)).toBe(true);
+    expect(growthSources(drive, brief, withDrive())).toEqual({ zoneIds: ['drive'], pathIds: [] });
+  });
+
+  it('ground beside it that is already picked needs no room and is not "clipped"', () => {
+    // No "Where" of its own (grows from the picked walk), or the walk as its "Where": the same.
+    for (const el of [{ ...pathway(), zoneIds: [] }, pathway()]) {
+      const brief: DesignBrief = { ...emptyBrief(), targetZoneIds: ['walk', 'lawn'], elements: [el] };
+      const r = footprintRoom(walkScene(), brief, size)!;
+      expect(r).toMatchObject({ elementIds: [el.id], empty: false, room: null });
+      expect(r.picked.map((z) => z.id)).toEqual(['lawn']);
+      expect(snapshotRunTarget(brief, walkScene(), size)?.room).toBeUndefined();
+    }
+    // Picked ground that isn't beside it doesn't count.
+    const far = { ...walkScene(), zones: walkScene().zones.map((z) => (z.id === 'lawn' ? rect('lawn', 'lawn', 300, 150, PW, PH) : z)) };
+    const brief: DesignBrief = { ...emptyBrief(), targetZoneIds: ['walk', 'lawn'], elements: [{ ...pathway(), zoneIds: [] }] };
+    expect(footprintRoom(far, brief, size)).toMatchObject({ empty: true, room: null, picked: [] });
+  });
+
+  it('never grows from lawn, beds, the house or steps picked on the photo', () => {
+    const el = { ...pathway(), zoneIds: [] };
+    const brief: DesignBrief = { ...emptyBrief(), targetZoneIds: ['lawn', 'house', 'steps'], elements: [el] };
+    expect(growthSources(el, brief, walkScene())).toEqual({ zoneIds: [], pathIds: [] });
+    expect(footprintRoom(walkScene(), brief, size)).toBeNull();
+    expect(snapshotRunTarget(brief, walkScene(), size)?.room).toBeUndefined();
   });
 
   it('is frozen with the run (a re-mapped lawn does not change it)', () => {

@@ -17,6 +17,7 @@ import type {
   SceneRequest,
 } from '../../shared/api';
 import { SPACE_TYPE_LABELS, spaceKindOf, type SpaceType } from '../../shared/types';
+import { variationTitles } from './templateTitles';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -746,7 +747,7 @@ export function templatePlan(req: PlanRequest, count: number): PlanResult {
   if (req.compare) {
     const dimension = req.compare.dimensionLabel;
     return {
-      plan: `Compares ${req.compare.options.length} options for ${dimension.toLowerCase()} of ${req.compare.elementLabel}; everything else stays the same.${note} (Written without AI — add ANTHROPIC_API_KEY for tailored plans and plant checks.)`,
+      plan: `Compares ${req.compare.options.length} options for ${dimension.toLowerCase()} of ${req.compare.elementLabel}; everything else stays the same.${note}`,
       plants: [],
       variations: req.compare.options.map((o) => ({
         title: o.label,
@@ -757,11 +758,14 @@ export function templatePlan(req: PlanRequest, count: number): PlanResult {
   }
   const base = req.refine ? cleanText(req.refine.brief, 7000) : '';
   const feedback = req.refine?.feedback ? cleanText(req.refine.feedback, 2000) : '';
+  const takes = TEMPLATE_TAKES[setting];
+  // Named after what they show (the accepted variation keeps the name); strict siblings are numbered.
+  const titles = variationTitles(req.brief, strictness === 'strict' ? null : takes.map((t) => t.title), count);
+  // The Review dialog says, calmly, that this was planned without Claude (no setup details in the plan).
   return {
-    plan: `Applies ${subject} to the photo and keeps everything else as it is.${note} (Written without AI — add ANTHROPIC_API_KEY for tailored plans and plant checks.)`,
+    plan: `Applies ${subject} to the photo and keeps everything else as it is.${note}`,
     plants: [],
     variations: Array.from({ length: count }, (_, i) => {
-      const takes = TEMPLATE_TAKES[setting];
       const take = takes[i % takes.length];
       if (base) {
         // Strict siblings repeat the instruction as is: the image model's own variance is the only difference.
@@ -774,10 +778,10 @@ export function templatePlan(req: PlanRequest, count: number): PlanResult {
       }
       if (strictness === 'strict') {
         // No stylistic "takes": every variation is the literal brief.
-        return { title: count > 1 ? `Exact request ${i + 1}` : 'Your brief', brief: templateBrief(req, ''), optionId: null };
+        return { title: titles[i], brief: templateBrief(req, ''), optionId: null };
       }
       const hint = count > 1 ? takeHint(take, req.brief) : strictness === 'creative' ? TEMPLATE_CREATIVE_HINT[setting](briefHasPlants(req.brief)) : '';
-      return { title: count > 1 ? take.title : 'Your brief', brief: templateBrief(req, hint), optionId: null };
+      return { title: titles[i], brief: templateBrief(req, hint), optionId: null };
     }),
   };
 }

@@ -47,7 +47,7 @@ import { findPhoto, findVariation, useStore, type AppState, type StudioState } f
 import { STUDIO_KNOWLEDGE } from './knowledge';
 import { compositeVariation, maskToKeepAlpha, resizePixels, thumbnailBlob } from './composite';
 import { appLabel, rollupStatus } from './handoff/planned';
-import { effectiveRenderMode } from './handoff/prefs';
+import { effectiveRenderMode, variationCountOf } from './handoff/prefs';
 import { awaitReview, closeReview, openReview, reviewAvailable, type ReviewItem } from './handoff/review';
 import { focusHandoff } from './handoff/session';
 import { cloneRunTarget, freezeRunTarget, runTargetMask } from './handoff/target';
@@ -420,7 +420,7 @@ export async function startRun(opts: StartRunOptions): Promise<string> {
     throw new Error('Describe what you would like to change, or add a design element.');
   }
 
-  const count = compare ? compare.options.length : clampCount(opts.count ?? s.studio.variationCount);
+  const count = compare ? compare.options.length : clampCount(opts.count ?? variationCountOf(s.studio, s.health, renderMode));
   const provider = s.studio.provider;
   const generationId = newId('gen');
   const label = renderMode === 'handoff' ? { provider: appLabel(app), model: 'hand-off' } : providerLabel(s, provider);

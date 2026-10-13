@@ -3,6 +3,7 @@ import { emptyBrief, type AlignmentReport, type Generation, type Photo, type Pla
 import { appendEntry, countToday, startOfDay, usageHint, wasSent } from './log';
 import {
   alignmentSummary,
+  alignmentTooltip,
   assignTargets,
   changesTouchArea,
   footprintHint,
@@ -13,6 +14,7 @@ import {
   type PendingItem,
 } from './planned';
 import { runTiles } from '../tiles';
+import { handoffFooter, TEMPLATE_PLAN_NOTE } from './review';
 
 const item = (id: string, status: PlannedVariation['status'], extra: Partial<PlannedVariation> = {}): PlannedVariation => ({
   id,
@@ -153,7 +155,27 @@ describe('provenance and alignment', () => {
     expect(alignmentSummary({ ...report, outsideChanged: 0.04 }, 2)).toMatchObject({ tone: 'info', label: 'Model changed 2 areas outside — protected' });
     expect(alignmentSummary({ ...report, outsideChanged: 0.3 })).toMatchObject({ tone: 'warning', warn: true, suggestStricter: true });
     expect(alignmentSummary({ ...report, aligned: false, inliers: 12 })).toMatchObject({ label: 'Rough fit', warn: true });
-    expect(alignmentSummary({ ...report, driftAfter: 9 })).toMatchObject({ tone: 'warning', warn: true });
+    expect(alignmentSummary({ ...report, driftAfter: 9 })).toMatchObject({ tone: 'warning', warn: true, label: 'Colours a little off' });
+  });
+
+  it('says it in plain words and keeps the measurements for the tooltip', () => {
+    const ok = alignmentSummary(report);
+    expect(ok.detail).toBe('Lined up with your photo and colours matched. Everything outside the outline is your original photo.');
+    expect(ok.numbers).toBe('Lined up within 0.8 px using 220 matching features · colour difference ΔE 6.6 → 2.1');
+    expect(alignmentTooltip(ok)).toBe(`${ok.detail}\n${ok.numbers}`);
+    const reports = [
+      report,
+      { ...report, outsideChanged: 0.04 },
+      { ...report, outsideChanged: 0.3 },
+      { ...report, aligned: false, inliers: 12 },
+      { ...report, driftAfter: 9 },
+    ];
+    for (const r of reports) {
+      const s = alignmentSummary(r, 2);
+      expect(s.detail, s.label).not.toMatch(/\bpx\b|ΔE|matching features|drift/);
+      expect(s.numbers, s.label).toMatch(/matching features/);
+    }
+    expect(alignmentSummary({ ...report, aligned: false, inliers: 12 }).numbers).toContain('12 matching features');
   });
 });
 
@@ -191,6 +213,23 @@ describe('footprint hint', () => {
     expect(footprintHint({ ...emptyBrief(), elements: [pathway('width-6ft')] }, report, false)).toBeNull();
   });
 
+  it('counts a walk picked on the photo when the element has no “Where” of its own', () => {
+    const scene = {
+      zones: [
+        { id: 'walk', kind: 'walkway' as const, label: 'Walkway', polygon: [], description: '', editable: true },
+        { id: 'grass', kind: 'lawn' as const, label: 'Lawn', polygon: [], description: '', editable: true },
+      ],
+      paths: [],
+    };
+    const noWhere = { ...pathway('width-6ft'), zoneIds: [] };
+    const brief = (targetZoneIds: string[]) => ({ ...emptyBrief(), targetZoneIds, elements: [noWhere] });
+    expect(footprintHint(brief(['walk']), report, true, scene)?.elementId).toBe('el');
+    // Only lawn picked: the lawn may already change, nothing to grow from.
+    expect(footprintHint(brief(['grass']), report, true, scene)).toBeNull();
+    // Without the scene only the element's own "Where" counts.
+    expect(footprintHint(brief(['walk']), report)).toBeNull();
+  });
+
   it('outside changes touch the run’s area when they sit at its edge', () => {
     const target = { zones: [{ id: 'walk', label: 'Walk', kind: 'walkway' as const, polygon: [{ x: 700, y: 700 }, { x: 900, y: 700 }, { x: 900, y: 1200 }, { x: 700, y: 1200 }] }], paths: [] };
     const photo = { width: 1600, height: 1200 };
@@ -217,5 +256,18 @@ describe('hand-off log', () => {
     expect(wasSent(log, 'zzz')).toBe(false);
     expect(usageHint('chatgpt', 6)).toBe('6 hand-offs to ChatGPT today');
     expect(usageHint('gemini', 0)).toBeNull();
+  });
+});
+
+describe('review copy', () => {
+  it('words the hand-off count for one chat or several', () => {
+    expect(handoffFooter(1)).toBe('1 hand-off — start a new chat for it.');
+    expect(handoffFooter(3)).toBe('3 hand-offs — each in a new chat. You can do some now and the rest later.');
+  });
+
+  it('notes a plan made without Claude calmly, with no setup details', () => {
+    expect(TEMPLATE_PLAN_NOTE).toMatch(/^Planned from your choices/);
+    expect(TEMPLATE_PLAN_NOTE).toContain('(optional)');
+    expect(TEMPLATE_PLAN_NOTE).not.toMatch(/ANTHROPIC|\.env|isn’t connected|restart/);
   });
 });

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ProductResult } from '../../../../shared/api';
 import { ZONE_KINDS, SURFACE_KINDS, type SceneZone } from '../../../../shared/types';
 import { ApiError } from '../../../lib/api';
-import { aiAvailability, aiUsable, formatElapsed, friendlyAiError } from './aiErrors';
+import { AI_OFF_REASON, NO_DEVICE_MAP_REASON, aiAvailability, aiUsable, formatElapsed, friendlyAiError } from './aiErrors';
 import { extractPalette } from './colors';
 import { normalizeProductUrl, priceLabel, productInfoFrom, urlHost, zoneFit } from './productInfo';
 import { ZONE_KIND_LABELS, isDesignZone, splitZones, zoneSurface, zonesForElement } from './zones';
@@ -147,11 +147,19 @@ describe('aiErrors', () => {
     expect(aiAvailability({ ...base, ok: false }).state).toBe('offline');
     expect(aiUsable(aiAvailability(null))).toBe(true);
     expect(aiUsable(aiAvailability({ ...base, ok: false }))).toBe(false);
+    expect(aiAvailability({ ...base, ai: { enabled: false, model: null } })).toEqual({ state: 'off', reason: AI_OFF_REASON });
+    // Everyday copy for a missing (optional) key names no environment variables or files.
+    for (const text of [AI_OFF_REASON, NO_DEVICE_MAP_REASON]) expect(text).not.toMatch(/_API_KEY|\.env|restart/i);
   });
 
   it('turns errors into friendly messages', () => {
     expect(friendlyAiError(new ApiError('network', 'Request cancelled.', 0, { aborted: true }))).toBeNull();
-    expect(friendlyAiError(new ApiError('ai_disabled', 'x', 503))).toMatch(/ANTHROPIC_API_KEY/);
+    // Claude / image keys are optional: plain words, no setup jargon.
+    expect(friendlyAiError(new ApiError('ai_disabled', 'x', 503))).toMatch(/Claude key is optional/);
+    expect(friendlyAiError(new ApiError('image_provider_disabled', 'x', 503))).toMatch(/ChatGPT or Gemini app/);
+    for (const code of ['ai_disabled', 'image_provider_disabled'] as const) {
+      expect(friendlyAiError(new ApiError(code, 'x', 503))).not.toMatch(/_API_KEY|\.env|restart/i);
+    }
     expect(friendlyAiError(new ApiError('rate_limited', 'x', 429))).toMatch(/Wait a minute/);
     expect(friendlyAiError(new ApiError('refused', 'x', 422), 'get suggestions')).toMatch(/declined to get suggestions/);
     expect(friendlyAiError(new ApiError('upstream_error', 'x', 502), 'map the scene')).toMatch(/couldn't map the scene/);

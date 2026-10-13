@@ -14,11 +14,12 @@
  *   0 bytes, then renames the .part over it — that shows up as a change) and
  *   Mode's own hand-off photo downloads (`mode-handoff-*`, the prefix the
  *   hand-off client saves under: src/handoff/filenames.ts).
- * - Before watching, the folder is opened once: on macOS ~/Downloads is
+ * - Before watching, the folder is listed once: on macOS ~/Downloads is
  *   privacy-protected (TCC) and an app without the "Files & Folders"
  *   permission gets EPERM — chokidar would then watch silently and see
- *   nothing. Status answers `available: false` with a `reason` explaining
- *   where to grant access.
+ *   nothing. Turning watching on then fails with a `reason` explaining where
+ *   to grant access. Listing the folder is also what makes macOS ask for that
+ *   access, so status checks never list it: only turning watching on does.
  * - Each announced file gets a random opaque id; only announced ids map back
  *   to a path, so the file route can never be steered to other files.
  * - Watching runs only while asked: `start()` (POST {on:true}); it stops on
@@ -88,7 +89,7 @@ export interface WatchStatus {
   dir: string | null;
   /** Whether watching is currently on. */
   on: boolean;
-  /** When not available: why, and how to fix it (e.g. the macOS privacy setting to change). */
+  /** When not available: why, and how to fix it (e.g. no folder; whether it can be read is only checked when watching is turned on). */
   reason?: string;
 }
 
@@ -324,9 +325,10 @@ export class DownloadsWatcher {
   /**
    * Null when the folder can be watched; otherwise why not, worded for the
    * user (no folder, folder gone, or no permission — on macOS: which privacy
-   * setting to change).
+   * setting to change). `probe: false` skips listing the folder (no macOS
+   * privacy prompt), so a folder that exists counts as watchable.
    */
-  unavailableReason(): string | null {
+  unavailableReason(probe = true): string | null {
     const dir = this.dir;
     if (!dir) return this.missingReason ?? NO_FOLDER_REASON;
     const shown = displayPath(dir);
@@ -335,6 +337,7 @@ export class DownloadsWatcher {
     if (state === 'missing') {
       return `${shown} doesn't exist any more. Set HANDOFF_WATCH_DIR in .env to the folder your browser saves to, then restart the server.`;
     }
+    if (!probe) return null;
     try {
       this.probeDir(dir);
       return null;
@@ -344,8 +347,13 @@ export class DownloadsWatcher {
     }
   }
 
+  /**
+   * For status checks: never lists the folder (on macOS that asks the user for
+   * Downloads access before they turned watching on). start() lists it and
+   * says why it can't watch.
+   */
   status(): WatchStatus {
-    const reason = this.unavailableReason();
+    const reason = this.unavailableReason(false);
     const shown = this.dir && watchable(this.dir) ? displayPath(this.dir) : null;
     return reason === null ? { available: true, dir: shown, on: this.on } : { available: false, dir: shown, on: this.on, reason };
   }

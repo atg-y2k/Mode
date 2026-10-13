@@ -101,7 +101,10 @@ test('Pathway brief → hand-off to ChatGPT → import → staging → accept', 
   const staging = page.locator('main');
   await expect(staging.getByText('Back from ChatGPT', { exact: false })).toBeVisible();
   await expect(staging.getByText('Aligned', { exact: true })).toBeVisible();
-  await expect(staging.getByText(/Lined up within [\d.]+ px/)).toBeVisible();
+  // Plain words on screen; the measurements only in the line's tooltip.
+  const lined = staging.locator('p').filter({ hasText: 'Lined up with your photo' });
+  await expect(lined).toBeVisible();
+  await expect(lined).toHaveAttribute('title', /Lined up within [\d.]+ px/);
   await shot(page, 'handoff-4-staging');
   await accept.click();
   await expect(accept).toBeHidden();
