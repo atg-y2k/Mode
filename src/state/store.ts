@@ -313,6 +313,11 @@ export function activeDesignOf(photo: Photo | undefined): Design | undefined {
   return photo.designs.find((d) => d.id === photo.activeDesignId) ?? photo.designs[0];
 }
 
+/** Zones the user sketched (kept across scene re-analysis). */
+export function isSketchZone(z: { source?: string; kind: string; label: string }): boolean {
+  return z.source === 'sketch' || (z.kind === 'other' && z.label.startsWith('Sketched area'));
+}
+
 /** Every blob id and mask id owned by a photo (for cleanup on delete). */
 export function photoRefs(photo: Photo): { blobIds: string[]; maskIds: string[] } {
   const blobIds = [
@@ -1009,7 +1014,19 @@ export const useStore = create<AppState>()((set, get) => {
 
     setScene(photoId, scene) {
       get().mutateProject(scene ? 'Analyze scene' : 'Clear scene', (d) =>
-        withPhoto(d, photoId, (ph) => void (ph.scene = scene as Draft<SceneMap> | undefined)));
+        withPhoto(d, photoId, (ph) => {
+          const prev = ph.scene;
+          if (scene && prev) {
+            // Re-analysis replaces the AI's map but keeps what the user drew.
+            const next = structuredClone(scene) as Draft<SceneMap>;
+            const ids = new Set([...next.zones.map((z) => z.id), ...next.paths.map((p) => p.id)]);
+            next.zones.push(...prev.zones.filter((z) => isSketchZone(z) && !ids.has(z.id)));
+            next.paths.push(...prev.paths.filter((p) => p.kind === 'sketch' && !ids.has(p.id)));
+            ph.scene = next;
+          } else {
+            ph.scene = scene as Draft<SceneMap> | undefined;
+          }
+        }));
     },
 
     updateScene(photoId, recipe, opts) {
@@ -1256,7 +1273,22 @@ export const useStore = create<AppState>()((set, get) => {
       if (after === before) return;
       const record = opts.history !== false;
       set((s) => {
-        if (!record) return { project: after };
+        if (!record) {
+          // Not undoable, so it must also survive undo/redo: replay the same
+          // change onto every snapshot in the history (no-op where it doesn't apply).
+          // Without this, undoing an older edit would silently drop e.g. a
+          // finished generation or a newly uploaded photo.
+          const rebase = (p: Project) => {
+            try {
+              return produce(p, (d) => void recipe(d));
+            } catch {
+              return p; // the change doesn't apply to this older snapshot
+            }
+          };
+          const rebaseEntry = (e: HistoryEntry): HistoryEntry =>
+            e.kind === 'project' ? { ...e, before: rebase(e.before), after: rebase(e.after) } : e;
+          return { project: after, past: s.past.map(rebaseEntry), future: s.future.map(rebaseEntry) };
+        }
         const now = Date.now();
         const last = s.past[s.past.length - 1];
         if (opts.coalesce && last?.kind === 'project' && last.key === opts.coalesce && now - last.at < COALESCE_MS) {

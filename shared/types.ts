@@ -394,6 +394,8 @@ export interface SceneZone {
   maskId?: ID;
   /** False for context zones (sky, street, neighbors). */
   editable: boolean;
+  /** 'sketch' = drawn by the user (kept when the scene is re-analyzed). Default 'ai'. */
+  source?: 'ai' | 'sketch';
   /** Estimated sun exposure for ground / planting zones (from orientation & shadows). */
   sun?: 'full-sun' | 'part-sun' | 'shade';
 }
