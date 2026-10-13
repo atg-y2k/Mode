@@ -1,11 +1,13 @@
 /**
  * Side-by-side view of one run (studio.gridGenerationId): every variation as
  * large as the stage allows, labeled with its option (compare runs) or title,
- * the option's rationale and plant feasibility, with "Choose" — which writes
- * that option into the brief and shows the variation — or "View". Fills in
- * live while the run renders.
+ * the option's rationale and plant feasibility, its provenance (ChatGPT /
+ * Gemini / API) and alignment, with "Choose" — which writes that option into
+ * the brief and shows the variation — or "View". Fills in live while the run
+ * renders; hand-offs still waiting open the hand-off card, returned ones
+ * open staging.
  */
-import { Check, Eye, GitCompareArrows, Loader2, RotateCcw, Sparkles, Star, TriangleAlert, X } from 'lucide-react';
+import { Check, Eye, GitCompareArrows, Loader2, RotateCcw, ScanSearch, Sparkles, Star, TriangleAlert, X } from 'lucide-react';
 import { useMemo, useRef, useState, type ReactNode } from 'react';
 import type { ElementOption, Generation, Photo, PlantFeasibility, Project, Space } from '../../../shared/types';
 import { useStore } from '../../state/store';
@@ -13,6 +15,9 @@ import { cn } from '../common';
 import { chooseCompareOption, viewVariation } from './actions';
 import { FeasibilityBadge, PlantSummaryChip } from './Feasibility';
 import { cancelRun, retryRun, retryVariation } from './generate';
+import { openHandoff, openStaging, retryPrepare } from './handoff/actions';
+import { AppIcon, ProvenanceLine } from './handoff/bits';
+import { appLabel } from './handoff/planned';
 import { bestGridColumns } from './geometry';
 import { useBlobUrl, useElementSize } from './hooks';
 import { STUDIO_KNOWLEDGE } from './knowledge';
@@ -89,13 +94,15 @@ export function CompareGrid({ photo, space, generation: g }: { photo: Photo; spa
   const [withOriginal, setWithOriginal] = useState(false);
   const cmp = compareContext(g);
   const tiles = runTiles(g, info);
+  const hand = g.renderMode === 'handoff';
+  const refOf = (tile: Tile) => ({ photoId: photo.id, generationId: g.id, plannedId: tile.plannedId as string });
   const ratings = useMemo(() => optionRatings(g, project, photo, space), [g, project, photo, space]);
   const options = new Map<string, ElementOption>((cmp?.options ?? []).map((o) => [o.id, o]));
   const chosen = cmp?.element ? (photo.draft?.elements.find((e) => e.id === cmp.element!.id)?.choices[cmp.dimension?.id ?? ''] ?? []) : [];
 
   const cells: Cell[] = [...(withOriginal ? [{ kind: 'original' } as const] : []), ...tiles.map((tile) => ({ kind: 'tile', tile }) as const)];
   const aspect = photo.width / Math.max(1, photo.height);
-  const captionH = cmp ? 62 : 32;
+  const captionH = (cmp ? 62 : 32) + (hand || g.variations.some((v) => v.source) ? 16 : 0);
   const cols = Math.max(1, bestGridColumns(Math.max(1, cells.length), area.width, area.height, aspect, GAP, captionH));
   const rows = Math.max(1, Math.ceil(cells.length / cols));
   const cellW = Math.max(0, (area.width - GAP * (cols - 1)) / cols);
@@ -220,6 +227,32 @@ export function CompareGrid({ photo, space, generation: g }: { photo: Photo; spa
                           </button>
                         )}
                       </div>
+                    ) : tile.state === 'staged' && tile.staged ? (
+                      <CellImage
+                        imageId={tile.staged.imageId}
+                        thumbId={tile.staged.thumbId}
+                        alt={tile.label}
+                        width={imgW}
+                        height={imgH}
+                        onClick={() => openStaging(refOf(tile))}
+                      >
+                        <span className="absolute top-2 left-2 inline-flex items-center gap-1 rounded-full bg-accent px-2 py-0.5 text-[11px] font-bold text-accent-fg shadow">
+                          <ScanSearch className="size-3.5" /> Back — review it
+                        </span>
+                      </CellImage>
+                    ) : tile.state === 'awaiting' ? (
+                      <button
+                        type="button"
+                        onClick={() => openHandoff(refOf(tile))}
+                        className="grid place-items-center rounded-lg border border-dashed border-white/25 bg-white/5 transition-colors hover:bg-white/10 focus-visible:outline-2 focus-visible:outline-white"
+                        style={{ width: imgW, height: imgH }}
+                      >
+                        <span className="flex max-w-[85%] flex-col items-center gap-2 text-center">
+                          <AppIcon app={tile.app} className="size-5 text-white/70" />
+                          <span className="text-xs text-white/75">Waiting for {tile.app ? appLabel(tile.app) : 'the hand-off'}</span>
+                          <span className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-white px-3 text-xs font-semibold text-black">Open hand-off</span>
+                        </span>
+                      </button>
                     ) : (
                       <div
                         className={cn(
@@ -237,9 +270,11 @@ export function CompareGrid({ photo, space, generation: g }: { photo: Photo; spa
                             <button
                               type="button"
                               onClick={() =>
-                                void (tile.slotKey
-                                  ? retryVariation(g.id, tile.slotKey)
-                                  : retryRun(g.id).catch((err: Error) => useStore.getState().notify(err.message, 'error')))
+                                hand && tile.plannedId
+                                  ? retryPrepare(refOf(tile))
+                                  : void (tile.slotKey
+                                      ? retryVariation(g.id, tile.slotKey)
+                                      : retryRun(g.id).catch((err: Error) => useStore.getState().notify(err.message, 'error')))
                               }
                               className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-white px-3 text-xs font-semibold text-black hover:bg-white/90"
                             >
@@ -266,6 +301,7 @@ export function CompareGrid({ photo, space, generation: g }: { photo: Photo; spa
                           {option.rationale || option.description}
                         </p>
                       )}
+                      {v?.source && <ProvenanceLine source={v.source} tone="stage" />}
                     </figcaption>
                   </figure>
                 );
