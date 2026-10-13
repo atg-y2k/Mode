@@ -407,9 +407,10 @@ const RESPONSE_POW = 0.8;
 const SKY_RESPONSE = 0.12;
 /** Peak of the emissive halo around an emitter at night (scaled by lightGain²). */
 const HALO = 0.8;
-/** Indirect bounce: radius multiple and relative strength of the broad fill around every light. */
-const BOUNCE_RADIUS = 2;
-const BOUNCE = 0.07;
+/** Indirect bounce: relative strength of the broad, soft fill across each light's whole radius. */
+const BOUNCE = 0.16;
+/** Aimed beams spill less light around than bare bulbs. */
+const BOUNCE_BY_BEAM: Partial<Record<PlacedLight['beam'], number>> = { down: 0.8, strip: 0.8, string: 0.6, up: 0.5, spot: 0.4 };
 /** Knee of the per-channel shoulder used when adding light. */
 const LIGHT_KNEE = 0.72;
 
@@ -647,22 +648,24 @@ function lightPrims(l: PlacedLight, gain: number, W: number, H: number): Prim[] 
       const e = lightEndPoint(l);
       const core = clamp(fx * 0.08, 1.2, R * 0.1);
       specs.push({ x, y, x2: e.x, y2: e.y, R, K: 5, amp: reflect * 0.85, color });
-      specs.push({ emissive: true, x, y, x2: e.x, y2: e.y, R: core * 5, K: 14, p: 3, amp: halo * 0.7, color });
-      specs.push({ emissive: true, x, y, x2: e.x, y2: e.y, R: core, K: 0, amp: 0.25 + halo, color });
+      specs.push({ emissive: true, x, y, x2: e.x, y2: e.y, R: core * 5, K: 14, p: 3, amp: halo * 0.45, color });
+      specs.push({ emissive: true, x, y, x2: e.x, y2: e.y, R: core, K: 0, amp: 0.25 + halo * 0.8, color });
       break;
     }
     case 'string': {
       const bulbs = stringBulbs(l);
       const e = lightEndPoint(l);
       const spacing = Math.hypot(e.x - x, e.y - y) / Math.max(1, bulbs.length);
-      const poolR = Math.max(R * 0.55, spacing * 1.5);
+      const br = stringBulbRadius(l);
+      // Everything stays within `radius` of the wire (bulbs hang br below it).
+      const reach = Math.max(1, R - br);
+      const poolR = Math.min(reach, Math.max(R * 0.55, spacing * 1.5));
       // Pools overlap along the wire; scale so their sum peaks near 0.55 × a single light.
       const poolAmp = (reflect * 0.55 * spacing) / (poolR * POOL_LINE_INTEGRAL_K5);
-      const br = stringBulbRadius(l);
       for (const b of bulbs) {
         specs.push({ x: b.x, y: b.y + br, R: poolR, K: 5, amp: poolAmp, color });
-        specs.push({ emissive: true, x: b.x, y: b.y + br, R: br * 5, K: 12, p: 3, amp: halo * 0.7, color });
-        specs.push({ emissive: true, x: b.x, y: b.y + br, R: br * 1.15, K: 0, amp: 0.35 + halo * 1.2, color });
+        specs.push({ emissive: true, x: b.x, y: b.y + br, R: Math.min(reach, br * 5), K: 12, p: 3, amp: halo * 0.7, color });
+        specs.push({ emissive: true, x: b.x, y: b.y + br, R: Math.min(reach, br * 1.15), K: 0, amp: 0.35 + halo * 1.2, color });
       }
       break;
     }
@@ -673,14 +676,14 @@ function lightPrims(l: PlacedLight, gain: number, W: number, H: number): Prim[] 
       break;
     }
   }
-  // Indirect bounce: a broad, faint wash so a lit room (or garden) glows as a whole, not just in pools.
-  // Like the halos it only matters in the dark, hence the extra gain factor.
-  const bounce = reflect * gain * BOUNCE;
+  // Indirect bounce: a broad, faint wash over the whole radius so a lit room (or garden) glows as
+  // a whole, not just in pools. Like the halos it only matters in the dark, hence the extra gain.
+  const bounce = reflect * gain * BOUNCE * (BOUNCE_BY_BEAM[l.beam] ?? 1);
   if (l.beam === 'strip' || l.beam === 'string') {
     const e = lightEndPoint(l);
-    specs.push({ x, y, x2: e.x, y2: e.y, R: R * BOUNCE_RADIUS, K: 1, amp: bounce, color });
+    specs.push({ x, y, x2: e.x, y2: e.y, R, K: 0.6, amp: bounce, color });
   } else {
-    specs.push({ x, y, R: R * BOUNCE_RADIUS, K: 1, amp: bounce, color });
+    specs.push({ x, y, R, K: 0.6, amp: bounce, color });
   }
   const out: Prim[] = [];
   for (const sp of specs) {
@@ -917,8 +920,8 @@ export function renderLights(img: ImageDataLike, lights: PlacedLight[], s: Light
     albB: albedoLut(g0[2]),
   };
 
-  const fIllum = f32('fIllum', W * 3, false);
-  const fEmit = f32('fEmit', W * 3, false);
+  const fIllum = f32('fIllum', W * 3, true);
+  const fEmit = f32('fEmit', W * 3, true);
   const vRow = f32('vRow', GW * 6, false);
   const fSpan = new Int32Array(2);
   const d = img.data;
