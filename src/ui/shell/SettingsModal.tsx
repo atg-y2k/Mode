@@ -45,7 +45,7 @@ import { ARCHITECTURAL_STYLES, DESIGN_THEMES } from '../../assets/design';
 import { fetchClimate } from '../../lib/studio';
 import { ZONE_SOURCE_LABELS } from '../../site/format';
 import { useInvasivesReady, useZipLookup } from '../../site/hooks';
-import { locationForUserZone, locationForZip } from '../../site/location';
+import { coordsOf, locationForUserZone, locationForZip } from '../../site/location';
 import { SiteSection } from '../../site/ui/SiteSection';
 import { lookupZip, normalizeZip } from '../../site/zip';
 import * as db from '../../state/persistence';
@@ -154,6 +154,34 @@ function ProjectTab() {
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
+  // Projects saved before the ZIP table existed: fill in what's missing (coordinates,
+  // zone) from it once. Not an undoable edit — nothing the user changed.
+  const zipInfoFound = zipState.status === 'found' ? zipState.info : null;
+  useEffect(() => {
+    const s = useStore.getState();
+    const cur = s.project?.location;
+    if (!zipInfoFound || !cur || cur.zip !== zipInfoFound.zip) return;
+    const fillCoords = !coordsOf(cur);
+    const fillZone = !cur.hardinessZone;
+    if (!fillCoords && !fillZone) return;
+    s.mutateProject(
+      'Location',
+      (d) => {
+        if (fillCoords) {
+          d.location.lat = zipInfoFound.lat;
+          d.location.lon = zipInfoFound.lon;
+        }
+        if (fillZone) {
+          d.location.hardinessZone = zipInfoFound.zone;
+          d.location.zoneSource = 'zip-table';
+          if (d.location.climate) d.location.climate.hardinessZone = zipInfoFound.zone;
+        }
+      },
+      { history: false },
+    );
+    if (fillZone) setZone(zipInfoFound.zone);
+  }, [zipInfoFound]);
+
   if (!project) return null;
   const location = project.location;
   const setLocation = (patch: Partial<ProjectLocation>) => {
@@ -162,7 +190,7 @@ function ProjectTab() {
   };
   const zipOk = isValidZip(zip);
   const climate = location.climate;
-  const zipInfo = zipState.status === 'found' ? zipState.info : null;
+  const zipInfo = zipInfoFound;
 
   /** A complete ZIP fills the zone (zoneSource 'zip-table') and coordinates from the bundled table. */
   const applyZip = async (value: string) => {
@@ -173,7 +201,7 @@ function ProjectTab() {
       if (!value.trim()) setLocation({ zip: undefined });
       return;
     }
-    if (z === cur.zip && cur.hardinessZone) return;
+    if (z === cur.zip) return; // unchanged (missing pieces are filled by the effect above)
     const [info, previous] = await Promise.all([lookupZip(z), cur.zip && cur.zip !== z ? lookupZip(cur.zip) : Promise.resolve(null)]);
     if (seq !== zipSeq.current || useStore.getState().project?.id !== project.id) return;
     const latest = useStore.getState().project?.location ?? {};

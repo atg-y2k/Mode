@@ -1,7 +1,10 @@
 /**
  * What you can do with a variation: More like this, Refine (feedback), Use as
  * base, Compare with original, Download, Delete. Offered as a menu on strip
- * tiles and grid cells, and inline on the viewer's info card.
+ * tiles and grid cells (headed by where the image came from — ChatGPT,
+ * Gemini or the image API — and how well it lined up), and inline on the
+ * viewer's info card. In hand-off mode, More like this / Refine create new
+ * hand-offs like any other run.
  */
 import { Columns2, Download, Ellipsis, ImagePlus, PenLine, Sparkles, Trash2, WandSparkles } from 'lucide-react';
 import { useRef, useState, type ReactNode } from 'react';
@@ -9,6 +12,7 @@ import type { Variation } from '../../../shared/types';
 import { useStore } from '../../state/store';
 import { Button, cn } from '../common';
 import { downloadVariation, runOrNotify, viewVariation } from './actions';
+import { ProvenanceLine } from './handoff/bits';
 import { Popover } from './Popover';
 import { setStudioUI } from './ui';
 
@@ -167,6 +171,11 @@ export function VariationMenuButton({
           <RefineForm photoId={photoId} variation={variation} onDone={close} />
         ) : (
           <div role="menu" className="flex w-56 flex-col">
+            {variation.source && (
+              <div className="mb-1 border-b border-line px-2.5 pt-1 pb-2">
+                <ProvenanceLine source={variation.source} />
+              </div>
+            )}
             <MenuItem icon={<Sparkles className="size-4" />} onClick={run(() => moreLikeThis(photoId, variation))}>
               More like this
             </MenuItem>
