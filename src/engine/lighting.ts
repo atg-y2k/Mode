@@ -588,16 +588,23 @@ function makePrim(sp: PrimSpec, W: number, H: number): Prim | null {
   };
 }
 
-/** ∫₋₁¹ (1 − u²)² / (1 + 5u²) du: line integral of a K = 5 pool, used to normalize string lights. */
-const POOL_LINE_INTEGRAL_K5 = (() => {
+/**
+ * ∫₋₁¹ f(u²) du for the p = 2 falloff with sharpness K: the line integral of a
+ * pool across its center. Pools strung along a wire (string lights) are
+ * scaled by spacing / (R · this) so their sum is even and independent of the
+ * bulb count.
+ */
+function poolLineIntegral(K: number): number {
   let s = 0;
   const N = 2000;
   for (let i = 0; i < N; i++) {
     const u = -1 + (2 * (i + 0.5)) / N;
-    s += falloff(u * u, 5, 2);
+    s += falloff(u * u, K, 2);
   }
   return (s * 2) / N;
-})();
+}
+const LINE_INTEGRAL_POOL = poolLineIntegral(5);
+const LINE_INTEGRAL_BOUNCE = poolLineIntegral(0.6);
 
 /** Decomposes one light into falloff primitives (pools, beams, halos). */
 function lightPrims(l: PlacedLight, gain: number, W: number, H: number): Prim[] {
@@ -661,9 +668,12 @@ function lightPrims(l: PlacedLight, gain: number, W: number, H: number): Prim[] 
       const reach = Math.max(1, R - br);
       const poolR = Math.min(reach, Math.max(R * 0.55, spacing * 1.5));
       // Pools overlap along the wire; scale so their sum peaks near 0.55 × a single light.
-      const poolAmp = (reflect * 0.55 * spacing) / (poolR * POOL_LINE_INTEGRAL_K5);
+      const poolAmp = (reflect * 0.55 * spacing) / (poolR * LINE_INTEGRAL_POOL);
+      // The bounce follows the sagging wire too: one broad, faint disc per bulb.
+      const bounceAmp = (reflect * gain * BOUNCE * (BOUNCE_BY_BEAM.string ?? 1) * spacing) / (reach * LINE_INTEGRAL_BOUNCE);
       for (const b of bulbs) {
         specs.push({ x: b.x, y: b.y + br, R: poolR, K: 5, amp: poolAmp, color });
+        specs.push({ x: b.x, y: b.y + br, R: reach, K: 0.6, amp: bounceAmp, color });
         specs.push({ emissive: true, x: b.x, y: b.y + br, R: Math.min(reach, br * 5), K: 12, p: 3, amp: halo * 0.7, color });
         specs.push({ emissive: true, x: b.x, y: b.y + br, R: Math.min(reach, br * 1.15), K: 0, amp: 0.35 + halo * 1.2, color });
       }
@@ -678,11 +688,12 @@ function lightPrims(l: PlacedLight, gain: number, W: number, H: number): Prim[] 
   }
   // Indirect bounce: a broad, faint wash over the whole radius so a lit room (or garden) glows as
   // a whole, not just in pools. Like the halos it only matters in the dark, hence the extra gain.
+  // (String lights add theirs per bulb, above.)
   const bounce = reflect * gain * BOUNCE * (BOUNCE_BY_BEAM[l.beam] ?? 1);
-  if (l.beam === 'strip' || l.beam === 'string') {
+  if (l.beam === 'strip') {
     const e = lightEndPoint(l);
     specs.push({ x, y, x2: e.x, y2: e.y, R, K: 0.6, amp: bounce, color });
-  } else {
+  } else if (l.beam !== 'string') {
     specs.push({ x, y, R, K: 0.6, amp: bounce, color });
   }
   const out: Prim[] = [];
