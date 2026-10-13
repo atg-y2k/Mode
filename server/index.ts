@@ -8,8 +8,10 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { serve } from '@hono/node-server';
-import { createApp } from './app';
+import type { Context } from 'hono';
+import { createApp, type AppEnv } from './app';
 import { loadConfig } from './config';
+import { createStudioDepsFromEnv, registerStudioRoutes } from './studio/routes';
 
 const config = loadConfig();
 for (const warning of config.warnings) console.warn(`[mode] warning: ${warning}`);
@@ -17,7 +19,25 @@ if (config.staticDir && !existsSync(join(config.staticDir, 'index.html'))) {
   console.warn(`[mode] warning: ${join(config.staticDir, 'index.html')} not found. Run "npm run build" before "npm start".`);
 }
 
-const app = createApp({ config });
+// Studio endpoints (scene map, element options, plans, renders, products) share
+// the main server's auth, body limit, rate limit and request log.
+const studio = createStudioDepsFromEnv();
+for (const warning of studio.warnings) console.warn(`[mode] warning: ${warning}`);
+
+const app = createApp({
+  config,
+  extraRoutes: (api, ctx) =>
+    registerStudioRoutes(api, {
+      ...studio,
+      log: ctx.log,
+      beforeAiCall: (c) => ctx.consumeAiCall(c as Context<AppEnv>),
+      onClaudeUsage: (c, u) =>
+        ctx.noteForLog(
+          c as Context<AppEnv>,
+          `claude ${u.task} in=${u.inputTokens ?? '?'} out=${u.outputTokens ?? '?'} cache=${u.cacheReadTokens ?? 0}`,
+        ),
+    }),
+});
 
 const server = serve(
   { fetch: app.fetch, port: config.port, ...(config.host ? { hostname: config.host } : {}) },
