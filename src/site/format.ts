@@ -93,8 +93,8 @@ export const COORDS_SOURCE_LABELS: Record<SiteProfile['coordsSource'], string> =
 };
 
 export const ZONE_SOURCE_LABELS: Record<NonNullable<ProjectLocation['zoneSource']>, string> = {
-  'zip-table': 'From your ZIP · PRISM 2023 map (not the official USDA map)',
-  ai: 'From AI — verify locally',
+  'zip-table': 'From your ZIP (derived from the USDA/OSU PRISM 2023 map; not the official USDA map)',
+  ai: 'From AI — verify it locally',
   user: 'Entered by you',
 };
 

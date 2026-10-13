@@ -89,6 +89,7 @@ export function CompareGrid({ photo, space, generation: g }: { photo: Photo; spa
   const progress = useStore((s) => s.runs[g.id]);
   const project = useStore((s) => s.project);
   const viewId = useStore((s) => s.studio.viewVariationId);
+  const defaultApp = useStore((s) => s.studio.handoffApp);
   const areaRef = useRef<HTMLDivElement>(null);
   const area = useElementSize(areaRef);
   const [withOriginal, setWithOriginal] = useState(false);
@@ -248,8 +249,8 @@ export function CompareGrid({ photo, space, generation: g }: { photo: Photo; spa
                         style={{ width: imgW, height: imgH }}
                       >
                         <span className="flex max-w-[85%] flex-col items-center gap-2 text-center">
-                          <AppIcon app={tile.app} className="size-5 text-white/70" />
-                          <span className="text-xs text-white/75">Waiting for {tile.app ? appLabel(tile.app) : 'the hand-off'}</span>
+                          <AppIcon app={tile.app ?? defaultApp} className="size-5 text-white/70" />
+                          <span className="text-xs text-white/75">Waiting for {appLabel(tile.app ?? defaultApp)}</span>
                           <span className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-white px-3 text-xs font-semibold text-black">Open hand-off</span>
                         </span>
                       </button>

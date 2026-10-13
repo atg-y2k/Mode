@@ -8,7 +8,7 @@
  * prepareHandoff and importHandoffResult must be given the same target mask
  * so they derive the same band.
  */
-import { createMask, featherMask, growMask, maskBounds } from '../engine/mask';
+import { createMask, featherMask, maskBounds } from '../engine/mask';
 import type { Mask } from '../engine/types';
 
 /** Coverage (of 255) below which a leftover marker pixel is invisible after compositing (≈1 %). */
@@ -41,28 +41,55 @@ export function maskCoverageShare(m: Mask): number {
   return d.length ? sum / (255 * d.length) : 0;
 }
 
+/** Whether a coverage share means "the whole image may change" (empty, or ≥ 90 % of the frame). */
+export function isWholeCoverage(coverage: number): boolean {
+  return coverage === 0 || coverage >= WHOLE_TARGET_COVERAGE;
+}
+
 /**
  * True when the target means "the whole image may change": empty (a
  * whole-scope run without zones) or covering ≥ 90 % of the frame.
  */
 export function isWholeTarget(target: Mask): boolean {
-  const cov = maskCoverageShare(target);
-  return cov === 0 || cov >= WHOLE_TARGET_COVERAGE;
+  return isWholeCoverage(maskCoverageShare(target));
 }
 
+/** Target coverage (of 255) from which a pixel seeds the band's growth (soft edges below it only blend). */
+const BAND_SEED = 64;
+
 /**
- * Composite band of `target` (photo size): grown and feathered copy. For a
- * whole-image target the band is solid 255.
+ * Composite band of `target` (photo size): the target grown by `grow` px
+ * (exact Euclidean distance from its ≥ 25 % coverage, never less than the
+ * target itself) and feathered. For a whole-image target the band is solid
+ * 255. `coverage` can be passed when already known.
  */
-export function compositeBand(target: Mask): Mask {
-  const band = createMask(target.width, target.height);
-  if (isWholeTarget(target)) {
+export function compositeBand(target: Mask, coverage = maskCoverageShare(target)): Mask {
+  const { width: W, height: H } = target;
+  const band = createMask(W, H);
+  if (isWholeCoverage(coverage)) {
     band.data.fill(255);
     return band;
   }
-  band.data.set(target.data);
-  const { grow, feather } = compositeRadii(target.width, target.height, maskBounds(target));
-  growMask(band, grow);
+  const bounds = maskBounds(target);
+  if (!bounds) return band;
+  const { grow, feather } = compositeRadii(W, H, bounds);
+  const pad = grow + 2;
+  const x0 = Math.max(0, bounds.x - pad);
+  const y0 = Math.max(0, bounds.y - pad);
+  const x1 = Math.min(W, bounds.x + bounds.w + pad);
+  const y1 = Math.min(H, bounds.y + bounds.h + pad);
+  const rw = x1 - x0;
+  const rh = y1 - y0;
+  const t = target.data;
+  const d2 = distanceSquared(rw, rh, (i) => t[(y0 + Math.floor(i / rw)) * W + x0 + (i % rw)] >= BAND_SEED);
+  const r2 = (grow + 0.5) * (grow + 0.5);
+  for (let y = 0; y < rh; y++) {
+    const row = (y0 + y) * W + x0;
+    for (let x = 0; x < rw; x++) {
+      const v = d2[y * rw + x] <= r2 ? 255 : 0;
+      band.data[row + x] = v > t[row + x] ? v : t[row + x];
+    }
+  }
   featherMask(band, feather);
   return band;
 }
@@ -90,7 +117,8 @@ export function bandBounds(band: Mask): { x: number; y: number; w: number; h: nu
 
 /** Marker stroke (export px): ink width and dark halo width, scaled to the export's long edge. */
 export function markerStroke(exportLongEdge: number): { width: number; halo: number } {
-  return { width: Math.max(3, Math.round(exportLongEdge * 0.0022)), halo: 1 };
+  // ~0.3 % of the long edge (5 px at 1536, 6 px at 2048): still a clear line after the app downsamples its input.
+  return { width: Math.max(4, Math.round(exportLongEdge * 0.003)), halo: 1 };
 }
 
 /** Gap (export px) between the band edge and the marker's halo, for an export scale. */

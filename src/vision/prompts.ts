@@ -172,6 +172,34 @@ function clearanceGrid(include: readonly Pt[], exclude: readonly (readonly Pt[])
   return { gw, gh, cell, ox: area.x, oy: area.y, dist, max };
 }
 
+/**
+ * The deepest cell; among near-ties (≥ 95% of the max clearance, e.g. the
+ * whole center line of a long rectangle) the one closest to the middle of
+ * that ridge, so the point sits in the middle of the shape, not at one end.
+ */
+function deepestCell(g: ClearanceGrid): number {
+  const ridge: number[] = [];
+  for (let k = 0; k < g.dist.length; k++) if (g.dist[k] >= g.max * 0.95) ridge.push(k);
+  let cx = 0;
+  let cy = 0;
+  for (const k of ridge) {
+    cx += k % g.gw;
+    cy += Math.floor(k / g.gw);
+  }
+  cx /= ridge.length;
+  cy /= ridge.length;
+  let best = ridge[0];
+  let bestD = Infinity;
+  for (const k of ridge) {
+    const d = (k % g.gw - cx) ** 2 + (Math.floor(k / g.gw) - cy) ** 2;
+    if (d < bestD) {
+      bestD = d;
+      best = k;
+    }
+  }
+  return best;
+}
+
 function cellCenter(g: ClearanceGrid, k: number): Pt {
   const i = k % g.gw;
   const j = (k - i) / g.gw;
@@ -193,12 +221,8 @@ export function sampleInteriorPoints(
   if (!g) return [];
   const minClear = Math.max(0.5, (opts.shrink ?? 0.35) * g.max);
   const eligible: number[] = [];
-  let best = -1;
-  for (let k = 0; k < g.dist.length; k++) {
-    if (g.dist[k] >= minClear) eligible.push(k);
-    if (best < 0 || g.dist[k] > g.dist[best]) best = k;
-  }
-  const chosen: Pt[] = [cellCenter(g, best)];
+  for (let k = 0; k < g.dist.length; k++) if (g.dist[k] >= minClear) eligible.push(k);
+  const chosen: Pt[] = [cellCenter(g, deepestCell(g))];
   const minSep = new Float64Array(eligible.length).fill(Infinity);
   while (chosen.length < count) {
     const last = chosen[chosen.length - 1];
@@ -232,8 +256,7 @@ export function deepestPoint(
   if (include.length < 3) return null;
   const g = clearanceGrid(include, exclude, within, resolution);
   if (!g || g.max <= 0) return null;
-  let best = 0;
-  for (let k = 1; k < g.dist.length; k++) if (g.dist[k] > g.dist[best]) best = k;
+  const best = deepestCell(g);
   return { pt: cellCenter(g, best), clearance: g.dist[best] * g.cell };
 }
 
@@ -272,8 +295,23 @@ function overlapShare(inner: readonly Pt[], outer: readonly Pt[]): number {
   return n / pts.length;
 }
 
+export type NeighbourRole = 'hole' | 'outside' | 'ignore';
+
+/**
+ * How another zone relates to `zone` when refining it: a 'hole' is nested in
+ * it and must be carved out (windows in a facade, a bed in the lawn), an
+ * 'outside' neighbour is claimed by the other zone where it doesn't overlap
+ * this one, and same-kind zones or parts of this zone (PARTS_OF) are ignored.
+ */
+export function neighbourRole(zone: Pick<SceneZone, 'id' | 'kind' | 'polygon'>, other: Pick<SceneZone, 'id' | 'kind' | 'polygon'>): NeighbourRole {
+  if (other.id === zone.id || other.kind === zone.kind || other.polygon.length < 3 || zone.polygon.length < 3) return 'ignore';
+  const nested = polygonArea(other.polygon) < polygonArea(zone.polygon) * 0.6 && overlapShare(other.polygon, zone.polygon) > 0.8;
+  if (nested) return (PARTS_OF[zone.kind] ?? []).includes(other.kind) ? 'ignore' : 'hole';
+  return 'outside';
+}
+
 export interface NegativeOptions {
-  /** At most this many negatives (default 3). */
+  /** At most this many negatives (default 5). */
   max?: number;
   /** Grid resolution for the clearance search (default 40). */
   resolution?: number;
@@ -286,38 +324,61 @@ export interface NegativeOptions {
  * are holes — their own deepest point is used — unless they are parts of it
  * (PARTS_OF). Zones with the same kind are never used.
  */
+/** Distance from `p` to the nearest edge of `poly`. */
+export function distanceToPolygonEdge(p: Pt, poly: readonly Pt[]): number {
+  let d = Infinity;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const a = poly[j];
+    const b = poly[i];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len2 = dx * dx + dy * dy;
+    const t = len2 > 0 ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2)) : 0;
+    d = Math.min(d, Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy)));
+  }
+  return d;
+}
+
+/**
+ * Negative clicks for `zone` taken from the other zones: one per neighbour.
+ * Nested holes (windows in a facade, a bed in the lawn) come first (up to 2,
+ * at their deepest point); then outside neighbours at the deepest spot of
+ * (neighbour − zone) near the prompt box, closest to the zone first — the
+ * adjacent roof matters more for a facade than the sky far above it. Parts
+ * of the zone (PARTS_OF) and same-kind zones are never used.
+ */
 export function negativePoints(zone: Pick<SceneZone, 'id' | 'kind' | 'polygon'>, others: readonly Pick<SceneZone, 'id' | 'kind' | 'polygon'>[], box: Box, opts: NegativeOptions = {}): Pt[] {
-  const max = opts.max ?? 3;
+  const max = opts.max ?? 5;
   const res = opts.resolution ?? 40;
   if (max <= 0 || zone.polygon.length < 3) return [];
-  const zoneArea = polygonArea(zone.polygon);
   const zoneBox = boundsOf(zone.polygon);
-  const parts = PARTS_OF[zone.kind] ?? [];
   const reach: Box = { x: box.x - box.w * 0.25, y: box.y - box.h * 0.25, w: box.w * 1.5, h: box.h * 1.5 };
-  const found: { pt: Pt; score: number }[] = [];
+  const holes: { pt: Pt; clearance: number }[] = [];
+  const outside: { pt: Pt; inBox: boolean; dist: number }[] = [];
   for (const other of others) {
-    if (other.id === zone.id || other.kind === zone.kind || other.polygon.length < 3) continue;
+    const role = neighbourRole(zone, other);
+    if (role === 'ignore') continue;
     const ob = boundsOf(other.polygon);
     if (!intersectBoxes(ob, reach)) continue;
-    const otherArea = polygonArea(other.polygon);
-    const nested = otherArea < zoneArea * 0.6 && overlapShare(other.polygon, zone.polygon) > 0.8;
-    let hit: { pt: Pt; clearance: number } | null;
-    if (nested) {
-      if (parts.includes(other.kind)) continue;
-      hit = deepestPoint(other.polygon, [], null, res);
-    } else {
-      // Outside this zone, near it: (other − zone) clipped to the reach box.
-      hit = deepestPoint(other.polygon, [zone.polygon], reach, res);
-      // A zone that contains this one (facade around a window): look only near the box.
-      if (!hit && intersectBoxes(ob, zoneBox)) hit = deepestPoint(other.polygon, [zone.polygon], null, res);
+    if (role === 'hole') {
+      const hit = deepestPoint(other.polygon, [], null, res);
+      if (hit && hit.clearance >= 1) holes.push(hit);
+      continue;
     }
+    // Outside this zone, near it: (other − zone) clipped to the reach box.
+    let hit = deepestPoint(other.polygon, [zone.polygon], reach, res);
+    // A zone that contains this one (facade around a window) but not near the box.
+    if (!hit && intersectBoxes(ob, zoneBox)) hit = deepestPoint(other.polygon, [zone.polygon], null, res);
     if (!hit || hit.clearance < 1) continue;
     const inBox = hit.pt.x >= box.x && hit.pt.x <= box.x + box.w && hit.pt.y >= box.y && hit.pt.y <= box.y + box.h;
-    // Prefer points inside the box (they shape the mask), then roomier spots.
-    found.push({ pt: hit.pt, score: (inBox ? 1e6 : 0) + hit.clearance });
+    outside.push({ pt: hit.pt, inBox, dist: distanceToPolygonEdge(hit.pt, zone.polygon) });
   }
-  found.sort((a, b) => b.score - a.score);
-  return found.slice(0, max).map((f) => f.pt);
+  holes.sort((a, b) => b.clearance - a.clearance);
+  outside.sort((a, b) => Number(b.inBox) - Number(a.inBox) || a.dist - b.dist);
+  const picked: Pt[] = holes.slice(0, Math.min(2, max)).map((h) => h.pt);
+  for (const o of outside) if (picked.length < max) picked.push(o.pt);
+  for (const h of holes.slice(2)) if (picked.length < max) picked.push(h.pt);
+  return picked;
 }
 
 export interface ZonePrompt {
@@ -335,17 +396,7 @@ export function zonePrompt(
 ): ZonePrompt {
   const box = polygonBox(zone.polygon, 0.04, width, height);
   // Carve-outs (nested holes) must not receive positive clicks either.
-  const holes = allZones
-    .filter(
-      (o) =>
-        o.id !== zone.id &&
-        o.kind !== zone.kind &&
-        o.polygon.length >= 3 &&
-        !(PARTS_OF[zone.kind] ?? []).includes(o.kind) &&
-        polygonArea(o.polygon) < polygonArea(zone.polygon) * 0.6 &&
-        overlapShare(o.polygon, zone.polygon) > 0.8,
-    )
-    .map((o) => o.polygon);
+  const holes = allZones.filter((o) => neighbourRole(zone, o) === 'hole').map((o) => o.polygon);
   const n = promptPointCount(zone.polygon, width, height);
   let positive = sampleInteriorPoints(zone.polygon, n, { exclude: holes });
   if (positive.length === 0) positive = sampleInteriorPoints(zone.polygon, n);

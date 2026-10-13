@@ -1,14 +1,21 @@
 /**
  * "New project": name, ZIP code (hardiness zone & plant feasibility) and an
- * optional overall style. Creates and opens the project; when a ZIP is given
- * and AI is on, the climate profile is looked up in the background.
+ * optional overall style. Creates and opens the project. A ZIP fills the
+ * USDA zone and the ZIP-centre coordinates from the bundled table (offline,
+ * zoneSource 'zip-table'); then, in the background, the frost dates & soil
+ * profile is fetched through the Mode server and — when AI is on — the AI
+ * climate summary. Both are optional and fail quietly.
  */
 import { useCallback, useMemo, useRef, useState, type FormEvent } from 'react';
-import { MapPin, Sparkles } from 'lucide-react';
+import { Loader2, MapPin, Sparkles } from 'lucide-react';
+import type { ProjectLocation } from '../../../shared/types';
 import { ARCHITECTURAL_STYLES, DESIGN_THEMES } from '../../assets/design';
 import { fetchClimate } from '../../lib/studio';
+import { useZipLookup } from '../../site/hooks';
+import { fetchSiteProfile } from '../../site/profile';
+import { lookupZip, normalizeZip, ZONE_SOURCE_NOTE, type ZipInfo } from '../../site/zip';
 import { useStore } from '../../state/store';
-import { Button, Field, Modal, TextInput, cn } from '../common';
+import { Badge, Button, Field, Modal, TextInput, cn } from '../common';
 import { errorText, isValidZip } from './format';
 import { closeNewProject, useShellUI } from './shellUI';
 
@@ -46,6 +53,7 @@ function NewProjectForm() {
   const [touchedZip, setTouchedZip] = useState(false);
   const suggestions = useMemo(styleSuggestions, []);
   const zipOk = isValidZip(zip);
+  const zipLookup = useZipLookup(zipOk ? zip : undefined);
 
   const submit = async (e?: FormEvent) => {
     e?.preventDefault();
@@ -57,8 +65,11 @@ function NewProjectForm() {
     setBusy(true);
     const s = useStore.getState();
     try {
+      const z = normalizeZip(zip) ?? '';
+      // Usually already resolved while typing (the table is cached); don't wait on a ZIP known to be missing.
+      const typed = zipLookup.status === 'found' && zipLookup.info.zip === z ? zipLookup.info : null;
+      const info = !z || zipLookup.status === 'unknown' ? null : (typed ?? (await lookupZip(z)));
       const id = await s.createProject(name.trim() || 'My home');
-      const z = zip.trim();
       const st = style.trim();
       if (z || st) {
         // Initial details are part of creating the project, not an undoable edit.
@@ -66,13 +77,15 @@ function NewProjectForm() {
           'Project details',
           (d) => {
             if (z) d.location.zip = z;
+            if (info) Object.assign(d.location, zipLocation(info));
             if (st) d.style = st;
           },
           { history: false },
         );
       }
       closeNewProject();
-      if (z && useStore.getState().health?.ai.enabled) void lookUpClimate(id, z);
+      if (info) void lookUpSite(id, info);
+      if (z && useStore.getState().health?.ai.enabled) void lookUpClimate(id, z, info?.zone ?? null);
     } catch (err) {
       s.notify(`Couldn't create the project: ${errorText(err)}`, 'error');
       setBusy(false);
@@ -121,23 +134,34 @@ function NewProjectForm() {
           hint={
             touchedZip && !zipOk ? (
               <span className="text-danger">Enter a 5-digit US ZIP code, or leave it empty.</span>
+            ) : zipLookup.status === 'found' ? (
+              `Plant suggestions will fit zone ${zipLookup.info.zone}, with frost dates and soil for your area. ${ZONE_SOURCE_NOTE}`
+            ) : zipLookup.status === 'unknown' ? (
+              'This ZIP isn’t in Mode’s zone table — you can type your hardiness zone in Settings.'
             ) : aiEnabled ? (
               'Used to find your hardiness zone and climate so plant suggestions actually grow there.'
             ) : (
-              'Used for your hardiness zone so plant suggestions fit your climate. You can add the zone yourself in Settings.'
+              'Used for your hardiness zone, frost dates and soil so plant suggestions fit your climate.'
             )
           }
         >
-          <TextInput
-            value={zip}
-            onChange={(e) => setZip(e.target.value.replace(/[^\d-]/g, '').slice(0, 10))}
-            onBlur={() => setTouchedZip(true)}
-            inputMode="numeric"
-            autoComplete="postal-code"
-            placeholder="e.g. 20817"
-            aria-invalid={touchedZip && !zipOk}
-            className={cn('max-w-40', touchedZip && !zipOk && 'border-danger! focus:ring-danger/25!')}
-          />
+          <span className="flex items-center gap-2">
+            <TextInput
+              value={zip}
+              onChange={(e) => setZip(e.target.value.replace(/[^\d-]/g, '').slice(0, 10))}
+              onBlur={() => setTouchedZip(true)}
+              inputMode="numeric"
+              autoComplete="postal-code"
+              placeholder="e.g. 20817"
+              aria-invalid={touchedZip && !zipOk}
+              aria-describedby="mode-new-zone"
+              className={cn('max-w-40', touchedZip && !zipOk && 'border-danger! focus:ring-danger/25!')}
+            />
+            <span id="mode-new-zone" aria-live="polite" className="inline-flex min-w-0 items-center">
+              {zipLookup.status === 'loading' && <Loader2 className="size-4 animate-spin text-subtle" aria-label="Looking up the zone" />}
+              {zipLookup.status === 'found' && <Badge tone="accent">USDA zone {zipLookup.info.zone}</Badge>}
+            </span>
+          </span>
         </Field>
         <Field label="Overall style (optional)" hint="A direction for the whole house. Each photo’s architecture is read separately.">
           <TextInput value={style} onChange={(e) => setStyle(e.target.value)} list="mode-style-suggestions" placeholder="e.g. Modern farmhouse, cottage garden" maxLength={120} />
@@ -175,21 +199,46 @@ function NewProjectForm() {
   );
 }
 
-/** Looks up the climate for a fresh project and stores it (no undo entry). */
-async function lookUpClimate(projectId: string, zip: string) {
+/** Zone (from the PRISM 2023 ZIP table) and ZIP-centre coordinates for a new project. */
+function zipLocation(info: ZipInfo): Partial<ProjectLocation> {
+  return { hardinessZone: info.zone, zoneSource: 'zip-table', lat: info.lat, lon: info.lon };
+}
+
+/** Frost dates & soil for the ZIP centre (via the Mode server); silent when unavailable. */
+async function lookUpSite(projectId: string, info: ZipInfo) {
   try {
-    const climate = await fetchClimate({ zip, hardinessZone: null, notes: null });
+    const site = await fetchSiteProfile(info.lat, info.lon, undefined, { coordsSource: 'zip' });
+    if (!site.frost && !site.soil && !site.ecoregion) return;
+    const s = useStore.getState();
+    // Only if the project still sits at that ZIP centre (the user may have moved it meanwhile).
+    if (s.project?.id !== projectId || s.project.location.lat !== info.lat || s.project.location.lon !== info.lon) return;
+    s.mutateProject('Site profile', (d) => void (d.location.site = site), { history: false });
+  } catch {
+    // Optional: Settings offers the lookup again (e.g. when the server has no site endpoint yet).
+  }
+}
+
+/** Looks up the climate for a fresh project and stores it (no undo entry). */
+async function lookUpClimate(projectId: string, zip: string, zone: string | null) {
+  try {
+    const climate = await fetchClimate({ zip, hardinessZone: zone, notes: null });
     const s = useStore.getState();
     if (s.project?.id !== projectId) return;
+    let zoneNow = climate.hardinessZone;
     s.mutateProject(
       'Climate',
       (d) => {
-        d.location.climate = climate;
-        if (!d.location.hardinessZone) d.location.hardinessZone = climate.hardinessZone;
+        if (!d.location.hardinessZone) {
+          d.location.hardinessZone = climate.hardinessZone;
+          d.location.zoneSource = 'ai';
+        }
+        // The ZIP-table zone stays the source of truth; the AI summary follows it.
+        zoneNow = d.location.hardinessZone;
+        d.location.climate = { ...climate, hardinessZone: zoneNow };
       },
       { history: false },
     );
-    s.notify(`Climate found: USDA zone ${climate.hardinessZone}. Plant suggestions will fit it.`, 'success');
+    s.notify(`Climate found for USDA zone ${zoneNow}. Plant suggestions will fit it.`, 'success');
   } catch (err) {
     const s = useStore.getState();
     if (s.project?.id !== projectId) return;

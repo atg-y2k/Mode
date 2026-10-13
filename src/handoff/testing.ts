@@ -85,6 +85,8 @@ export interface SimulatedReturn {
 export interface SimulateOptions {
   /** Returned size relative to the export (default 0.75). */
   scale?: number;
+  /** Returned canvas size, when the app changed the aspect (content stays centred at `scale`). */
+  size?: { w: number; h: number };
   /** Extra zoom the "model" applied around the centre (default 1.03 = slight crop). */
   zoom?: number;
   /** Shift in returned px (default 9, −6). */
@@ -108,8 +110,8 @@ export function simulateReturn(exportImg: ImageDataLike, crop: Rect, target: Mas
   const scale = opts.scale ?? 0.75;
   const zoom = opts.zoom ?? 1.03;
   const shift = opts.shift ?? { x: 9, y: -6 };
-  const rw = Math.round(exportImg.width * scale);
-  const rh = Math.round(exportImg.height * scale);
+  const rw = opts.size?.w ?? Math.round(exportImg.width * scale);
+  const rh = opts.size?.h ?? Math.round(exportImg.height * scale);
   // export px → returned px: scale, zoom about the centre, shift.
   const k = scale * zoom;
   const T: Affine = [k, 0, rw / 2 - (exportImg.width / 2) * k + shift.x, 0, k, rh / 2 - (exportImg.height / 2) * k + shift.y];

@@ -41,7 +41,7 @@ export type WorkerRequest =
   | { id: number; op: 'cached'; models: ModelKey[] }
   | { id: number; op: 'setImage'; photoId: string; width: number; height: number; data: Uint8ClampedArray }
   | { id: number; op: 'encode'; photoId: string }
-  | { id: number; op: 'segment'; photoId: string; prompt: PromptInput; maxSize?: number }
+  | { id: number; op: 'segment'; photoId: string; prompt: PromptInput; maxSize?: number; rank?: number }
   | { id: number; op: 'refine'; photoId: string; zones: RefineZoneInput[]; context: RefineZoneInput[] }
   | { id: number; op: 'offlineMap'; photoId: string; interior: boolean }
   | { id: number; op: 'kindOf'; photoId: string; mask: Uint8Array; width: number; height: number; interior: boolean }
@@ -61,6 +61,9 @@ export interface SegmentResult {
   mask: Uint8Array;
   /** Decoder's predicted IoU of the chosen candidate. */
   score: number;
+  /** Position of the chosen candidate when ordered by size (0 = smallest) and how many there are. */
+  rank: number;
+  ranks: number;
   /** Decode time in ms (drives the hover-preview decision). */
   ms: number;
 }

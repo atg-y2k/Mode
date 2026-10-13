@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Pt } from '../../shared/types';
-import { douglasPeucker, labelComponents, largestContour, maskContours, signedArea2, simplifyClosed, traceOutline } from './contours';
+import { douglasPeucker, joinRings, labelComponents, largestContour, maskContours, signedArea2, simplifyClosed, traceOutline, zonePolygon } from './contours';
+import { pointInPolygon } from './prompts';
 
 function grid(width: number, height: number, on: (x: number, y: number) => boolean) {
   const data = new Uint8Array(width * height);
@@ -138,5 +139,27 @@ describe('Douglas–Peucker', () => {
       { x: 10, y: 0.2 },
     ];
     expect(simplifyClosed(ring, 100).length).toBeGreaterThanOrEqual(3);
+  });
+});
+
+describe('zonePolygon', () => {
+  it('keeps every significant part of a split area in one outline', () => {
+    // Lawn on both sides of a walk, plus a speck.
+    const g = grid(100, 60, (x, y) => (y >= 30 && x < 40) || (y >= 30 && x >= 55) || (x === 2 && y === 2));
+    const poly = zonePolygon(g, { tolerancePx: 0.5 });
+    expect(pointInPolygon({ x: 10, y: 45 }, poly)).toBe(true);
+    expect(pointInPolygon({ x: 80, y: 45 }, poly)).toBe(true);
+    // The walk between the parts and the dropped speck stay outside.
+    expect(pointInPolygon({ x: 47, y: 45 }, poly)).toBe(false);
+    expect(pointInPolygon({ x: 2.5, y: 2.5 }, poly)).toBe(false);
+    // Bridges add no area.
+    expect(Math.abs(signedArea2(poly)) / 2).toBe(40 * 30 + 45 * 30);
+  });
+
+  it('is the plain outline for a single part and empty for an empty mask', () => {
+    const g = grid(20, 20, (x, y) => x >= 5 && x < 15 && y >= 5 && y < 15);
+    expect(zonePolygon(g, { tolerancePx: 0.5 })).toHaveLength(4);
+    expect(zonePolygon(grid(5, 5, () => false))).toEqual([]);
+    expect(joinRings([])).toEqual([]);
   });
 });

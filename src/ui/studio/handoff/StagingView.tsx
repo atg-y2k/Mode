@@ -9,9 +9,10 @@
  */
 import { Check, Columns2, Copy, Flame, RotateCcw, ShieldAlert, SkipForward, Trash2, X } from 'lucide-react';
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
+import { createPortal } from 'react-dom';
 import type { HandoffApp, Photo } from '../../../../shared/types';
-import { FIX_PROMPTS } from '../../../handoff';
-import { findVariation, useStore } from '../../../state/store';
+import { fixPromptsFor, markerColorName } from '../../../handoff';
+import { findPhoto, findVariation, useStore } from '../../../state/store';
 import { cn } from '../../common';
 import { useBlobUrl, useElementSize } from '../hooks';
 import { acceptStaged, closeStaging, rejectStaged, retryStricter, skipPlanned } from './actions';
@@ -189,12 +190,37 @@ function FixChip({ text, label }: { text: string; label: string }) {
   );
 }
 
+/** Below this size of the photo pane, staging opens as a full-window overlay (phones, short laptop screens). */
+const MIN_INLINE = { width: 560, height: 520 };
+
 export function StagingView({ photo, stagingRef }: { photo: Photo; stagingRef: PlannedRef }) {
+  const hostRef = useRef<HTMLDivElement>(null);
+  const size = useElementSize(hostRef);
+  const overlay = size.width > 0 && (size.width < MIN_INLINE.width || size.height < MIN_INLINE.height);
+  const content = <StagingContent photo={photo} stagingRef={stagingRef} />;
+  return (
+    <div ref={hostRef} className="h-full w-full bg-stage">
+      {size.width === 0
+        ? null
+        : overlay
+          ? createPortal(
+              <div className="fixed inset-0 z-40 h-dvh pb-[env(safe-area-inset-bottom)]" role="dialog" aria-label="Review the returned image">
+                {content}
+              </div>,
+              document.body,
+            )
+          : content}
+    </div>
+  );
+}
+
+function StagingContent({ photo, stagingRef }: { photo: Photo; stagingRef: PlannedRef }) {
   const found = findPlanned(photo, stagingRef.generationId, stagingRef.plannedId);
   const extras = useHandoffSession((s) => s.extras[stagingRef.plannedId]);
   const [slider, setSlider] = useState(true);
   const [heat, setHeat] = useState(false);
   const staged = found?.planned.staged;
+  const interior = useStore((s) => findPhoto(s.project, photo.id)?.space.kind === 'interior');
 
   // The item was accepted / rejected elsewhere (strip, PiP) or the run deleted.
   useEffect(() => {
@@ -219,7 +245,7 @@ export function StagingView({ photo, stagingRef }: { photo: Photo; stagingRef: P
   const summary = report ? alignmentSummary(report, extras?.blobs.length) : null;
   const app = staged.source.app;
   const beforeId = (generation.baseVariationId ? findVariation(photo, generation.baseVariationId)?.imageId : undefined) ?? photo.imageId;
-  const fixes = FIX_PROMPTS.filter((f) => !f.app || f.app === app);
+  const fixes = fixPromptsFor(app ?? 'chatgpt', interior, markerColorName(planned.handoff?.markerColor ?? ''));
 
   return (
     <div className="flex h-full w-full flex-col bg-stage text-white">
@@ -228,14 +254,39 @@ export function StagingView({ photo, stagingRef }: { photo: Photo; stagingRef: P
           <AppIcon app={app} className="size-4" />
         </span>
         <div className="min-w-0 flex-1">
-          <div className="text-[11px] font-medium uppercase tracking-wider text-white/55">Back from {appLabel(app)} · review before it joins your variations</div>
+          <div className="text-[11px] font-medium uppercase tracking-wider text-white/55">
+            Back from {appLabel(app)}
+            <span className="max-md:hidden"> · review before it joins your variations</span>
+          </div>
           <h2 className="truncate font-display text-lg leading-tight" title={planned.brief}>
             {planned.title}
             {planned.optionLabel && planned.optionLabel !== planned.title && <span className="text-white/60"> · {planned.optionLabel}</span>}
           </h2>
         </div>
-        <div className="flex shrink-0 items-center gap-1.5">
+        <div className="flex shrink-0 flex-wrap items-center gap-1.5">
           {report && <AlignmentBadge report={report} areas={extras?.blobs.length} tone="stage" />}
+          <div className="flex gap-0.5 rounded-lg bg-white/10 p-0.5">
+            <button
+              type="button"
+              aria-pressed={slider}
+              onClick={() => setSlider((x) => !x)}
+              title="Before / after slider"
+              className={cn('inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-xs font-medium', slider ? 'bg-white text-black' : 'text-white/85 hover:bg-white/15')}
+            >
+              <Columns2 className="size-3.5" /> <span className="max-sm:sr-only">Before / after</span>
+            </button>
+            {extras && (
+              <button
+                type="button"
+                aria-pressed={heat}
+                onClick={() => setHeat((x) => !x)}
+                title="Where the model changed things outside the outline (all of it was put back from your photo)"
+                className={cn('inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-xs font-medium', heat ? 'bg-white text-black' : 'text-white/85 hover:bg-white/15')}
+              >
+                <Flame className="size-3.5" /> <span className="max-sm:sr-only">Changes outside</span>
+              </button>
+            )}
+          </div>
           <button
             type="button"
             onClick={closeStaging}
@@ -248,7 +299,7 @@ export function StagingView({ photo, stagingRef }: { photo: Photo; stagingRef: P
         </div>
       </div>
 
-      <div className="relative min-h-0 flex-1 px-4 sm:px-5">
+      <div className="relative min-h-48 flex-1 px-4 sm:px-5">
         <BeforeAfter
           photo={photo}
           beforeId={beforeId}
@@ -259,33 +310,14 @@ export function StagingView({ photo, stagingRef }: { photo: Photo; stagingRef: P
           showHeat={heat}
           app={app}
         />
-        <div className="absolute right-6 bottom-2 flex gap-1 rounded-xl bg-black/50 p-1 ring-1 ring-white/10 backdrop-blur-md sm:right-7">
-          <button
-            type="button"
-            aria-pressed={slider}
-            onClick={() => setSlider((x) => !x)}
-            title="Before / after slider"
-            className={cn('inline-flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium', slider ? 'bg-white text-black' : 'text-white/85 hover:bg-white/15')}
-          >
-            <Columns2 className="size-3.5" /> Before / after
-          </button>
-          {extras && (
-            <button
-              type="button"
-              aria-pressed={heat}
-              onClick={() => setHeat((x) => !x)}
-              title="Where the model changed things outside the outline (all of it was put back from your photo)"
-              className={cn('inline-flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium', heat ? 'bg-white text-black' : 'text-white/85 hover:bg-white/15')}
-            >
-              <Flame className="size-3.5" /> Changes outside
-            </button>
-          )}
-        </div>
       </div>
 
       <div className="flex flex-col gap-2.5 px-4 pt-2.5 pb-3 sm:px-5">
         {summary && (
-          <p className={cn('flex items-start gap-1.5 text-xs leading-relaxed', summary.tone === 'warning' ? 'text-gold' : 'text-white/70')}>
+          <p
+            className={cn('flex items-start gap-1.5 text-xs leading-relaxed max-sm:line-clamp-2', summary.tone === 'warning' ? 'text-gold' : 'text-white/70')}
+            title={summary.detail}
+          >
             {summary.tone === 'warning' && <ShieldAlert className="mt-px size-3.5 shrink-0" />}
             {summary.detail}
           </p>
@@ -306,8 +338,12 @@ export function StagingView({ photo, stagingRef }: { photo: Photo; stagingRef: P
               summary?.suggestStricter ? 'bg-gold/90 text-black hover:bg-gold' : 'bg-white/10 text-white hover:bg-white/20',
             )}
             title="Discard this result and prepare the same variation with a stricter prompt (start a new chat)"
+            aria-label="Retry with a stricter prompt"
           >
-            <RotateCcw className="size-4" /> Retry with a stricter prompt
+            <RotateCcw className="size-4" />
+            <span>
+              Retry<span className="max-sm:hidden"> with a stricter prompt</span>
+            </span>
           </button>
           <button
             type="button"

@@ -7,7 +7,7 @@ import { createMask } from '../../engine/mask';
 import * as db from '../../state/persistence';
 import * as runtime from '../../state/runtime';
 import { findPhoto, newDesign, useStore } from '../../state/store';
-import { INTERRUPTED, buildTargetMask, cancelRun, generationBlocker, recoverInterruptedRuns, retryVariation, startRun } from './generate';
+import { INTERRUPTED, buildTargetMask, cancelRun, generationBlocker, recoverInterruptedRuns, retryVariation, startRun, withStrictness } from './generate';
 import { declineReview, registerReviewHost, submitReview, useReview } from './handoff/review';
 import { handoffSession, setHandoffSession } from './handoff/session';
 
@@ -325,6 +325,15 @@ describe('hand-off runs', () => {
     expect(g.planned?.[0]).toMatchObject({ status: 'done', variationId: g.variations[0].id });
     expect(g.variations[0]).toMatchObject({ title: 'Take 1', brief: 'Edit the bed: take 1.', source: { kind: 'api' } });
     expect(calls.map((c) => c.path)).toEqual(['/api/studio/render-variation']);
+  });
+});
+
+describe('withStrictness', () => {
+  it('adds the strictness sentence for the image API (balanced adds nothing)', () => {
+    expect(withStrictness(' Lay flagstones. ', undefined, false)).toBe('Lay flagstones.');
+    expect(withStrictness('Lay flagstones.', 'balanced', false)).toBe('Lay flagstones.');
+    expect(withStrictness('Lay flagstones.', 'strict', false)).toMatch(/^Lay flagstones\. Change nothing beyond this request/);
+    expect(withStrictness('Paint the walls.', 'creative', true)).toMatch(/suit the room\.$/);
   });
 });
 

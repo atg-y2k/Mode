@@ -118,6 +118,9 @@ export function TargetPreview({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [mask, setMask] = useState<{ mask: Mask; wholeImage: boolean } | null>(null);
 
+  // Recompute only when the outlines can differ (not on every document edit).
+  const zones = photo.scene?.zones;
+  const paths = photo.scene?.paths;
   useEffect(() => {
     let alive = true;
     void targetMaskFor(photo, brief)
@@ -126,7 +129,7 @@ export function TargetPreview({
     return () => {
       alive = false;
     };
-  }, [photo, brief]);
+  }, [photo.id, brief, zones, paths]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const canvas = canvasRef.current;

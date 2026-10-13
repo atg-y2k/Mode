@@ -6,7 +6,7 @@
  */
 import { memo, useId, useMemo, useState } from 'react';
 import { ArrowDown, ArrowUp, Check, ChevronDown, GitCompare, Lightbulb, Route, ScanSearch, Sparkles, Trash2, X } from 'lucide-react';
-import type { ElementDimension, ElementOption, ElementSpec, ProjectLocation, SceneMap, ZoneKind } from '../../../../shared/types';
+import type { DesignBrief, ElementDimension, ElementOption, ElementSpec, ProjectLocation, SceneMap, ZoneKind } from '../../../../shared/types';
 import { feasibilityContext, getElementDef, guidanceFor, swatchSpanIn, withPlantFeasibility } from '../../../assets/design';
 import { useStore } from '../../../state/store';
 import { useSceneJob } from '../../shell/sceneJobs';
@@ -16,7 +16,11 @@ import { elementFeasibilityContext } from '../planRequest';
 import { compareOptions, editBrief, mapScene, tailorElement, tailorJobKey, typeBrief } from './actions';
 import { clearAiJob, useAiJob } from './aiJobs';
 import { chooseOption, defaultCompareSelection, isChosen, moveElement, removeElement, toggleElementPath, toggleElementZone, worstChosenFeasibility } from './briefOps';
+import { FeasibilityHeader } from './FeasibilityHeader';
+import { growthExamples } from './growth';
+import { GrowthSlider } from './GrowthSlider';
 import { elementIcon } from './icons';
+import { isPlantingElement, siteHeader, spotZones, withSiteDeer } from './siteHeader';
 import { AiJobStatus, AiProgress, Callout, Chip, FEASIBILITY_META, FeasibilityBadge, InlineText, OptionVisualView, useAiReady } from './ui';
 import { zonesForElement } from './zones';
 
@@ -29,21 +33,30 @@ export interface ElementCardProps {
   expanded: boolean;
   /** The brief's target zones (their sun rates plants when the element has no zones of its own). */
   targetZoneIds: string[];
+  /** The brief's plant maturity (shown as a growth slider on planting elements). */
+  plantMaturity: DesignBrief['plantMaturity'];
   index: number;
   count: number;
 }
 
 const MAX_COMPARE = 6;
 
-export const ElementCard = memo(function ElementCard({ el, photoId, scene, location, setting, expanded, targetZoneIds, index, count }: ElementCardProps) {
+export const ElementCard = memo(function ElementCard({ el, photoId, scene, location, setting, expanded, targetZoneIds, plantMaturity, index, count }: ElementCardProps) {
   const bodyId = useId();
   const def = getElementDef(el.type);
   const Icon = elementIcon(def.icon);
   const ctx = useMemo(
-    () => elementFeasibilityContext(el, scene, location, setting, { feasibilityContext }, targetZoneIds),
+    // The deer pressure set in Settings wins over what the AI climate notes imply (same as the header).
+    () => withSiteDeer(elementFeasibilityContext(el, scene, location, setting, { feasibilityContext }, targetZoneIds), location),
     [el, scene, location, setting, targetZoneIds],
   );
   const dims = useMemo(() => withPlantFeasibility(el.type, el.dimensions, ctx), [el.type, el.dimensions, ctx]);
+  const planting = isPlantingElement(el, dims, setting);
+  const header = useMemo(
+    () => (planting ? siteHeader(location, spotZones(el, scene, targetZoneIds), ctx) : null),
+    [planting, location, el, scene, targetZoneIds, ctx],
+  );
+  const examples = useMemo(() => (planting ? growthExamples(el, el.dimensions, 3) : []), [planting, el]);
   const worst = worstChosenFeasibility(el, dims);
   const summary = dims.flatMap((d) => d.options.filter((o) => isChosen(el, d.id, o.id)).map((o) => o.label)).join(' · ');
   const tailorJob = useAiJob(tailorJobKey(el.id));
@@ -111,6 +124,8 @@ export const ElementCard = memo(function ElementCard({ el, photoId, scene, locat
         <div id={bodyId} className="flex flex-col gap-5 border-t border-line px-3 pb-3 pt-3">
           <p className="text-xs leading-relaxed text-muted">{def.description}</p>
 
+          {header && <FeasibilityHeader header={header} hasZip={!!location?.zip?.trim()} />}
+
           <Guidance type={el.type} />
 
           <WherePicker el={el} photoId={photoId} scene={scene} relevantKinds={def.zoneKinds} />
@@ -118,6 +133,16 @@ export const ElementCard = memo(function ElementCard({ el, photoId, scene, locat
           {dims.map((dim) => (
             <DimensionBlock key={dim.id} el={el} dim={dim} photoId={photoId} />
           ))}
+
+          {planting && (
+            <GrowthSlider
+              label="Show these plants as"
+              value={plantMaturity}
+              examples={examples}
+              onChange={(v) => editBrief(photoId, (b) => void (b.plantMaturity = v))}
+              className="rounded-xl border border-line p-3"
+            />
+          )}
 
           <label className="flex flex-col gap-1.5">
             <span className="text-xs font-medium text-muted">Anything specific?</span>

@@ -221,11 +221,15 @@ export function fetchSuggestions(photoId: string, focus: string): void {
   );
 }
 
-/** Adds a recommendation to the brief (prompt, target zones, element). */
-export function addRecommendationToBrief(photoId: string, rec: Recommendation): void {
+/**
+ * Adds a recommendation to the brief (prompt, target zones, element) and
+ * expands its element. Returns the element added or updated (null for none).
+ * `onDesignTab`: the user is already on the Design tab (shorter toast).
+ */
+export function addRecommendationToBrief(photoId: string, rec: Recommendation, opts: { onDesignTab?: boolean } = {}): string | null {
   const s = state();
   const found = photoAndSpace(photoId);
-  if (!found || !s.project) return;
+  if (!found || !s.project) return null;
   const make = elementFactory(found.photo.scene, s.project.location, found.space.kind);
   let result: ReturnType<typeof mergeRecommendation> | null = null;
   editBrief(photoId, (b) => {
@@ -234,9 +238,14 @@ export function addRecommendationToBrief(photoId: string, rec: Recommendation): 
   const r = result as ReturnType<typeof mergeRecommendation> | null;
   if (r?.elementId) s.setStudio({ activeElementId: r.elementId });
   s.notify(
-    r && !r.promptAdded && !r.elementAdded ? `“${rec.title}” is already in your brief.` : `Added “${rec.title}” to your brief — fine-tune it on the Design tab.`,
+    r && !r.promptAdded && !r.elementAdded
+      ? `“${rec.title}” is already in your brief.`
+      : opts.onDesignTab
+        ? `Added “${rec.title}” to your brief.`
+        : `Added “${rec.title}” to your brief — fine-tune it on the Design tab.`,
     'success',
   );
+  return r?.elementId ?? null;
 }
 
 /** Generates a recommendation as is (keeping the brief's plant maturity and idea picks). */

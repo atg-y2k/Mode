@@ -30,7 +30,7 @@ import ortWasmUrl from 'onnxruntime-web/ort-wasm-simd-threaded.asyncify.wasm?url
 import { growMask } from '../engine/mask';
 import type { Mask } from '../engine/types';
 import { classesForZone, zoneKindForClass } from './ade20k';
-import { largestContour } from './contours';
+import { zonePolygon } from './contours';
 import { MODELS, dtypeFor, modelBytes, type Backend, type ModelKey } from './models';
 import type {
   InitResult,
@@ -43,13 +43,18 @@ import type {
   WorkerRequest,
   WorkerStatus,
 } from './protocol';
-import { zonePrompt } from './prompts';
+import { neighbourRole, polygonArea, zonePrompt } from './prompts';
 import { analysisSize, logitsToCoverage, logitsToLabels, logitsToProbs } from './resample';
 import { CLIP_PROMPTS, offlineCategory, zonesFromClasses, type ClipKey, type ClipMaps } from './sceneFromClasses';
 import {
   MIN_REFINE_IOU,
   candidateScore,
   classAgreement,
+  classPresence,
+  neighbourClaimMask,
+  overlapShareOf,
+  pickClickCandidate,
+  sizeOrder,
   cleanMask,
   clipMarginFor,
   maskIoU,
@@ -120,9 +125,15 @@ const fileProgress = new Map<string, { loaded: number; total: number }>();
 /** Expected bytes per model being loaded (until the real file sizes are known). */
 const expected = new Map<ModelKey, number>();
 
+let lastReport = 0;
+
 function reportDownload(model: ModelKey | null, info?: ProgressInfo): void {
   if (info && info.status === 'progress' && model) {
     fileProgress.set(`${model}/${info.file}`, { loaded: info.loaded, total: info.total });
+    // Byte progress arrives per network chunk: ~8 updates a second are plenty for the UI.
+    const now = performance.now();
+    if (now - lastReport < 120 && info.loaded < info.total) return;
+    lastReport = now;
   }
   let loaded = 0;
   let total = 0;
@@ -138,12 +149,12 @@ function reportDownload(model: ModelKey | null, info?: ProgressInfo): void {
     loaded += got;
   }
   if (total <= 0) return;
-  const names = [...expected.keys()].map((k) => MODELS[k].name).join(' + ');
+  const names = [...expected.keys()].map((k) => MODELS[k].name.replace(/ \(.*\)$/, '')).join(' + ');
   setStatus({
     stage: 'downloading',
     progress: Math.min(1, loaded / total),
     backend: device?.backend,
-    message: `Loading ${names}`,
+    message: `Downloading ${names}`,
     loadedBytes: loaded,
     totalBytes: total,
   });
@@ -255,7 +266,8 @@ async function withModel<T>(key: ModelKey, fn: (m: Loaded) => Promise<T>): Promi
   try {
     return await fn(m);
   } catch (err) {
-    if (m.backend !== 'webgpu') throw err;
+    // Only a GPU failure is worth a CPU retry (not e.g. a photo the worker no longer holds).
+    if (m.backend !== 'webgpu' || err instanceof NoImageError) throw err;
     console.warn(`[vision] ${MODELS[key].name} inference failed on WebGPU, retrying on WASM`, err);
     delete loaded[key];
     if (key === 'edgetam') embeddings.clear();
@@ -344,8 +356,10 @@ async function ensureEmbeddings(photoId: string): Promise<Record<string, Tensor>
   return withModel('edgetam', async (m) => {
     setStatus({ stage: 'encoding', backend: m.backend, message: 'Reading the photo…' });
     const { model, processor } = m.edgetam!;
+    const t0 = performance.now();
     const inputs = await processor(img);
     const emb = await model.get_image_embeddings({ pixel_values: inputs.pixel_values });
+    console.debug(`[vision] EdgeTAM encoder ${Math.round(performance.now() - t0)} ms (${m.backend})`);
     embeddings.set(photoId, emb);
     return emb;
   });
@@ -391,15 +405,36 @@ async function decode(photoId: string, prompt: PromptInput, width: number, heigh
   });
 }
 
-async function segment(photoId: string, prompt: PromptInput, maxSize?: number): Promise<SegmentResult> {
+function candidateAreas(d: Decoded): number[] {
+  const plane = d.lw * d.lh;
+  const out: number[] = [];
+  for (let k = 0; k < d.count; k++) {
+    let n = 0;
+    for (let i = k * plane; i < (k + 1) * plane; i++) if (d.logits[i] > 0) n++;
+    out.push(n);
+  }
+  return out;
+}
+
+/** The last click decode, so "Smaller / Larger" and the full-size commit don't re-run the decoder. */
+let lastClick: { key: string; d: Decoded; areas: number[] } | null = null;
+
+async function segment(photoId: string, prompt: PromptInput, maxSize?: number, rank?: number): Promise<SegmentResult> {
   const img = imageOf(photoId);
   const t0 = performance.now();
-  const d = await decode(photoId, prompt, img.width, img.height);
-  let best = 0;
-  for (let k = 1; k < d.count; k++) if (d.scores[k] > d.scores[best]) best = k;
+  const key = JSON.stringify([photoId, prompt]);
+  if (lastClick?.key !== key || !embeddings.get(photoId)) {
+    const d = await decode(photoId, prompt, img.width, img.height);
+    lastClick = { key, d, areas: candidateAreas(d) };
+  }
+  const { d, areas } = lastClick;
+  const order = sizeOrder(areas);
+  const auto = pickClickCandidate(d.scores, areas, 0.05, d.lw * d.lh * 0.0005);
+  const r = rank === undefined ? order.indexOf(auto) : Math.max(0, Math.min(order.length - 1, Math.round(rank)));
+  const chosen = order[r];
   const size = maxSize ? analysisSize(img.width, img.height, maxSize) : { width: img.width, height: img.height };
-  const mask = logitsToCoverage(d.logits, d.lw, d.lh, size.width, size.height, best * d.lw * d.lh);
-  return { width: size.width, height: size.height, mask, score: d.scores[best], ms: Math.round(performance.now() - t0) };
+  const mask = logitsToCoverage(d.logits, d.lw, d.lh, size.width, size.height, chosen * d.lw * d.lh);
+  return { width: size.width, height: size.height, mask, score: d.scores[chosen], rank: r, ranks: order.length, ms: Math.round(performance.now() - t0) };
 }
 
 // ---------------------------------------------------------------------------
@@ -413,12 +448,15 @@ async function ensureClassMap(photoId: string): Promise<ClassMap> {
   return withModel('segformer', async (m) => {
     setStatus({ stage: 'encoding', backend: m.backend, message: 'Recognizing lawn, walls, sky…' });
     const { model, processor } = m.segformer!;
+    const t0 = performance.now();
     const inputs = await processor(img);
     const { logits } = (await model(inputs as never)) as { logits: Tensor };
+    const t1 = performance.now();
     const [, classes, lh, lw] = logits.dims;
     const size = analysisSize(img.width, img.height);
     const labels = logitsToLabels(toFloat32(logits), classes, lw, lh, size.width, size.height);
     const map: ClassMap = { width: size.width, height: size.height, labels };
+    console.debug(`[vision] SegFormer ${Math.round(t1 - t0)} ms + argmax ${Math.round(performance.now() - t1)} ms (${m.backend})`);
     classMaps.set(photoId, map);
     return map;
   });
@@ -476,30 +514,43 @@ function scalePolygon(poly: { x: number; y: number }[], sx: number, sy: number) 
   return poly.map((p) => ({ x: p.x * sx, y: p.y * sy }));
 }
 
-async function refineOne(photoId: string, zone: RefineZoneInput, context: RefineZoneInput[], classMap: ClassMap | null): Promise<RefineZoneResult> {
+/** Masks of zones refined earlier in this run, for keeping zones from overlapping. */
+type Claimed = Map<string, { mask: Mask; agreement: number }>;
+
+/** Agreement a refined zone needs before its mask is cut out of its neighbours. */
+const EXCLUSIVE_MIN_AGREEMENT = 0.6;
+
+async function refineOne(photoId: string, zone: RefineZoneInput, context: RefineZoneInput[], classMap: ClassMap | null, claimed: Claimed): Promise<RefineZoneResult> {
   const img = imageOf(photoId);
   const W = img.width;
   const H = img.height;
   const prompt = zonePrompt(zone, context, W, H);
   const fail = (iou = 0, classShare: number | null = null): RefineZoneResult => ({ zoneId: zone.id, refined: false, agreement: zoneAgreement(iou, classShare), iou, classShare });
   if (prompt.positive.length === 0) return fail();
+  const t0 = performance.now();
   const d = await decode(photoId, { positive: prompt.positive, negative: prompt.negative, box: prompt.box }, W, H);
+  const t1 = performance.now();
 
   // Score the candidates on the analysis grid (cheap), then render the winner at full size.
-  const a = classMap ?? { width: analysisSize(W, H).width, height: analysisSize(W, H).height, labels: new Uint8Array(0) };
-  const sx = a.width / W;
-  const sy = a.height / H;
-  const polyA = rasterizePolygon(a.width, a.height, scalePolygon(zone.polygon, sx, sy));
+  const size = classMap ? { width: classMap.width, height: classMap.height } : analysisSize(W, H);
+  const sx = size.width / W;
+  const sy = size.height / H;
+  const polyA = rasterizePolygon(size.width, size.height, scalePolygon(zone.polygon, sx, sy));
+  const claim = neighbourClaimMask(zone, context, size.width, size.height, { x: sx, y: sy });
   const allowed = classesForZone(zone.kind);
+  // Small parts (doors, windows) often vanish in the 512 px semantic map: no check then.
+  const boxA = { x: prompt.box.x * sx, y: prompt.box.y * sy, w: prompt.box.w * sx, h: prompt.box.h * sy };
+  const checkClasses = !!classMap && allowed.size > 0 && classPresence(classMap, allowed, boxA) >= 0.02;
   let best = -1;
   let bestScore = -Infinity;
   let bestIou = 0;
   let bestShare: number | null = null;
   for (let k = 0; k < d.count; k++) {
-    const cand: Mask = { width: a.width, height: a.height, data: logitsToCoverage(d.logits, d.lw, d.lh, a.width, a.height, k * d.lw * d.lh) };
+    const cand: Mask = { width: size.width, height: size.height, data: logitsToCoverage(d.logits, d.lw, d.lh, size.width, size.height, k * d.lw * d.lh) };
     const iou = maskIoU(cand, polyA);
-    const classShare = classMap ? classAgreement(cand, classMap, allowed) : null;
-    const score = candidateScore({ iou, classShare, modelScore: d.scores[k] });
+    const classShare = checkClasses && classMap ? classAgreement(cand, classMap, allowed) : null;
+    const leak = overlapShareOf(cand, claim);
+    const score = candidateScore({ iou, classShare, modelScore: d.scores[k], leak });
     if (score > bestScore) {
       bestScore = score;
       best = k;
@@ -511,11 +562,22 @@ async function refineOne(photoId: string, zone: RefineZoneInput, context: Refine
 
   const full: Mask = { width: W, height: H, data: logitsToCoverage(d.logits, d.lw, d.lh, W, H, best * d.lw * d.lh) };
   // Keep a leaking mask near the AI outline (limit computed on the analysis grid).
-  const limit = rasterizePolygon(a.width, a.height, scalePolygon(zone.polygon, sx, sy));
+  const limit = rasterizePolygon(size.width, size.height, scalePolygon(zone.polygon, sx, sy));
   growMask(limit, clipMarginFor(zone.polygon) * sx);
   clipToLowRes(full, limit);
+  // Zones don't overlap their neighbours: cut out confidently refined neighbours and holes
+  // (the roof from "the whole house" a facade prompt tends to return).
+  for (const other of context) {
+    const c = claimed.get(other.id);
+    if (!c || c.agreement < EXCLUSIVE_MIN_AGREEMENT || neighbourRole(zone, other) === 'ignore') continue;
+    const fd = full.data;
+    const cd = c.mask.data;
+    for (let i = 0; i < fd.length; i++) if (cd[i] >= 128) fd[i] = 0;
+  }
   cleanMask(full);
-  const polygon = largestContour(full, { tolerancePx: Math.max(1.5, Math.max(W, H) * 0.0015) });
+  // Every significant part (a lawn split by the walk) stays in the outline.
+  const polygon = zonePolygon(full, { tolerancePx: Math.max(1.5, Math.max(W, H) * 0.0015) });
+  console.debug(`[vision] refine ${zone.kind}: decode ${Math.round(t1 - t0)} ms, post ${Math.round(performance.now() - t1)} ms`);
   if (polygon.length < 3) return fail(bestIou, bestShare);
   return {
     zoneId: zone.id,
@@ -528,6 +590,11 @@ async function refineOne(photoId: string, zone: RefineZoneInput, context: Refine
   };
 }
 
+/**
+ * Refines zones smallest first, so specific parts (door, window, roof) are
+ * settled before the big areas around them and can be cut out of them.
+ * Results come back in the input order.
+ */
 async function refine(id: number, photoId: string, zones: RefineZoneInput[], context: RefineZoneInput[]): Promise<RefineZoneResult[]> {
   imageOf(photoId);
   let classMap: ClassMap | null = null;
@@ -538,12 +605,18 @@ async function refine(id: number, photoId: string, zones: RefineZoneInput[], con
     console.warn('[vision] semantic check unavailable', err);
   }
   await ensureEmbeddings(photoId);
-  const results: RefineZoneResult[] = [];
   const ctx = context.length ? context : zones;
-  for (let i = 0; i < zones.length; i++) {
-    setStatus({ stage: 'encoding', backend: device?.backend, message: `Sharpening ${i + 1} of ${zones.length} areas…` });
-    post({ type: 'progress', id, done: i, total: zones.length });
-    results.push(await refineOne(photoId, zones[i], ctx, classMap));
+  const order = zones.map((_, i) => i).sort((a, b) => polygonArea(zones[a].polygon) - polygonArea(zones[b].polygon));
+  const results: RefineZoneResult[] = new Array(zones.length);
+  const claimed: Claimed = new Map();
+  const img = imageOf(photoId);
+  for (let n = 0; n < order.length; n++) {
+    const i = order[n];
+    setStatus({ stage: 'encoding', backend: device?.backend, message: `Sharpening ${n + 1} of ${zones.length} areas…` });
+    post({ type: 'progress', id, done: n, total: zones.length });
+    const r = await refineOne(photoId, zones[i], ctx, classMap, claimed);
+    results[i] = r;
+    if (r.refined && r.mask) claimed.set(r.zoneId, { mask: { width: img.width, height: img.height, data: r.mask }, agreement: r.agreement });
   }
   post({ type: 'progress', id, done: zones.length, total: zones.length });
   return results;
@@ -622,6 +695,7 @@ async function handle(req: WorkerRequest): Promise<{ data: unknown; transfer?: T
     case 'setImage': {
       const rgba = new RawImage(req.data, req.width, req.height, 4);
       images.set(req.photoId, rgba.rgb());
+      lastClick = null;
       embeddings.delete(req.photoId);
       classMaps.delete(req.photoId);
       clipMaps.delete(req.photoId);
@@ -631,7 +705,7 @@ async function handle(req: WorkerRequest): Promise<{ data: unknown; transfer?: T
       await ensureEmbeddings(req.photoId);
       return { data: true };
     case 'segment': {
-      const r = await segment(req.photoId, req.prompt, req.maxSize);
+      const r = await segment(req.photoId, req.prompt, req.maxSize, req.rank);
       return { data: r, transfer: [r.mask.buffer] };
     }
     case 'refine': {
@@ -643,6 +717,7 @@ async function handle(req: WorkerRequest): Promise<{ data: unknown; transfer?: T
     case 'kindOf':
       return { data: kindOf(req.photoId, { width: req.width, height: req.height, data: req.mask }, req.interior) };
     case 'forget':
+      lastClick = null;
       images.delete(req.photoId);
       embeddings.delete(req.photoId);
       classMaps.delete(req.photoId);

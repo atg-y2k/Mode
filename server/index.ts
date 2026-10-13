@@ -11,6 +11,9 @@ import { serve } from '@hono/node-server';
 import type { Context } from 'hono';
 import { createApp, type AppEnv } from './app';
 import { loadConfig } from './config';
+import { acceptEventStreamToken } from './handoff/eventStreamToken';
+import { createHandoffDepsFromEnv, registerHandoffRoutes } from './handoff/routes';
+import { registerSiteRoutes } from './site/routes';
 import { createStudioDepsFromEnv, registerStudioRoutes } from './studio/routes';
 
 const config = loadConfig();
@@ -26,7 +29,7 @@ for (const warning of studio.warnings) console.warn(`[mode] warning: ${warning}`
 
 const app = createApp({
   config,
-  extraRoutes: (api, ctx) =>
+  extraRoutes: (api, ctx) => {
     registerStudioRoutes(api, {
       ...studio,
       log: ctx.log,
@@ -36,7 +39,21 @@ const app = createApp({
           c as Context<AppEnv>,
           `claude ${u.task} in=${u.inputTokens ?? '?'} out=${u.outputTokens ?? '?'} cache=${u.cacheReadTokens ?? 0}`,
         ),
-    }),
+    });
+    // Manual hand-off helpers (Downloads watcher, dragged image URLs).
+    const handoff = createHandoffDepsFromEnv();
+    for (const warning of handoff.warnings) console.warn(`[mode] warning: ${warning}`);
+    registerHandoffRoutes(api, {
+      ...handoff,
+      accessTokenRequired: Boolean(ctx.config.accessToken),
+      trustProxy: ctx.config.trustProxy,
+      log: ctx.log,
+    });
+    // Frost dates (NOAA), soil (USDA) and ecoregion (EPA), cached under .cache/site/.
+    registerSiteRoutes(api, { log: ctx.log });
+    // EventSource can't send x-mode-token: the event stream takes ?token= instead.
+    acceptEventStreamToken(api);
+  },
 });
 
 const server = serve(

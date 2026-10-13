@@ -308,6 +308,17 @@ async function prepareInputs(ctx: RunContext, photo: Photo): Promise<RenderInput
   return { image, planImage, maskUrl, mask, base: pixels, references };
 }
 
+/**
+ * The brief's strictness as one closing sentence for the image API (hand-off
+ * prompts get the app-specific wording from src/handoff). Balanced adds nothing.
+ */
+export function withStrictness(instruction: string, strictness: DesignBrief['strictness'], interior: boolean): string {
+  const text = instruction.trim();
+  if (strictness === 'strict') return `${text} Change nothing beyond this request: same layout and extent, no extra objects, plants or decorations.`;
+  if (strictness === 'creative') return `${text} You may refine details inside the area (textures, plant mix, small accents) as long as they suit the ${interior ? 'room' : 'house'}.`;
+  return text;
+}
+
 /** POST plan, also reporting whether Claude planned it or the server filled its template (no Claude configured). */
 async function requestPlan(req: PlanRequest, signal: AbortSignal): Promise<{ plan: PlanResult; source: 'ai' | 'template' | null }> {
   const { data, headers } = await studioPost(API_PATHS.plan, PlanRequestSchema, req, PlanResultSchema, STUDIO_TIMEOUTS_MS.plan, signal);
@@ -857,14 +868,18 @@ async function execute(
   }
 }
 
-/** Slots after the review: edited titles / instructions; items the user removed are dropped. */
+/**
+ * Slots after the review: edited titles / instructions; items the user
+ * removed are dropped. Options the plan left out (failed, not shown in the
+ * review) stay, so the run still shows them as failed.
+ */
 function applyReview(slots: RunSlot[], reviewed: readonly ReviewItem[]): RunSlot[] {
   const byKey = new Map(reviewed.map((r) => [r.key, r]));
   return slots
-    .filter((x) => byKey.has(x.key))
+    .filter((x) => byKey.has(x.key) || x.state === 'failed')
     .map((x) => {
-      const r = byKey.get(x.key)!;
-      return { ...x, title: r.title.trim() || x.title, brief: r.brief.trim() || x.brief };
+      const r = byKey.get(x.key);
+      return r ? { ...x, title: r.title.trim() || x.title, brief: r.brief.trim() || x.brief } : x;
     });
 }
 
@@ -946,8 +961,16 @@ async function renderSlot(ctx: RunContext, photo: Photo, inputs: RenderInputs, k
   publishProgress(ctx);
   const signal = ctx.controller.signal;
   try {
+    const interior = findPhoto(state().project, ctx.photoId)?.space.kind === 'interior';
     const result = await renderVariation(
-      { image: inputs.image, mask: inputs.maskUrl, brief: slot.brief, references: inputs.references, provider: ctx.provider, quality: ctx.quality },
+      {
+        image: inputs.image,
+        mask: inputs.maskUrl,
+        brief: withStrictness(slot.brief, ctx.brief.strictness, interior),
+        references: inputs.references,
+        provider: ctx.provider,
+        quality: ctx.quality,
+      },
       signal,
     );
     checkAlive(ctx);

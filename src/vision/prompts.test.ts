@@ -124,6 +124,21 @@ describe('negatives from neighbours', () => {
     expect(negativePoints(bed, [bed, shrubs, bed2], polygonBox(bed.polygon, 0.04, W, H))).toEqual([]);
   });
 
+  it('prefers adjacent neighbours over far ones and puts holes first', () => {
+    const facade = zone('f', 'facade', rect(200, 200, 600, 300));
+    const roof = zone('roof', 'roof', rect(200, 120, 600, 80));
+    const sky = zone('sky', 'sky', rect(0, 0, 1000, 120));
+    const lawn = zone('lawn', 'lawn', rect(0, 500, 1000, 300));
+    const w1 = zone('w1', 'windows', rect(300, 300, 60, 80));
+    const w2 = zone('w2', 'windows', rect(500, 300, 60, 80));
+    const w3 = zone('w3', 'windows', rect(650, 300, 60, 80));
+    const neg = negativePoints(facade, [sky, facade, roof, lawn, w1, w2, w3], polygonBox(facade.polygon, 0.3, W, H), { max: 4 });
+    expect(neg).toHaveLength(4);
+    expect([w1, w2, w3].filter((w) => pointInPolygon(neg[0], w.polygon) || pointInPolygon(neg[1], w.polygon))).toHaveLength(2);
+    expect(pointInPolygon(neg[2], roof.polygon)).toBe(true);
+    expect(neg.some((p) => pointInPolygon(p, sky.polygon))).toBe(false);
+  });
+
   it('prefers neighbours inside the prompt box and ignores far ones', () => {
     const walk = zone('walk', 'walkway', rect(450, 400, 100, 400));
     const lawnL = zone('l', 'lawn', rect(0, 400, 450, 400));

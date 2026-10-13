@@ -18,14 +18,17 @@
  * Module map: prepare.ts (crop / ratio / marker), prompts.ts (templates,
  * scene → context, fix prompts), deeplinks.ts, pipeline.ts (import), with
  * alignCore.ts (OpenCV ORB + RANSAC), colorMatch.ts, changeMap.ts, bands.ts,
- * resample.ts; align.worker.ts + client.ts run imports off the main thread.
+ * resample.ts; prepare.worker.ts (export) and align.worker.ts (import, with
+ * OpenCV.js loaded lazily) run the pixel work off the main thread via
+ * client.ts, which falls back to the main thread without Workers.
+ * Tip: call warmUpAlignment() when a hand-off opens (prepareHandoff does it
+ * too) so OpenCV is ready by the time the user brings the image back.
  */
 import type { HandoffPack, Photo } from '../../shared/types';
 import type { ImageDataLike, Mask } from '../engine/types';
 import { blobToImageData, imageDataToBlob } from '../lib/imageImport';
-import { runImportJob, warmUpAlignment, type ImportProgress } from './client';
+import { runImportJob, runPrepareJob, warmUpAlignment, type ImportProgress } from './client';
 import type { ImportResult } from './pipeline';
-import { renderHandoff } from './prepare';
 import { resampleRGBA } from './resample';
 
 export type { PromptContext, SceneContextOptions } from './prompts';
@@ -87,8 +90,15 @@ const CLEAN_QUALITY = 0.92;
  */
 export async function prepareHandoff(image: ImageDataLike, target: Mask, opts: PrepareOptions): Promise<PreparedHandoff> {
   if (opts.warmUp !== false) scheduleWarmUp();
-  const r = renderHandoff(image, target, { app: opts.app, maxEdge: opts.maxEdge, fullFrame: opts.fullFrame });
-  const [clean, marked] = await Promise.all([imageDataToBlob(r.clean, 'image/jpeg', CLEAN_QUALITY), imageDataToBlob(r.marked, 'image/png')]);
+  const r = await runPrepareJob(image, target, { app: opts.app, maxEdge: opts.maxEdge, fullFrame: opts.fullFrame });
+  let clean: Blob;
+  let marked: Blob;
+  if ('clean' in r) {
+    clean = r.clean;
+    marked = r.marked;
+  } else {
+    [clean, marked] = await Promise.all([imageDataToBlob(r.cleanPixels, 'image/jpeg', CLEAN_QUALITY), imageDataToBlob(r.markedPixels, 'image/png')]);
+  }
   return {
     clean,
     marked,

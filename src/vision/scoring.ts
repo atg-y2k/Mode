@@ -6,11 +6,11 @@
  * - cleanup: drop specks, fill pinholes, clip runaway masks to a margin
  *   around the AI outline.
  */
-import type { Pt } from '../../shared/types';
+import type { Pt, SceneZone } from '../../shared/types';
 import { createMask, fillPolygon, growMask } from '../engine/mask';
 import type { Mask } from '../engine/types';
 import { labelComponents } from './contours';
-import type { Box } from './prompts';
+import { neighbourRole, type Box } from './prompts';
 
 /** Semantic labels (ADE20K class ids) at an analysis resolution covering the whole photo. */
 export interface ClassMap {
@@ -95,6 +95,70 @@ export function classShares(classes: ClassMap): Float64Array {
   return shares;
 }
 
+/**
+ * Share of the class-map pixels inside `box` (class-map px) that belong to
+ * `allowed`. Used to tell "the semantic model saw none of this class here"
+ * (small doors and windows often vanish at 512 px) from "the mask is wrong".
+ */
+export function classPresence(classes: ClassMap, allowed: ReadonlySet<number>, box: Box): number {
+  const x0 = Math.max(0, Math.floor(box.x));
+  const y0 = Math.max(0, Math.floor(box.y));
+  const x1 = Math.min(classes.width, Math.ceil(box.x + box.w));
+  const y1 = Math.min(classes.height, Math.ceil(box.y + box.h));
+  let n = 0;
+  let hit = 0;
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      n++;
+      if (allowed.has(classes.labels[y * classes.width + x])) hit++;
+    }
+  }
+  return n === 0 ? 0 : hit / n;
+}
+
+/**
+ * Pixels (at `width`×`height`, polygons scaled by `scale`) that other zones
+ * claim from `zone`: nested holes entirely, and outside neighbours where they
+ * don't overlap the zone's own outline. A candidate that spills into them is
+ * probably "the whole house" instead of the facade.
+ */
+export function neighbourClaimMask(
+  zone: Pick<SceneZone, 'id' | 'kind' | 'polygon'>,
+  others: readonly Pick<SceneZone, 'id' | 'kind' | 'polygon'>[],
+  width: number,
+  height: number,
+  scale: { x: number; y: number },
+): Mask {
+  const scaled = (poly: readonly Pt[]) => poly.map((p) => ({ x: p.x * scale.x, y: p.y * scale.y }));
+  const claim = createMask(width, height);
+  const outside = createMask(width, height);
+  for (const o of others) {
+    const role = neighbourRole(zone, o);
+    if (role === 'hole') fillPolygon(claim, scaled(o.polygon), 'add', false);
+    else if (role === 'outside') fillPolygon(outside, scaled(o.polygon), 'add', false);
+  }
+  const own = rasterizePolygon(width, height, scaled(zone.polygon));
+  const c = claim.data;
+  const out = outside.data;
+  const ownD = own.data;
+  for (let i = 0; i < c.length; i++) if (out[i] && !ownD[i]) c[i] = 255;
+  return claim;
+}
+
+/** Share of the mask's pixels (≥ 128) that fall on `claim` (≥ 128); 0 for an empty mask. */
+export function overlapShareOf(mask: Mask, claim: Mask): number {
+  let n = 0;
+  let hit = 0;
+  const m = mask.data;
+  const c = claim.data;
+  for (let i = 0; i < m.length; i++) {
+    if (m[i] < 128) continue;
+    n++;
+    if (c[i] >= 128) hit++;
+  }
+  return n === 0 ? 0 : hit / n;
+}
+
 export interface CandidateMetrics {
   /** IoU with the zone's approximate polygon. */
   iou: number;
@@ -102,16 +166,20 @@ export interface CandidateMetrics {
   classShare: number | null;
   /** The decoder's own quality estimate (predicted IoU, 0..1). */
   modelScore: number;
+  /** Share of the mask on pixels other zones claim (see neighbourClaimMask). */
+  leak?: number;
 }
 
 /**
  * Score for picking among the decoder's candidates: mostly overlap with the
  * AI outline, then semantic agreement, a little of the model's confidence
- * (the highest model score alone tends to pick "the whole house").
+ * (the highest model score alone tends to pick "the whole house"), minus
+ * spill into areas other zones claim.
  */
 export function candidateScore(m: CandidateMetrics): number {
   const model = Math.max(0, Math.min(1, m.modelScore));
-  return m.classShare === null ? 0.8 * m.iou + 0.2 * model : 0.55 * m.iou + 0.3 * m.classShare + 0.15 * model;
+  const base = m.classShare === null ? 0.8 * m.iou + 0.2 * model : 0.55 * m.iou + 0.3 * m.classShare + 0.15 * model;
+  return base - 0.6 * (m.leak ?? 0);
 }
 
 /**
@@ -231,4 +299,26 @@ export function masksTouch(a: Mask, b: Mask, gapPx = 2): boolean {
   const bd = b.data;
   for (let i = 0; i < g.length; i++) if (g[i] >= 128 && bd[i] >= 128) return true;
   return false;
+}
+
+/** Candidate indices ordered by area, smallest first. */
+export function sizeOrder(areas: readonly number[]): number[] {
+  return areas.map((_, i) => i).sort((a, b) => areas[a] - areas[b] || a - b);
+}
+
+/**
+ * Default candidate for a click: the decoder's best predicted IoU, unless a
+ * smaller (more specific) candidate scores within `tie` of it — a click on a
+ * roof should give the roof, not the whole house; "Larger" is one tap away.
+ * Candidates under `minArea` are only chosen when they are the best.
+ */
+export function pickClickCandidate(scores: ArrayLike<number>, areas: readonly number[], tie = 0.05, minArea = 0): number {
+  let best = 0;
+  for (let k = 1; k < areas.length; k++) if (scores[k] > scores[best]) best = k;
+  let pick = best;
+  for (let k = 0; k < areas.length; k++) {
+    if (k === best || areas[k] >= areas[pick] || areas[k] < minArea || areas[k] === 0) continue;
+    if (scores[k] >= scores[best] - tie) pick = k;
+  }
+  return pick;
 }

@@ -256,7 +256,7 @@ function invasiveChecks(info: PlantInfo, name: string, ctx: FeasibilityContext):
           ? { kind: 'invasive', level: 'info', text: `Spreads beyond the lawn: ${v.note} — keep a clean edge between lawn and beds` }
           : { kind: 'invasive', level: 'caution', text: `Invasive risk: ${v.note} — check your state's invasive plant list before planting` },
       );
-    } else if (v.level === 0 && v.match?.match === 'infraspecific') {
+    } else if (v.formListed && !turf) {
       out.push({ kind: 'invasive', level: 'info', text: v.note });
     }
   }

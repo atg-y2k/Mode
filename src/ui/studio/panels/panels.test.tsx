@@ -66,6 +66,11 @@ vi.mock('../../shell/sceneJobs', () => ({
   useSceneJob: () => undefined,
 }));
 
+// The vision module's on-device tools are mounted by the Scene panel; their own tests cover them.
+vi.mock('../../../vision/ui/RefineSection', () => ({
+  RefineSection: ({ photoId }: { photoId: string }) => <div data-testid="refine-section">{photoId}</div>,
+}));
+
 const fetchRecommendations = vi.fn();
 const fetchElementOptions = vi.fn();
 const describeIdea = vi.fn(async () => ({ title: 'Stone walk', description: 'Bluestone path with lavender.', styleTags: ['cottage'] }));
@@ -205,6 +210,8 @@ beforeEach(async () => {
   vi.resetModules();
   startRun.mockClear();
   requestSceneAnalysis.mockClear();
+  // ZIP → zone + centre without fetching public/data/zones.json (or phzmapi.org) in tests.
+  (await import('../../../site/zip')).setZipTable({ '20817': ['7a', 38.99, -77.15] });
   ({ useStore } = await import('../../../state/store'));
   panels = {
     DesignPanel: (await import('./DesignPanel')).DesignPanel,
@@ -273,8 +280,10 @@ describe('DesignPanel', () => {
     const areas = screen.getByText('Areas to change').closest('section') as HTMLElement;
     fireEvent.click(within(areas).getByRole('button', { name: 'Front lawn' }));
     expect(draft().targetZoneIds).toEqual(['z_lawn']);
-    fireEvent.click(screen.getByRole('radio', { name: 'Mature' }));
+    fireEvent.change(screen.getByRole('slider', { name: 'Show new plants as' }), { target: { value: '2' } });
     expect(draft().plantMaturity).toBe('mature');
+    fireEvent.click(screen.getByRole('button', { name: 'As planted' }));
+    expect(draft().plantMaturity).toBe('new');
     fireEvent.click(screen.getByRole('button', { name: /No thorny plants/ }));
     expect(draft().ideaItemIds).toEqual(['__none__']);
   });
@@ -456,5 +465,236 @@ describe('ShopModal', () => {
     });
     await waitFor(() => expect(useStore.getState().project!.ideaBoard.some((i) => i.product?.url === PRODUCT.url)).toBe(true));
     expect(within(dialog).getByRole('button', { name: /On your board/ })).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Borrowed Studio UX (SPEC §5.6)
+// ---------------------------------------------------------------------------
+
+/** Edits the seeded project before a panel renders. */
+function seed(edit: (p: Project) => void) {
+  const p = makeProject();
+  edit(p);
+  useStore.setState({ project: p });
+}
+
+const FACADE = { id: 'z_facade', kind: 'facade' as const, label: 'Brick facade', description: '', polygon: [{ x: 50, y: 100 }, { x: 1100, y: 100 }, { x: 1100, y: 480 }, { x: 50, y: 480 }], editable: true };
+
+describe('Suggested edits', () => {
+  it('adds a scene opportunity or an AI suggestion to the brief in one click', () => {
+    seed((p) => {
+      p.spaces[0].photos[0].recommendations = {
+        createdAt: 1,
+        items: [{ id: 'rec_1', title: 'Lantern light at the door', prompt: 'Add a pair of warm 2700K lanterns beside the front door.', why: 'Welcoming at night.', category: 'lighting', targetZoneIds: [], elementType: 'outdoor-lighting' }],
+      };
+    });
+    render(<panels.DesignPanel />);
+    expect(screen.getByRole('region', { name: 'Suggested edits' })).toBeTruthy();
+    // Opportunity: element + areas inferred from its words.
+    fireEvent.click(screen.getByRole('button', { name: 'Add to brief: Widen the entry walk to 5 ft' }));
+    expect(draft().prompt).toBe('Widen the entry walk to 5 ft');
+    expect(draft().elements.map((e) => e.type)).toEqual(['pathway']);
+    expect(draft().targetZoneIds).toEqual(['z_walk']);
+    expect(screen.queryByRole('button', { name: 'Add to brief: Widen the entry walk to 5 ft' })).toBeNull();
+    // AI suggestion.
+    fireEvent.click(screen.getByRole('button', { name: 'Add to brief: Lantern light at the door' }));
+    expect(draft().elements.map((e) => e.type)).toEqual(['pathway', 'outdoor-lighting']);
+    expect(draft().prompt).toContain('warm 2700K lanterns');
+    // Nothing left to suggest.
+    expect(screen.queryByRole('region', { name: 'Suggested edits' })).toBeNull();
+  });
+});
+
+describe('Planting elements', () => {
+  it('show the site header and the plant growth slider', () => {
+    seed((p) => {
+      p.location.deerPressure = 'high';
+      const lawn = p.spaces[0].photos[0].scene!.zones.find((z) => z.id === 'z_lawn')!;
+      lawn.sunHours = 4.8;
+      p.spaces[0].photos[0].draft = { prompt: '', elements: [], plantMaturity: 'established', ideaItemIds: [], targetZoneIds: ['z_lawn'], scope: 'zones' };
+    });
+    render(<panels.DesignPanel />);
+    fireEvent.click(screen.getByRole('button', { name: 'Planting bed' }));
+    const el = draft().elements[0];
+    expect(el.type).toBe('planting-bed');
+    const header = screen.getByRole('group', { name: /^Plant ratings are for:/ });
+    expect(header.getAttribute('aria-label')).toBe('Plant ratings are for: Zone 7a · Part sun (5 h) · Deer: high');
+    // The element's slider and the brief's slider share the brief's plant maturity.
+    fireEvent.change(screen.getByRole('slider', { name: 'Show these plants as' }), { target: { value: '0' } });
+    expect(draft().plantMaturity).toBe('new');
+    expect((screen.getByRole('slider', { name: 'Show new plants as' }) as HTMLInputElement).value).toBe('0');
+    // Rough heights for the chosen plants.
+    expect(screen.getAllByRole('list', { name: 'Rough plant heights at each stage' }).length).toBeGreaterThan(0);
+  });
+
+  it('link to Settings when the ZIP is missing', async () => {
+    seed((p) => {
+      p.location = {};
+    });
+    const { useShellUI } = await import('../../shell/shellUI');
+    render(<panels.DesignPanel />);
+    fireEvent.click(screen.getByRole('button', { name: 'Planting bed' }));
+    const header = screen.getByRole('group', { name: /^Plant ratings are for:/ });
+    fireEvent.click(within(header).getByRole('button', { name: 'Add ZIP' }));
+    expect(useShellUI.getState()).toMatchObject({ settingsOpen: true, settingsTab: 'project' });
+    expect(within(header).getByRole('button', { name: 'Deer?' })).toBeTruthy();
+  });
+});
+
+describe('Sun & orientation', () => {
+  it('estimates sun per area from the photo heading and writes it to the zones', () => {
+    seed((p) => {
+      p.location = { zip: '20817', hardinessZone: '7a', lat: 38.99, lon: -77.15 };
+      const ph = p.spaces[0].photos[0];
+      // The camera looked north at the house, so the front faces south.
+      ph.capture = { headingDeg: 0 };
+      ph.scene!.zones.unshift(FACADE);
+    });
+    render(<panels.ScenePanel />);
+    const card = screen.getByText('Sun & orientation').closest('section') as HTMLElement;
+    expect(within(card).getByText('south (180°)')).toBeTruthy();
+    expect(within(card).getByText("From your photo's compass heading")).toBeTruthy();
+    fireEvent.click(within(card).getByRole('button', { name: /Update sun on areas \(2\)/ }));
+    const zones = photo().scene!.zones;
+    for (const id of ['z_walk', 'z_lawn']) {
+      const z = zones.find((x) => x.id === id)!;
+      expect(z.sun).toBe('full-sun');
+      expect(z.sunHours).toBeGreaterThanOrEqual(6);
+    }
+    expect(photo().scene!.facadeAzimuthDeg).toBe(180);
+    expect(photo().scene!.facadeAzimuthSource).toBe('photo');
+    expect(within(card).getByRole('button', { name: 'Areas are up to date' })).toBeTruthy();
+
+    // Turning the dial (keyboard) stores the user's direction; the photo's heading can be restored.
+    fireEvent.keyDown(within(card).getByRole('slider', { name: /Which way the photographed side faces/ }), { key: 'ArrowRight' });
+    expect(photo().scene!.facadeAzimuthDeg).toBe(185);
+    expect(photo().scene!.facadeAzimuthSource).toBe('user');
+    expect(within(card).getByText('Set by you')).toBeTruthy();
+    fireEvent.click(within(card).getByRole('button', { name: /Use the photo's heading/ }));
+    expect(photo().scene!.facadeAzimuthSource).toBeUndefined();
+  });
+
+  it('uses the AI orientation and the ZIP centre when nothing better is known', async () => {
+    render(<panels.ScenePanel />);
+    const card = screen.getByText('Sun & orientation').closest('section') as HTMLElement;
+    // "Faces south-east" from the scene map; coordinates from the ZIP table.
+    expect(within(card).getByText('south-east (135°)')).toBeTruthy();
+    expect(await within(card).findByRole('button', { name: /Update sun on areas/ })).toBeTruthy();
+    expect(within(card).getByRole('slider', { name: 'Time of day' })).toBeTruthy();
+  });
+
+  it('asks for a ZIP without coordinates', async () => {
+    seed((p) => {
+      p.location = {};
+    });
+    const { useShellUI } = await import('../../shell/shellUI');
+    render(<panels.ScenePanel />);
+    const card = screen.getByText('Sun & orientation').closest('section') as HTMLElement;
+    fireEvent.click(within(card).getByRole('button', { name: 'Add ZIP' }));
+    expect(useShellUI.getState()).toMatchObject({ settingsOpen: true, settingsTab: 'project' });
+  });
+
+  it('mounts the on-device refine tools', () => {
+    render(<panels.ScenePanel />);
+    expect(screen.getByTestId('refine-section').textContent).toBe('pho_1');
+    cleanup();
+    useStore.setState({ project: makeProject(false) });
+    render(<panels.ScenePanel />);
+    expect(screen.getByTestId('refine-section').textContent).toBe('pho_1');
+  });
+});
+
+describe('Branching history', () => {
+  function seedTree() {
+    seed((p) => {
+      const ph = p.spaces[0].photos[0];
+      ph.generations[0].variations[0].source = {
+        kind: 'handoff',
+        app: 'chatgpt',
+        alignment: { inliers: 12, residualPx: 4, driftBefore: 8, driftAfter: 5, outsideChanged: 0.05, aligned: false },
+      };
+      ph.generations[0].variations[1].source = { kind: 'api', model: 'gpt-image-1' };
+      ph.generations.unshift({
+        ...generation(),
+        id: 'gen_2',
+        createdAt: Date.now(),
+        baseVariationId: 'var_1',
+        plan: 'Add lanterns to the curved walk.',
+        status: 'awaiting',
+        renderMode: 'handoff',
+        provider: 'ChatGPT',
+        model: 'hand-off',
+        variations: [],
+        plantNotes: [],
+        planned: [
+          { id: 'pl_1', title: 'Lanterns A', brief: 'a', status: 'awaiting-handoff' },
+          { id: 'pl_2', title: 'Lanterns B', brief: 'b', status: 'awaiting-handoff' },
+        ],
+      });
+    });
+  }
+
+  it('nests runs under the variation they started from', () => {
+    seedTree();
+    render(<panels.HistoryPanel />);
+    expect(screen.getByText('Original photo')).toBeTruthy();
+    const branchPlan = screen.getByText('Add lanterns to the curved walk.');
+    const parentRun = screen.getByText(/curved bluestone path; keep the house/).closest('li') as HTMLElement;
+    // The branched run sits inside its parent run's list item.
+    expect(parentRun.contains(branchPlan)).toBe(true);
+    expect(within(branchPlan.closest('article') as HTMLElement).getByText('“Curved bluestone”')).toBeTruthy();
+  });
+
+  it('shows provenance and alignment, and branches from a variation', () => {
+    seedTree();
+    render(<panels.HistoryPanel />);
+    expect(screen.getByTitle(/^ChatGPT: Rough fit/).textContent).toBe('GPT');
+    expect(screen.getByTitle('Made with API').textContent).toBe('API');
+    expect(screen.getByText(/Alignment needs a look: Rough fit/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Branch from Wide flagstone' }));
+    expect(useStore.getState().studio.viewVariationId).toBe('var_2');
+    expect(screen.getByText(/Viewing “Wide flagstone” — the next run branches from it/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Use original' }));
+    expect(useStore.getState().studio.viewVariationId).toBeNull();
+  });
+
+  it('opens the hand-off companion for runs waiting on hand-offs', async () => {
+    seedTree();
+    const { useHandoffSession } = await import('../handoff/session');
+    const seen = vi.fn();
+    // A listener that takes the event over (preventDefault): nothing else happens.
+    const onOpen = (e: Event) => {
+      seen((e as CustomEvent).detail);
+      e.preventDefault();
+    };
+    window.addEventListener('mode:open-handoff', onOpen);
+    try {
+      render(<panels.HistoryPanel />);
+      expect(screen.getByText('2 waiting for hand-off')).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: 'Continue hand-off' }));
+      expect(seen).toHaveBeenCalledWith({ generationId: 'gen_2' });
+      expect(useHandoffSession.getState().active).toBeNull();
+    } finally {
+      window.removeEventListener('mode:open-handoff', onOpen);
+    }
+    // Nobody listening: the run's first waiting item opens in the companion directly.
+    fireEvent.click(screen.getByRole('button', { name: 'Continue hand-off' }));
+    expect(useHandoffSession.getState().active).toEqual({ photoId: 'pho_1', generationId: 'gen_2', plannedId: 'pl_1' });
+  });
+
+  it('filters to favorites, keeping the branch that leads to them', () => {
+    seedTree();
+    useStore.getState().updateGeneration('pho_1', 'gen_1', (g) => {
+      g.variations[0].favorite = false;
+    });
+    useStore.getState().updateGeneration('pho_1', 'gen_2', (g) => {
+      g.variations.push({ id: 'var_3', imageId: 'i3', thumbId: 't3', width: 10, height: 10, title: 'Lanterns', brief: '', favorite: true, createdAt: 4 });
+    });
+    render(<panels.HistoryPanel />);
+    fireEvent.click(screen.getByRole('radio', { name: /Favorites/ }));
+    expect(screen.getByTitle('Lanterns')).toBeTruthy();
+    expect(screen.getByText(/No favorites in this run/)).toBeTruthy();
+    expect(screen.queryByTitle('Wide flagstone')).toBeNull();
   });
 });

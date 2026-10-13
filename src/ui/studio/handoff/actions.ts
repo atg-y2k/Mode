@@ -7,12 +7,12 @@
 import type { Draft } from 'immer';
 import { newId } from '../../../../shared/ids';
 import type { Generation, HandoffApp, PlannedVariation, Variation } from '../../../../shared/types';
-import { importHandoffResult } from '../../../handoff';
+import { importHandoffResult, type ImportProgress } from '../../../handoff';
 import { imageDataToBlob } from '../../../lib/imageImport';
 import * as db from '../../../state/persistence';
 import { findPhoto, useStore } from '../../../state/store';
 import { thumbnailBlob } from '../composite';
-import { errorMessage } from '../generate';
+import { errorMessage, retryRun } from '../generate';
 import { readHandoffLog, wasSent } from './log';
 import { dropPack, ensurePack, forgetRunCaches, lookupPlanned, runAssets, warmPack } from './pack';
 import { appLabel, assignTargets, isPending, projectPendingHandoffs, rollupStatus, sameRef, type PendingItem, type PlannedRef } from './planned';
@@ -70,8 +70,17 @@ export function closeStaging(): void {
   setHandoffSession({ staging: null });
 }
 
-/** Retry a hand-off whose preparation failed. */
+/**
+ * Retry a hand-off that failed: prepare it again — or, when the plan never
+ * produced its instruction (an option the planner left out), run the brief again.
+ */
 export function retryPrepare(ref: PlannedRef): void {
+  const found = lookupPlanned(ref);
+  if (!found) return;
+  if (!found.planned.brief.trim()) {
+    void retryRun(ref.generationId).catch((err: Error) => store().notify(errorMessage(err), 'error'));
+    return;
+  }
   setItemError(ref.plannedId, null);
   openHandoff(ref);
 }
@@ -81,6 +90,12 @@ export function retryPrepare(ref: PlannedRef): void {
 // ---------------------------------------------------------------------------
 
 const MAX_IMPORT_BYTES = 40 * 1024 * 1024;
+
+const IMPORT_STAGES: Partial<Record<ImportProgress, string>> = {
+  loading: 'Reading the image…',
+  aligning: 'Lining the result up with your photo…',
+  compositing: 'Protecting everything outside the outline…',
+};
 
 function looksLikeImage(blob: Blob): boolean {
   return blob.type === '' || blob.type.startsWith('image/');
@@ -102,6 +117,10 @@ export async function importInto(ref: PlannedRef, blob: Blob, origin?: string): 
     store().notify('That image is too large to import (over 40 MB).', 'error');
     return false;
   }
+  if (handoffSession().jobs[ref.plannedId]?.kind === 'importing') {
+    store().notify(`Still lining up the previous image for “${found.planned.title}” — try again in a moment.`, 'info');
+    return false;
+  }
   setItemError(ref.plannedId, null);
   setJob(ref.plannedId, { kind: 'importing', message: 'Lining the result up with your photo…' });
   let ids: string[] = [];
@@ -110,8 +129,10 @@ export async function importInto(ref: PlannedRef, blob: Blob, origin?: string): 
     setJob(ref.plannedId, { kind: 'importing', message: 'Lining the result up with your photo…' });
     const { photo, generation } = found;
     const assets = await runAssets(photo, generation);
-    const result = await importHandoffResult(photo, assets.base, assets.target, pack, blob);
-    setJob(ref.plannedId, { kind: 'importing', message: 'Protecting everything outside the outline…' });
+    const result = await importHandoffResult(photo, assets.base, assets.target, pack, blob, undefined, (stage) =>
+      setJob(ref.plannedId, { kind: 'importing', message: IMPORT_STAGES[stage] ?? 'Lining the result up with your photo…' }),
+    );
+    setJob(ref.plannedId, { kind: 'importing', message: 'Saving the result…' });
     const [full, thumb] = await Promise.all([imageDataToBlob(result.composite, 'image/jpeg', 0.9), thumbnailBlob(result.composite)]);
     const imageId = newId('img');
     const thumbId = newId('img');
@@ -148,14 +169,19 @@ export async function importInto(ref: PlannedRef, blob: Blob, origin?: string): 
  * Returned images from a paste / drop / file picker / Downloads: one image
  * goes to the active item (else the first waiting one); several are assigned
  * to the waiting items in order. Imports run one after another.
+ * `preferWaiting`: skip an active item that is already back (staged).
  */
-export async function importBlobs(blobs: Blob[], origin?: string): Promise<number> {
+export async function importBlobs(blobs: Blob[], origin?: string, opts: { preferWaiting?: boolean } = {}): Promise<number> {
   const images = blobs.filter(looksLikeImage);
   if (images.length === 0) {
     if (blobs.length) store().notify("That isn't an image — bring back the picture ChatGPT or Gemini made.", 'error');
     return 0;
   }
-  const targets = assignTargets(pendingItems(), handoffSession().active, images.length);
+  const items = pendingItems();
+  let active = handoffSession().active;
+  // A file that turns up by itself (Downloads) never replaces a result already waiting for review.
+  if (opts.preferWaiting && active && items.find((i) => sameRef(i, active))?.planned.status === 'staged') active = null;
+  const targets = assignTargets(items, active, images.length).filter((t) => !opts.preferWaiting || t.planned.status === 'awaiting-handoff');
   if (targets.length === 0) {
     store().notify('No hand-off is waiting for an image right now.', 'info');
     return 0;
@@ -215,8 +241,10 @@ function advanceAfter(ref: PlannedRef, message: string): void {
   const next = nextWaiting(ref);
   const s = store();
   if (next) {
-    openHandoff(next, { open: handoffSession().companion !== 'closed' });
-    if (handoffSession().companion === 'closed') setHandoffSession({ companion: 'collapsed' });
+    // Phones: the card would cover the result just accepted — fold it to its pill.
+    const phone = typeof window !== 'undefined' && !!window.matchMedia?.('(max-width: 639px)').matches;
+    openHandoff(next, { open: !phone && handoffSession().companion !== 'closed' });
+    if (phone || handoffSession().companion === 'closed') setHandoffSession({ companion: 'collapsed' });
     s.notify(`${message} Next: “${next.planned.title}”.`, 'success');
     return;
   }
@@ -293,20 +321,22 @@ export async function retryStricter(ref: PlannedRef): Promise<void> {
 export function switchPendingApp(app: HandoffApp): number {
   const s = store();
   s.setStudio({ handoffApp: app });
-  let n = 0;
-  for (const item of pendingItems()) {
-    if (item.planned.status !== 'awaiting-handoff') continue;
-    if (item.planned.handoff?.app === app) continue;
-    n++;
-    if (item.planned.handoff) dropPack(item);
+  const moved = pendingItems().filter((i) => i.planned.status === 'awaiting-handoff' && i.planned.handoff?.app !== app);
+  // Prepared items are prepared again for the new app when opened (the companion does it for the active one).
+  for (const item of moved) if (item.planned.handoff) dropPack(item);
+  relabelRuns(moved, app);
+  if (moved.length > 0) s.notify(`${moved.length} waiting variation${moved.length === 1 ? '' : 's'} moved to ${appLabel(app)}.`, 'success');
+  return moved.length;
+}
+
+/** Runs record the app they hand off to (History shows it): follow a switch of their waiting items. */
+function relabelRuns(items: readonly PendingItem[], app: HandoffApp): void {
+  const runs = new Map(items.map((i) => [i.generationId, i.photoId]));
+  for (const [generationId, photoId] of runs) {
+    store().updateGeneration(photoId, generationId, (g) => {
+      if (g.renderMode === 'handoff') g.provider = appLabel(app);
+    });
   }
-  const active = handoffSession().active;
-  if (active) {
-    const found = lookupPlanned(active);
-    if (found?.planned.status === 'awaiting-handoff') void ensurePack(active, { app }).then(warmPack).catch(() => undefined);
-  }
-  if (n > 0) s.notify(`${n} waiting variation${n === 1 ? '' : 's'} moved to ${appLabel(app)}.`, 'success');
-  return n;
 }
 
 /** Items waiting for a hand-off that the user hasn't sent anywhere yet (safe to re-prepare for another app). */
@@ -321,9 +351,10 @@ export function unsentItems(): PendingItem[] {
  * keep theirs — use switchPendingApp to move those too.
  */
 export function setDefaultHandoffApp(app: HandoffApp): void {
-  const s = store();
-  s.setStudio({ renderMode: 'handoff', handoffApp: app });
-  for (const item of unsentItems()) if (item.planned.handoff && item.planned.handoff.app !== app) dropPack(item);
+  store().setStudio({ renderMode: 'handoff', handoffApp: app });
+  const moved = unsentItems().filter((i) => i.planned.handoff?.app !== app);
+  for (const item of moved) if (item.planned.handoff) dropPack(item);
+  relabelRuns(moved, app);
 }
 
 /** Drops cached pixels and blobs of a deleted hand-off run. */
@@ -352,7 +383,12 @@ export function installHandoffCleanup(): void {
   if (gcInstalled) return;
   gcInstalled = true;
   useStore.subscribe((s, prev) => {
-    if (!prev.project || !s.project || s.project === prev.project || s.project.id !== prev.project.id) return;
+    if (s.project?.id !== prev.project?.id) {
+      // Another project (or none): the session's items belong to the old one.
+      setHandoffSession({ active: null, staging: null, jobs: {}, extras: {}, errors: {}, clipboardOffer: false, companion: 'closed' });
+      return;
+    }
+    if (!prev.project || !s.project || s.project === prev.project) return;
     const next = new Set<string>();
     for (const sp of s.project.spaces) for (const ph of sp.photos) for (const g of ph.generations) next.add(g.id);
     for (const sp of prev.project.spaces) {

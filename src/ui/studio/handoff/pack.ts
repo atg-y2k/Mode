@@ -13,7 +13,7 @@ import { newId } from '../../../../shared/ids';
 import type { DesignBrief, Generation, HandoffApp, HandoffPack, Photo, PlannedVariation } from '../../../../shared/types';
 import { createMask } from '../../../engine/mask';
 import type { ImageDataLike, Mask } from '../../../engine/types';
-import { buildHandoffPrompt, prepareHandoff, promptContextFromScene, type PreparedHandoff } from '../../../handoff';
+import { buildHandoffPrompt, markerColorName, prepareHandoff, promptContextFromScene, ratioLabel, type PreparedHandoff } from '../../../handoff';
 import { blobToImageData } from '../../../lib/imageImport';
 import * as db from '../../../state/persistence';
 import * as runtime from '../../../state/runtime';
@@ -21,7 +21,7 @@ import { findPhoto, findVariation, useStore } from '../../../state/store';
 import { resizePixels } from '../composite';
 import { buildTargetMask } from '../generate';
 import { briefTargetIds } from '../maskFromZones';
-import { appLabel, findPlanned, markerColorName, ratioLabel, type PlannedRef } from './planned';
+import { appLabel, findPlanned, rollupStatus, type PlannedRef } from './planned';
 import { setItemError, setJob } from './session';
 
 const store = () => useStore.getState();
@@ -115,23 +115,32 @@ export function forgetRunCaches(generationId: string): void {
   exportCache.forget(`${generationId}:`);
 }
 
+/** What the prompt needs to know about the exported frame. */
+export interface FrameInfo {
+  ratio: string;
+  /** Marker hex ('' = whole image, no marker). */
+  markerColor: string;
+  /** Exported region of the photo (position words are relative to it). */
+  crop: HandoffPack['crop'];
+}
+
 /** The app-specific prompt for one planned item. */
 export function packPrompt(
   photo: Photo,
   g: Generation,
   planned: Pick<PlannedVariation, 'brief'>,
   app: HandoffApp,
-  frame: { ratio: string; markerColor: string },
+  frame: FrameInfo,
   strictness?: NonNullable<DesignBrief['strictness']>,
 ): string {
   const targetZoneIds = briefTargetIds(g.brief, photo.scene).zoneIds;
-  const ctx = promptContextFromScene(photo.scene, g.brief, targetZoneIds, {
-    app,
-    instruction: planned.brief,
-    ratio: frame.ratio,
-    markerColorName: markerColorName(frame.markerColor),
-    references: [],
-  });
+  const ctx = promptContextFromScene(
+    photo.scene,
+    g.brief,
+    targetZoneIds,
+    { app, instruction: planned.brief, ratio: frame.ratio, markerColorName: markerColorName(frame.markerColor), references: [] },
+    { view: frame.crop, frame: { width: photo.width, height: photo.height } },
+  );
   return buildHandoffPrompt(strictness ? { ...ctx, strictness } : ctx);
 }
 
@@ -237,7 +246,8 @@ async function buildPack(ref: PlannedRef, opts: EnsurePackOptions): Promise<Hand
   // Same app, images still stored: reuse (only the prompt may change).
   if (existing && existing.app === app && (await blobsExist(existing))) {
     if (!opts.strictness) return existing;
-    const prompt = packPrompt(photo, generation, planned, app, { ratio: ratioLabel(existing.outW, existing.outH), markerColor: existing.markerColor }, opts.strictness);
+    const frame = { ratio: ratioLabel(existing.outW, existing.outH), markerColor: existing.markerColor, crop: existing.crop };
+    const prompt = packPrompt(photo, generation, planned, app, frame, opts.strictness);
     savePack(ref, { ...existing, prompt });
     return { ...existing, prompt };
   }
@@ -288,10 +298,14 @@ function savePack(ref: PlannedRef, pack: HandoffPack): void {
     const p = g.planned?.find((x) => x.id === ref.plannedId);
     if (!p) return;
     p.handoff = pack;
-    if (p.status === 'failed') {
-      p.status = 'awaiting-handoff';
-      delete p.error;
-    }
+    if (p.status !== 'failed') return;
+    // A failed hand-off that could be prepared now waits for the user again.
+    p.status = 'awaiting-handoff';
+    delete p.error;
+    const r = rollupStatus(g as Generation);
+    g.status = r.status;
+    if (r.error) g.error = r.error;
+    else delete g.error;
   });
 }
 

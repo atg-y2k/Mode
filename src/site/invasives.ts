@@ -55,14 +55,22 @@ export interface InvasiveMatch {
   match: 'exact' | 'synonym' | 'species' | 'infraspecific';
   /** The query as parsed, e.g. "Berberis thunbergii var. atropurpurea". */
   query: string;
+  /**
+   * Listed varieties/subspecies of the queried species (when the query names a
+   * species, not a form): "Poa pratensis" is not invasive in the lower 48 but
+   * "Poa pratensis ssp. pratensis" is.
+   */
+  forms?: { name: string; common: string; status: Record<Locality, RiisLevel> }[];
 }
 
 export interface InvasiveVerdict {
   /** True when listed invasive (D2) or widespread invasive (E) in the locality. */
   invasive: boolean;
-  /** US-RIIS level in the locality (worst listed form for an infraspecific match). */
+  /** US-RIIS level of the matched name in the locality (0 for an infraspecific match). */
   level: RiisLevel;
   note?: string;
+  /** True when the note is about a listed variety/subspecies, not the plant itself. */
+  formListed?: boolean;
   match?: InvasiveMatch;
 }
 
@@ -277,9 +285,19 @@ export function loadInvasives(): Promise<boolean> {
   return loading;
 }
 
-/** Starts loading in the background when running in a page (no-op in Node or when loaded). */
+/** After a failed background load, wait this long before trying again (renders call ensure… often). */
+const RETRY_AFTER_MS = 60_000;
+let lastFailureAt = -Infinity;
+
+/**
+ * Starts loading in the background when running in a page (no-op in Node,
+ * when loaded, or shortly after a failed attempt).
+ */
 export function ensureInvasivesLoading(): void {
-  if (!index && !loading && canFetchRelative()) void loadInvasives();
+  if (index || loading || !canFetchRelative() || Date.now() - lastFailureAt < RETRY_AFTER_MS) return;
+  void loadInvasives().then((ok) => {
+    if (!ok) lastFailureAt = Date.now();
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -294,17 +312,19 @@ export function findInvasive(botanical: string | null | undefined): InvasiveMatc
   if (!index) return null;
   const parsed = parseBotanical(botanical);
   if (!parsed) return null;
+  // Forms only matter for a species-level query ("Poa pratensis"), not for a named form.
+  const forms = parsed.rank ? undefined : index.infraByBinomial.get(parsed.binomial);
+  const withForms = forms?.length ? { forms } : {};
   const hit = index.byKey.get(parsed.key);
-  if (hit) return { ...hit.entry, match: hit.synonym ? 'synonym' : 'exact', query: parsed.display };
+  if (hit) return { ...hit.entry, match: hit.synonym ? 'synonym' : 'exact', query: parsed.display, ...withForms };
   if (parsed.rank) {
     const species = index.byKey.get(parsed.binomial);
     if (species) return { ...species.entry, match: 'species', query: parsed.display };
   }
-  const forms = index.infraByBinomial.get(parsed.binomial);
   if (forms?.length) {
-    // The most widespread listed form, reported per locality.
-    const worst = forms.reduce((a, b) => (b.status.L48 > a.status.L48 ? b : a));
-    return { ...worst, match: 'infraspecific', query: parsed.display };
+    // No species entry: report the forms (describeInvasive picks the worst one for the locality).
+    const first = forms[0];
+    return { ...first, match: 'infraspecific', query: parsed.display, forms };
   }
   return null;
 }
@@ -315,18 +335,21 @@ function label(m: InvasiveMatch): string {
 
 /** Plain-language verdict for one match in one locality. */
 export function describeInvasive(m: InvasiveMatch, locality: Locality = 'L48'): InvasiveVerdict {
-  const lvl = m.status[locality];
   const where = LOCALITY_NAMES[locality];
+  // The most widespread listed form here, if any is listed invasive.
+  const worstForm = (m.forms ?? []).reduce<NonNullable<InvasiveMatch['forms']>[number] | null>(
+    (a, f) => (f.status[locality] >= 2 && (!a || f.status[locality] > a.status[locality]) ? f : a),
+    null,
+  );
+  const formNote = worstForm
+    ? `${worstForm.name} (a form of this species) is listed as ${RIIS_LEVEL_LABELS[worstForm.status[locality]]} in ${where} by ${RIIS_SOURCE} — check which form you buy`
+    : undefined;
   if (m.match === 'infraspecific') {
-    // Only a variety/subspecies is listed — not a verdict on the whole species.
-    if (lvl < 2) return { invasive: false, level: 0, match: m };
-    return {
-      invasive: false,
-      level: 0,
-      match: m,
-      note: `${m.name} (a form of this species) is listed as ${RIIS_LEVEL_LABELS[lvl]} in ${where} by ${RIIS_SOURCE} — check which form you buy`,
-    };
+    // Only varieties/subspecies are listed — not a verdict on the whole species.
+    return formNote ? { invasive: false, level: 0, match: m, note: formNote, formListed: true } : { invasive: false, level: 0, match: m };
   }
+  const lvl = m.status[locality];
+  if (lvl < 2 && formNote) return { invasive: false, level: lvl, match: m, note: formNote, formListed: true };
   if (lvl >= 2) {
     const listed = `listed as ${lvl === 3 ? 'a widespread invasive' : 'invasive'} in ${where}`;
     const note =

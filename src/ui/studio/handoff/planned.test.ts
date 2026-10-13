@@ -4,9 +4,7 @@ import { appendEntry, countToday, startOfDay, usageHint, wasSent } from './log';
 import {
   alignmentSummary,
   assignTargets,
-  markerColorName,
   pendingHandoffs,
-  ratioLabel,
   rollupStatus,
   sourceLabel,
   sourceTag,
@@ -140,16 +138,6 @@ describe('provenance and alignment', () => {
     expect(alignmentSummary({ ...report, outsideChanged: 0.3 })).toMatchObject({ tone: 'warning', warn: true, suggestStricter: true });
     expect(alignmentSummary({ ...report, aligned: false, inliers: 12 })).toMatchObject({ label: 'Rough fit', warn: true });
     expect(alignmentSummary({ ...report, driftAfter: 9 })).toMatchObject({ tone: 'warning', warn: true });
-  });
-
-  it('names ratios and marker colours', () => {
-    expect(ratioLabel(2048, 1536)).toBe('4:3');
-    expect(ratioLabel(1536, 1024)).toBe('3:2');
-    expect(ratioLabel(1000, 1000)).toBe('1:1');
-    expect(markerColorName('#ff00ff')).toBe('magenta');
-    expect(markerColorName('#00e5ff')).toBe('cyan');
-    expect(markerColorName('#39ff14')).toBe('lime');
-    expect(markerColorName('nope')).toBe('bright');
   });
 });
 

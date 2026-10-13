@@ -2,9 +2,10 @@
  * The Studio viewer: the photo (or the variation being viewed) on a dark,
  * calm stage with fit / zoom / pan (wheel, pinch, drag, buttons), the scene
  * overlay (click an area to target it, a path to design it), sketch tools
- * (draw a path centerline with a width handle, outline an area), a
- * before/after slider against the original, hold-to-peek, the run progress
- * pill and the info card of the shown variation.
+ * (draw a path centerline with a width handle, outline an area, or "Tap to
+ * select" an area with the on-device outline model), a before/after slider
+ * against the original, hold-to-peek, the run progress pill and the info
+ * card of the shown variation.
  */
 import {
   Check,
@@ -19,7 +20,11 @@ import {
   LayoutGrid,
   Loader2,
   Maximize,
+  Eraser,
+  Expand,
+  MousePointerClick,
   PenLine,
+  Shrink,
   Route,
   ScanEye,
   Sparkles,
@@ -31,7 +36,7 @@ import {
   ZoomOut,
 } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode, type Ref } from 'react';
-import { SPACE_TYPE_LABELS, type Photo, type Pt, type Space, type Variation } from '../../../shared/types';
+import { SPACE_TYPE_LABELS, type Photo, type Pt, type SceneZone, type Space, type Variation } from '../../../shared/types';
 import * as runtime from '../../state/runtime';
 import { findPhoto, findVariation, useStore } from '../../state/store';
 import { cn } from '../common';
@@ -54,7 +59,25 @@ import { cancelRun, generationOfVariation } from './generate';
 import { clamp, clampPan, fitView, hitTestScene, simplifyPolyline, toPhoto, zoomAt, type SceneHit, type View } from './geometry';
 import { useBlobUrl, useDecodedUrl, useElementSize, useLatest } from './hooks';
 import { Popover } from './Popover';
-import { decodeHandle, PathHandles, SketchPreview, widthFromHandle, type SketchHandle } from './SketchLayer';
+import { decodeHandle, PathHandles, SketchPreview, TapSelectionLayer, widthFromHandle, type SketchHandle } from './SketchLayer';
+import { cancelVision, formatMB, visionUnsupportedReason } from '../../vision';
+import { useVisionStatus } from '../../vision/ui/hooks';
+import { mapSceneOffline, useVisionJobs, type VisionJob } from '../../vision/ui/jobs';
+import {
+  canResize,
+  clearSelection,
+  hoverAt,
+  keepSelection,
+  resizeSelection,
+  selectionMask,
+  setRemoveMode,
+  startTapSelect,
+  stopTapSelect,
+  tapAt,
+  touchingSketchZones,
+  undoTap,
+  useTapSelect,
+} from '../../vision/ui/tapSelect';
 import { runVariations } from './tiles';
 import { getRunInfo, useRunInfo } from './runs';
 import { setStudioUI, useStudioUI } from './ui';
@@ -223,6 +246,26 @@ export function Viewer({ photo, space }: { photo: Photo; space: Space | undefine
     setCursor(null);
     if (sketch !== 'none') setStudioUI({ editingPathId: null });
   }, [sketch, photo.id]);
+
+  // Tap to select (on-device outline model): its own mode, exclusive with the sketch tools.
+  const tapActive = useTapSelect((s) => s.active && s.photoId === photo.id);
+  const visionJob = useVisionJobs((s) => (s.job?.photoId === photo.id ? s.job : null));
+  const tapSupported = useMemo(() => visionUnsupportedReason() === null, []);
+  useEffect(() => {
+    if (sketch !== 'none') stopTapSelect();
+  }, [sketch]);
+  useEffect(() => () => stopTapSelect(), [photo.id]);
+  const toggleTapSelect = () => {
+    if (tapActive) {
+      stopTapSelect();
+      return;
+    }
+    useStore.getState().setStudio({ sketch: 'none', showZones: true });
+    setStudioUI({ editingPathId: null });
+    setHover(null);
+    void startTapSelect(photo);
+  };
+  const inPhoto = (q: Pt) => q.x >= 0 && q.y >= 0 && q.x < photo.width && q.y < photo.height;
   useEffect(() => {
     if (ui.editingPathId && !editingPath) setStudioUI({ editingPathId: null });
   }, [ui.editingPathId, editingPath]);
@@ -291,14 +334,22 @@ export function Viewer({ photo, space }: { photo: Photo; space: Space | undefine
   };
 
   // Sketch / path-editing keys run before the Studio's own shortcuts (capture phase).
-  const keyState = useLatest({ sketch, sketchPts, editing: ui.editingPathId, finishSketch });
+  const keyState = useLatest({ sketch, sketchPts, editing: ui.editingPathId, finishSketch, tapActive, space });
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const k = keyState.current;
-      if (k.sketch === 'none' && !k.editing) return;
+      if (k.sketch === 'none' && !k.editing && !k.tapActive) return;
       const t = e.target as HTMLElement | null;
       if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
-      if (k.sketch !== 'none') {
+      if (k.tapActive) {
+        const hasSelection = useTapSelect.getState().parts.length > 0;
+        if (e.key === 'Enter' && hasSelection) void keepSelection(k.space);
+        else if (e.key === 'Escape') {
+          if (hasSelection) clearSelection();
+          else stopTapSelect();
+        } else if ((e.key === 'Backspace' || e.key === 'Delete') && hasSelection) undoTap();
+        else return;
+      } else if (k.sketch !== 'none') {
         if (e.key === 'Enter') k.finishSketch();
         else if (e.key === 'Escape') {
           setSketchPts([]);
@@ -329,7 +380,15 @@ export function Viewer({ photo, space }: { photo: Photo; space: Space | undefine
   };
 
   const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
-    if (e.button === 2) return;
+    if (e.button === 2) {
+      // Right-click removes from a tap selection.
+      const cur = viewRef.current;
+      if (tapActive && cur && pointers.current.size === 0) {
+        const q = toPhoto(cur, local(e).x, local(e).y);
+        if (inPhoto(q)) tapAt(q, true);
+      }
+      return;
+    }
     const p = local(e);
     pointers.current.set(e.pointerId, p);
     stageRef.current?.setPointerCapture(e.pointerId);
@@ -417,6 +476,13 @@ export function Viewer({ photo, space }: { photo: Photo; space: Space | undefine
 
     // Hover (mouse / pen without buttons): what's under the pointer.
     if (g2.kind === 'idle' || g2.kind === 'press') {
+      if (tapActive) {
+        if (e.pointerType === 'mouse' && g2.kind === 'idle') {
+          const q = toPhoto(cur, p.x, p.y);
+          hoverAt(e.target === stageRef.current && inPhoto(q) ? q : null);
+        }
+        return;
+      }
       if (sketch !== 'none') {
         setCursor(toPhoto(cur, p.x, p.y));
         return;
@@ -458,6 +524,11 @@ export function Viewer({ photo, space }: { photo: Photo; space: Space | undefine
     if (g.kind !== 'press') return;
     // A click.
     const p = local(e);
+    if (tapActive) {
+      const q = toPhoto(cur, p.x, p.y);
+      if (inPhoto(q) && e.target === stageRef.current) tapAt(q, e.altKey);
+      return;
+    }
     if (sketch !== 'none') {
       addSketchPoint(toPhoto(cur, p.x, p.y));
       return;
@@ -488,7 +559,7 @@ export function Viewer({ photo, space }: { photo: Photo; space: Space | undefine
     ? gesture.current.kind === 'pan'
       ? 'grabbing'
       : undefined
-    : sketch !== 'none'
+    : sketch !== 'none' || tapActive
       ? 'crosshair'
       : hover && studio.showZones
         ? 'pointer'
@@ -517,6 +588,7 @@ export function Viewer({ photo, space }: { photo: Photo; space: Space | undefine
         if (gesture.current.kind === 'idle') {
           setHover(null);
           setCursor(null);
+          if (tapActive) hoverAt(null);
         }
       }}
       onDoubleClick={() => {
@@ -558,7 +630,7 @@ export function Viewer({ photo, space }: { photo: Photo; space: Space | undefine
           view={v}
           stage={stage}
           showZones={studio.showZones && !peek && sketch === 'none'}
-          hover={studio.showZones && !dragging ? hover : null}
+          hover={studio.showZones && !dragging && !tapActive ? hover : null}
           targetZones={targetZones}
           targetPaths={targetPaths}
           focusZoneId={studio.focusZoneId}
@@ -571,6 +643,7 @@ export function Viewer({ photo, space }: { photo: Photo; space: Space | undefine
         />
       )}
       {v && editingPath && editingPath.points.length >= 2 && <PathHandles path={editingPath} view={v} stage={stage} />}
+      {v && tapActive && !peek && <TapSelectionLayer view={v} stage={stage} photo={{ width: photo.width, height: photo.height }} />}
       {v && sketch !== 'none' && (
         <SketchPreview
           mode={sketch}
@@ -582,7 +655,7 @@ export function Viewer({ photo, space }: { photo: Photo; space: Space | undefine
           closeHint={sketch === 'area' && sketchPts.length >= 3 && !!cursor && Math.hypot(cursor.x - sketchPts[0].x, cursor.y - sketchPts[0].y) * v.scale < 10}
         />
       )}
-      {v && hover && studio.showZones && !dragging && sketch === 'none' && !peek && (
+      {v && hover && studio.showZones && !dragging && sketch === 'none' && !tapActive && !peek && (
         <SceneHoverCard
           photo={photo}
           space={space}
@@ -678,6 +751,11 @@ export function Viewer({ photo, space }: { photo: Photo; space: Space | undefine
         >
           <Lasso className="size-4" />
         </ToolButton>
+        {tapSupported && (
+          <ToolButton label="Tap to select an area — outlined on this device, free" active={tapActive} onClick={toggleTapSelect}>
+            <MousePointerClick className="size-4" />
+          </ToolButton>
+        )}
         {variation && (
           <>
             <div className="mx-0.5 hidden w-px self-stretch bg-white/15 sm:block" />
@@ -716,6 +794,7 @@ export function Viewer({ photo, space }: { photo: Photo; space: Space | undefine
 
       {/* Sketch / adjust hints and run progress */}
       <div className="pointer-events-none absolute top-16 left-1/2 z-20 flex w-[min(34rem,calc(100%-7rem))] -translate-x-1/2 flex-col items-center gap-2">
+        {tapActive && <TapHint photo={photo} space={space} />}
         {sketch !== 'none' && (
           <SketchHint
             mode={sketch}
@@ -749,18 +828,27 @@ export function Viewer({ photo, space }: { photo: Photo; space: Space | undefine
         {activeRuns.slice(0, 2).map((g) => (
           <RunProgressPill key={g.id} photoId={photo.id} generationId={g.id} plan={g.plan} gridOpen={studio.gridGenerationId === g.id} />
         ))}
-        {!scene && sketch === 'none' && activeRuns.length === 0 && (
+        {visionJob && <VisionJobPill job={visionJob} />}
+        {!scene && sketch === 'none' && !tapActive && !visionJob && activeRuns.length === 0 && (
           <Pill>
             <ScanEye className="size-4 shrink-0 text-white/70" />
             <span className="min-w-0 flex-1 px-1 text-xs text-white/85">
               {aiEnabled === false
-                ? 'Scene mapping needs AI — outline the areas to change with the lasso.'
+                ? tapSupported
+                  ? 'Claude is off — map the areas on this device (free), or outline them with the lasso.'
+                  : 'Scene mapping needs AI — outline the areas to change with the lasso.'
                 : 'Not mapped yet — map the scene to pick areas and paths by clicking.'}
             </span>
-            {aiEnabled !== false && (
+            {aiEnabled !== false ? (
               <PillButton primary onClick={() => useStore.getState().setStudio({ panel: 'scene' })}>
                 Map the scene
               </PillButton>
+            ) : (
+              tapSupported && (
+                <PillButton primary onClick={() => void mapSceneOffline(photo.id)}>
+                  Map on this device
+                </PillButton>
+              )
             )}
           </Pill>
         )}
@@ -779,10 +867,10 @@ export function Viewer({ photo, space }: { photo: Photo; space: Space | undefine
   );
 }
 
-function Pill({ children }: { children: ReactNode }) {
+function Pill({ children, className }: { children: ReactNode; className?: string }) {
   return (
     <div
-      className="pointer-events-auto flex w-full items-center gap-1.5 rounded-xl bg-black/60 p-1.5 pl-3 text-white shadow-lg ring-1 ring-white/10 backdrop-blur-md"
+      className={cn('pointer-events-auto flex w-full items-center gap-1.5 rounded-xl bg-black/60 p-1.5 pl-3 text-white shadow-lg ring-1 ring-white/10 backdrop-blur-md', className)}
       onPointerDown={(e) => e.stopPropagation()}
     >
       {children}
@@ -790,14 +878,34 @@ function Pill({ children }: { children: ReactNode }) {
   );
 }
 
-function PillButton({ children, onClick, primary }: { children: ReactNode; onClick: () => void; primary?: boolean }) {
+function PillButton({
+  children,
+  onClick,
+  primary,
+  disabled,
+  label,
+  active,
+}: {
+  children: ReactNode;
+  onClick: () => void;
+  primary?: boolean;
+  disabled?: boolean;
+  /** Accessible name / tooltip for icon-only buttons. */
+  label?: string;
+  /** Toggle state (aria-pressed). */
+  active?: boolean;
+}) {
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
+      aria-label={label}
+      title={label}
+      aria-pressed={active}
       className={cn(
-        'inline-flex h-8 shrink-0 items-center gap-1 rounded-lg px-2.5 text-xs font-medium transition-colors focus-visible:outline-2 focus-visible:outline-white',
-        primary ? 'bg-white text-black hover:bg-white/90' : 'text-white/85 hover:bg-white/15',
+        'inline-flex h-8 shrink-0 items-center gap-1 rounded-lg px-2 text-xs font-medium transition-colors focus-visible:outline-2 focus-visible:outline-white disabled:pointer-events-none disabled:opacity-40 sm:px-2.5',
+        primary ? 'bg-white text-black hover:bg-white/90' : active ? 'bg-white/90 text-black' : 'text-white/85 hover:bg-white/15',
       )}
     >
       {children}
@@ -851,6 +959,167 @@ function SketchHint({
           <Check className="size-3.5" /> Finish
         </PillButton>
       )}
+    </Pill>
+  );
+}
+
+/** Instructions and actions for Tap to select (model loading, selection, keep). */
+function TapHint({ photo, space }: { photo: Photo; space: Space | undefined }) {
+  const phase = useTapSelect((s) => s.phase);
+  const error = useTapSelect((s) => s.error);
+  const parts = useTapSelect((s) => s.parts);
+  const busy = useTapSelect((s) => s.busy > 0);
+  const removeMode = useTapSelect((s) => s.removeMode);
+  const status = useVisionStatus();
+  const coarse = useMemo(() => typeof window !== 'undefined' && !!window.matchMedia?.('(pointer: coarse)').matches, []);
+  const [extend, setExtend] = useState<SceneZone | null>(null);
+  const [keeping, setKeeping] = useState(false);
+
+  // Offer "Add to …" when the selection touches an area the user drew before.
+  useEffect(() => {
+    let alive = true;
+    const mask = parts.length > 0 && !busy ? selectionMask() : null;
+    if (!mask) {
+      setExtend(null);
+      return;
+    }
+    void touchingSketchZones(photo, mask).then((zones) => {
+      if (alive) setExtend(zones[0] ?? null);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [parts, busy, photo]);
+
+  const keep = async (target?: string) => {
+    setKeeping(true);
+    try {
+      await keepSelection(space, target);
+    } finally {
+      setKeeping(false);
+    }
+  };
+
+  if (phase === 'loading') {
+    const downloading = status.stage === 'downloading';
+    return (
+      <Pill>
+        <Loader2 className="size-4 shrink-0 animate-spin text-white/80" />
+        <div className="min-w-0 flex-1 px-1">
+          <div className="text-xs font-medium">
+            {downloading ? `Downloading the outline model · ${formatMB(status.loadedBytes ?? 0)} of ${formatMB(status.totalBytes ?? 0)}` : 'Getting the photo ready…'}
+          </div>
+          <div className="text-[11px] text-white/60">{downloading ? 'First time only — then it works offline.' : 'Runs on this device; nothing is uploaded.'}</div>
+          {downloading && (
+            <div className="mt-1 h-1 overflow-hidden rounded-full bg-white/15">
+              <div className="h-full rounded-full bg-white/85 transition-[width] duration-300" style={{ width: `${Math.round((status.progress ?? 0) * 100)}%` }} />
+            </div>
+          )}
+        </div>
+        <PillButton onClick={stopTapSelect}>
+          <X className="size-3.5" />
+          <span className="sr-only sm:not-sr-only">Cancel</span>
+        </PillButton>
+      </Pill>
+    );
+  }
+  if (phase === 'error') {
+    return (
+      <Pill>
+        <MousePointerClick className="size-4 shrink-0 text-white/70" />
+        <span className="min-w-0 flex-1 px-1 text-xs leading-snug text-white/85">
+          {error ?? 'The outline model could not run here.'} Use the lasso to outline the area instead.
+        </span>
+        <PillButton onClick={stopTapSelect}>
+          <X className="size-3.5" /> Close
+        </PillButton>
+      </Pill>
+    );
+  }
+  const has = parts.length > 0;
+  const text = !has
+    ? coarse
+      ? 'Tap an area to select it'
+      : 'Click an area to select it · Alt-click or right-click removes'
+    : removeMode
+      ? 'Tap what to take away'
+      : coarse
+        ? 'Tap to add more · the eraser takes parts away'
+        : 'Click more to add · Alt-click removes · Enter keeps';
+  return (
+    <Pill className="flex-wrap sm:flex-nowrap">
+      <span className="flex min-w-0 basis-full items-center gap-1.5 py-1 sm:flex-1 sm:basis-auto sm:py-0">
+        {busy ? <Loader2 className="size-4 shrink-0 animate-spin text-white/80" /> : <MousePointerClick className="size-4 shrink-0 text-white/70" />}
+        <span className="min-w-0 flex-1 px-1 text-xs leading-snug">{text}</span>
+      </span>
+      {has && <span className="flex-1 sm:hidden" />}
+      {coarse && has && (
+        <PillButton onClick={() => setRemoveMode(!removeMode)} active={removeMode} label="Remove: taps take parts away">
+          <Eraser className="size-3.5" />
+          <span className="hidden sm:inline">Remove</span>
+        </PillButton>
+      )}
+      {has && (
+        <>
+          <PillButton onClick={() => resizeSelection(-1)} disabled={!canResize(-1)} label="Smaller selection">
+            <Shrink className="size-3.5" />
+            <span className="hidden xl:inline">Smaller</span>
+          </PillButton>
+          <PillButton onClick={() => resizeSelection(1)} disabled={!canResize(1)} label="Larger selection">
+            <Expand className="size-3.5" />
+            <span className="hidden xl:inline">Larger</span>
+          </PillButton>
+          <PillButton onClick={undoTap} label="Undo last click">
+            <Undo2 className="size-3.5" />
+          </PillButton>
+        </>
+      )}
+      <PillButton onClick={has ? clearSelection : stopTapSelect} label={has ? 'Clear the selection' : 'Close Tap to select'}>
+        <X className="size-3.5" />
+      </PillButton>
+      {has && extend && (
+        <PillButton onClick={() => void keep(extend.id)} disabled={busy || keeping}>
+          <span className="max-w-28 truncate">Add to “{extend.label}”</span>
+        </PillButton>
+      )}
+      {has && (
+        <PillButton primary onClick={() => void keep()} disabled={busy || keeping}>
+          <Check className="size-3.5" /> Keep
+        </PillButton>
+      )}
+    </Pill>
+  );
+}
+
+/** On-device mapping / sharpening of this photo in progress (also visible when the Scene panel is closed). */
+function VisionJobPill({ job }: { job: VisionJob }) {
+  const status = useVisionStatus();
+  const downloading = status.stage === 'downloading';
+  const pct = downloading ? (status.progress ?? 0) : job.phase === 'sharpening' && job.total > 0 ? job.done / job.total : null;
+  const label = downloading
+    ? `${status.message ?? 'Downloading the models'} · ${formatMB(status.loadedBytes ?? 0)} of ${formatMB(status.totalBytes ?? 0)}`
+    : job.phase === 'sharpening'
+      ? `Sharpening outlines · ${Math.min(job.done + 1, job.total)} of ${job.total}`
+      : job.kind === 'map'
+        ? (status.message ?? 'Mapping the scene on this device…')
+        : 'Getting the photo ready…';
+  return (
+    <Pill>
+      <Loader2 className="size-4 shrink-0 animate-spin text-white/80" />
+      <div className="min-w-0 flex-1 px-1">
+        <div className="truncate text-xs font-medium">{label}</div>
+        <div className="text-[11px] text-white/60">On this device — free, nothing is uploaded.</div>
+        <div className="mt-1 h-1 overflow-hidden rounded-full bg-white/15">
+          {pct === null ? (
+            <div className="h-full w-1/3 animate-pulse rounded-full bg-white/70" />
+          ) : (
+            <div className="h-full rounded-full bg-white/85 transition-[width] duration-300" style={{ width: `${Math.max(3, Math.round(pct * 100))}%` }} />
+          )}
+        </div>
+      </div>
+      <PillButton onClick={cancelVision} label="Cancel">
+        <X className="size-3.5" />
+      </PillButton>
     </Pill>
   );
 }

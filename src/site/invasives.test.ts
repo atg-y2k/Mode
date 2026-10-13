@@ -147,7 +147,13 @@ describe('verdicts', () => {
     expect(invasiveStatusSync('Mentha piperita')?.note).toMatch(/invasive in Alaska/);
     expect(invasiveStatusSync('Mentha piperita', 'AK')).toMatchObject({ invasive: true, level: 2 });
     expect(invasiveStatusSync('Poa pratensis', 'HI')?.invasive).toBe(true);
-    expect(invasiveStatusSync('Poa pratensis')?.invasive).toBe(false);
+    // The species isn't listed in the lower 48, but its typical subspecies is: say so.
+    const bluegrass = invasiveStatusSync('Poa pratensis');
+    expect(bluegrass).toMatchObject({ invasive: false, formListed: true });
+    expect(bluegrass?.note).toMatch(/^Poa pratensis ssp\. pratensis \(a form of this species\) is listed as widespread invasive in the lower 48/);
+    // Forms are judged per locality.
+    expect(invasiveStatusSync('Euonymus fortunei', 'HI')).toEqual(expect.objectContaining({ invasive: false, level: 0 }));
+    expect(invasiveStatusSync('Euonymus fortunei', 'HI')?.note).toBeUndefined();
   });
 
   it('says "not listed" for parseable names and null for the rest', () => {

@@ -34,6 +34,12 @@ import type { ZipInfo } from '../zip';
 
 type DeerChoice = NonNullable<ProjectLocation['deerPressure']> | 'unset';
 
+const LOOKED_UP_FOR: Record<SiteProfile['coordsSource'], string> = {
+  zip: 'ZIP code centre',
+  address: 'exact location',
+  'photo-gps': 'photo’s GPS location',
+};
+
 export interface SiteSectionProps {
   project: Project;
   /** Merges a patch into project.location (one undo step per edit burst). */
@@ -195,12 +201,12 @@ function DeerPressureField({ value, onChange }: { value: ProjectLocation['deerPr
       <span id="mode-deer-label" className="text-xs font-medium text-muted">
         Deer pressure
       </span>
-      <div aria-labelledby="mode-deer-label">
+      <div role="group" aria-labelledby="mode-deer-label">
         <Segmented<DeerChoice>
           value={choice}
           onChange={(v) => onChange(v === 'unset' ? undefined : v)}
           options={[
-            { value: 'unset', label: 'Not sure' },
+            { value: 'unset', label: <span className="whitespace-nowrap">Not sure</span> },
             ...DEER_PRESSURE_OPTIONS.map((o) => ({ value: o.value as DeerChoice, label: o.label, title: o.hint })),
           ]}
           className="w-full sm:w-auto"
@@ -262,7 +268,7 @@ function SiteProfileCard({
           <h4 className="text-sm font-medium text-text">Frost dates & soil</h4>
           <p className="mt-0.5 text-xs leading-relaxed text-muted">
             {site
-              ? `Looked up ${relativeTime(site.updatedAt)} for the ${COORDS_SOURCE_LABELS[site.coordsSource].toLowerCase()}.`
+              ? `Looked up ${relativeTime(site.updatedAt)} for the ${LOOKED_UP_FOR[site.coordsSource]}.`
               : 'Free government data for your spot: NOAA 1991–2020 climate normals and the USDA soil survey.'}
           </p>
         </div>

@@ -17,7 +17,7 @@ import type { AlignmentReport } from '../../shared/types';
 import { growMask } from '../engine/mask';
 import type { ImageDataLike, Mask } from '../engine/types';
 import { alignFeatures, type AlignResult } from './alignCore';
-import { BAND_EDGE_THRESHOLD, compositeBand, distanceSquared, isWholeTarget, markerMarginPhotoPx } from './bands';
+import { BAND_EDGE_THRESHOLD, compositeBand, distanceSquared, isWholeCoverage, markerMarginPhotoPx, maskCoverageShare } from './bands';
 import { applyChannelFit, fitChannels, IDENTITY_FIT, meanDeltaE, type ChannelFit } from './colorMatch';
 import { outsideChanges } from './changeMap';
 import type { CvLike } from './cv';
@@ -190,7 +190,8 @@ export function runImport(cv: CvLike | null, job: ImportJob, onStage?: (stage: I
   const crop = normalizeCrop(job.crop, W, H);
   const rw = returned.width;
   const rh = returned.height;
-  const whole = isWholeTarget(target);
+  const coverage = maskCoverageShare(target);
+  const whole = isWholeCoverage(coverage);
 
   // 1. Initial mapping (photo → returned).
   const plain = plainMapping(crop, rw, rh);
@@ -249,7 +250,7 @@ export function runImport(cv: CvLike | null, job: ImportJob, onStage?: (stage: I
   for (let i = 0; i < valid.data.length; i++) valid.data[i] = valid.data[i] >= 128 ? 0 : 255;
 
   // Band, marker ring and protected pixels (crop region).
-  const band = compositeBand(target);
+  const band = compositeBand(target, coverage);
   const bandC = regionMask(band, crop);
   const n = crop.w * crop.h;
   const isProtected = new Uint8Array(n);

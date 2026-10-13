@@ -8,6 +8,7 @@
 import { Loader2, Pencil, Send, ShieldCheck, Sparkles, Undo2, X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { CONTEXT_ZONE_KINDS, type Generation, type HandoffApp, type Photo } from '../../../../shared/types';
+import type { PreparedHandoff } from '../../../handoff';
 import { findPhoto, useStore } from '../../../state/store';
 import { Button, Modal, cn } from '../../common';
 import { PlantNoteChips } from '../Feasibility';
@@ -15,7 +16,7 @@ import { cancelRun } from '../generate';
 import { briefTargetIds } from '../maskFromZones';
 import { AppIcon, TargetPreview } from './bits';
 import { countToday, useHandoffLog, usageHint } from './log';
-import { preparedExport } from './pack';
+import { packPrompt, preparedExport } from './pack';
 import { appLabel } from './planned';
 import { declineReview, registerReviewHost, submitReview, useReview, type ReviewItem, type ReviewRequest } from './review';
 
@@ -35,20 +36,19 @@ function useObjectUrl(blob: Blob | null): string | null {
 
 /** The marked export for the review's "What you'll paste" tab (also warms the cache for the companion). */
 function useMarkedExport(photo: Photo | undefined, g: Generation | undefined, app: HandoffApp, enabled: boolean) {
-  const [state, setState] = useState<{ blob: Blob | null; ratio: string | null; error: string | null }>({ blob: null, ratio: null, error: null });
+  const [state, setState] = useState<{ prepared: PreparedHandoff | null; error: string | null }>({ prepared: null, error: null });
   useEffect(() => {
     if (!enabled || !photo || !g) return;
     let alive = true;
-    setState({ blob: null, ratio: null, error: null });
+    setState({ prepared: null, error: null });
     preparedExport(photo, g, app)
-      .then((p) => alive && setState({ blob: p.marked, ratio: p.ratio, error: null }))
-      .catch((err: Error) => alive && setState({ blob: null, ratio: null, error: err.message || 'Could not prepare the export.' }));
+      .then((p) => alive && setState({ prepared: p, error: null }))
+      .catch((err: Error) => alive && setState({ prepared: null, error: err.message || 'Could not prepare the export.' }));
     return () => {
       alive = false;
     };
-    // The run's brief / base are fixed once it started; re-run only for another run or app.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, photo?.id, g?.id, app]);
+    // The run's brief and starting image are fixed once it started: re-run only for another run or app.
+  }, [enabled, photo?.id, g?.id, app]); // eslint-disable-line react-hooks/exhaustive-deps
   return state;
 }
 
@@ -78,7 +78,7 @@ function ReviewDialog({ review }: { review: ReviewRequest }) {
   const [left, setLeft] = useState<Set<string>>(new Set());
   const [tab, setTab] = useState<'paste' | 'target'>(hand ? 'paste' : 'target');
   const marked = useMarkedExport(photo, g, app, hand);
-  const markedUrl = useObjectUrl(marked.blob);
+  const markedUrl = useObjectUrl(marked.prepared?.marked ?? null);
 
   // The plan arrives after the dialog opened.
   useEffect(() => {
@@ -130,7 +130,13 @@ function ReviewDialog({ review }: { review: ReviewRequest }) {
           <Button variant="ghost" onClick={cancel}>
             Cancel
           </Button>
-          <Button variant="primary" icon={hand ? <Send className="size-4" /> : <Sparkles className="size-4" />} onClick={send} disabled={!ready || kept.length === 0}>
+          <Button
+            variant="primary"
+            className="max-sm:w-full"
+            icon={hand ? <Send className="size-4" /> : <Sparkles className="size-4" />}
+            onClick={send}
+            disabled={!ready || kept.length === 0}
+          >
             {sendLabel}
           </Button>
         </div>
@@ -160,23 +166,24 @@ function ReviewDialog({ review }: { review: ReviewRequest }) {
               ))}
             </div>
           )}
-          {hand && tab === 'paste' ? (
-            <div className="relative grid min-h-40 place-items-center overflow-hidden rounded-xl bg-stage">
-              {markedUrl ? (
-                <img src={markedUrl} alt={`The marked photo you'll paste into ${appLabel(app)}`} className="max-h-[22rem] w-full object-contain" />
-              ) : marked.error ? (
-                <TargetPreview photo={photo} brief={g.brief} baseVariationId={g.baseVariationId} className="w-full" />
-              ) : (
-                <span className="flex items-center gap-2 py-16 text-xs text-white/70">
-                  <Loader2 className="size-4 animate-spin" /> Preparing the photo…
-                </span>
-              )}
-              {marked.ratio && (
+          {hand && tab === 'paste' && markedUrl ? (
+            <div className="relative grid place-items-center overflow-hidden rounded-xl bg-stage">
+              <img src={markedUrl} alt={`The marked photo you'll paste into ${appLabel(app)}`} className="max-h-[22rem] w-full object-contain" />
+              {marked.prepared && (
                 <span className="absolute top-2 left-2 rounded-full bg-black/60 px-2 py-0.5 text-[10px] font-medium text-white">
-                  {marked.ratio} · EXIF & location removed
+                  {marked.prepared.mode === 'crop' ? 'Close-up of the area' : 'Whole photo'} · {marked.prepared.ratio} · EXIF & location removed
                 </span>
               )}
             </div>
+          ) : hand && tab === 'paste' ? (
+            // While the exact export is prepared, show what may change (same outline, full photo).
+            <TargetPreview photo={photo} brief={g.brief} baseVariationId={g.baseVariationId} className="w-full">
+              {!marked.error && (
+                <span className="absolute bottom-2 left-2 inline-flex items-center gap-1.5 rounded-full bg-black/60 px-2 py-0.5 text-[10px] font-medium text-white">
+                  <Loader2 className="size-3 animate-spin" /> Preparing the exact image you’ll paste…
+                </span>
+              )}
+            </TargetPreview>
           ) : (
             <TargetPreview photo={photo} brief={g.brief} baseVariationId={g.baseVariationId} className="w-full" />
           )}
@@ -291,14 +298,22 @@ function ReviewDialog({ review }: { review: ReviewRequest }) {
                           className="field-sizing-content mt-1.5 max-h-48 min-h-14 w-full resize-none rounded-lg border border-transparent bg-surface-2 px-2.5 py-2 text-[13px] leading-relaxed text-text focus:border-accent focus:bg-surface focus:outline-none focus:ring-2 focus:ring-accent/20"
                         />
                       )}
+                      {!out && hand && marked.prepared && (
+                        <details className="group mt-1.5 text-[11px] text-muted">
+                          <summary className="cursor-pointer select-none hover:text-text">Exact prompt for {appLabel(app)}</summary>
+                          <p className="mt-1 max-h-48 overflow-y-auto rounded-lg bg-surface-2 p-2 leading-relaxed whitespace-pre-wrap text-text">
+                            {packPrompt(photo, g, { brief: item.brief }, app, marked.prepared)}
+                          </p>
+                        </details>
+                      )}
                     </li>
                   );
                 })}
               </ol>
               {hand && (
                 <p className="text-xs leading-relaxed text-muted">
-                  Mode wraps each instruction in {appLabel(app)}’s own editing phrasing (keep list, same framing and light, marker removal). You’ll see the
-                  full prompt in the hand-off card.
+                  Mode wraps each instruction in {appLabel(app)}’s own editing phrasing (keep list, same framing and light, marker removal) — open
+                  “Exact prompt” to read what you’ll paste.
                   {review.runMode === 'compare' && ' Each option starts from the same photo in its own new chat — never from another option’s result.'}
                 </p>
               )}

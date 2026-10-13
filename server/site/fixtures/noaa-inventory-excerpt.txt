@@ -1,0 +1,128 @@
+US1MDMG0003  39.0372  -77.2075   96.9 MD POTOMAC 0.9 NNW                             
+US1MDMG0040  39.0259  -77.0744   92.0 MD KENSINGTON 0.1 W                            
+US1VAFX0041  38.9180  -77.1434   83.2 VA MCLEAN 2.3 SE                               
+USC00050263  38.9931 -105.8914 2724.6 CO ANTERO RSVR                                 
+USC00050909  39.4864 -106.0431 2925.5 CO BRECKENRIDGE                                
+USC00051660  39.3672 -106.1897 3457.7 CO CLIMAX                                      
+USC00052281  39.6261 -106.0353 2763.0 CO DILLON 1 E                         HCN      
+USC00052816  39.2219 -105.9936 3046.5 CO FAIRPLAY S PARK RD                          
+USC00055507  39.3619 -106.7422 2385.1 CO MEREDITH                                    
+USC00058064  39.2494 -106.3714 2968.1 CO SUGARLOAF RSVR                              
+USC00058501  39.0942 -106.3506 2815.1 CO TWIN LAKES RSVR                             
+USC00058575  39.6394 -106.3539 2531.1 CO VAIL                                        
+USC00081306  25.6719  -80.1567    1.8 FL CAPE FLORIDA                                
+USC00081858  26.2678  -80.2750    3.0 FL CORAL SPRINGS                               
+USC00083163  26.1019  -80.2011    4.9 FL FT LAUDERDALE                      HCN      
+USC00083168  26.1408  -80.1061    1.2 FL FT LAUDERDALE BEACH                         
+USC00083909  25.8175  -80.2858    3.7 FL HIALEAH                                     
+USC00084050  26.0281  -80.1342    2.7 FL HOLLYWOOD                                   
+USC00084095  25.5011  -80.5500    2.7 FL HOMESTEAD GEN AVIATION AP                   
+USC00084412  25.1936  -80.3492    1.8 FL JOHN PENNEKAMP SP                           
+USC00085184  26.4986  -80.2161    6.4 FL LOXAHATCHEE NWR                             
+USC00085667  25.7553  -80.3836    4.3 FL MIAMI NWSFO                                 
+USC00086315  25.9500  -80.2158    3.0 FL N MIAMI BEACH #2                            
+USC00086406  25.8603  -81.0331    2.4 FL OASIS RS                                    
+USC00087020  25.5819  -80.4361    3.0 FL PERRINE 4W                         HCN      
+USC00087760  25.3867  -80.5936    2.1 FL ROYAL PALM RS                               
+USC00088780  25.7608  -80.8242    4.6 FL TAMIAMI TRAIL 40 MI BEND                    
+USC00088841  25.0069  -80.5211    2.1 FL TAVERNIER                                   
+USC00180193  38.9936  -76.5075    7.6 MD ANNAPOLIS POLICE BRKS                       
+USC00180700  39.0303  -76.9314   44.2 MD BELTSVILLE                         HCN      
+USC00182308  39.3531  -76.6539   71.6 MD CYLBURN                                     
+USC00182325  38.9386  -77.1133   45.7 MD DALECARLIA RSVR                             
+USC00182336  39.2647  -77.2319  213.4 MD DAMASCUS 3 SSW                              
+USC00183348  39.4161  -77.4389  115.8 MD FREDERICK POLICE BRKS                       
+USC00183675  38.9689  -76.8042   45.7 MD GLENN DALE BELL STN                HCN      
+USC00185111  39.0847  -76.9003  121.9 MD LAUREL 3 W                         HCN      
+USC00186350  38.9133  -76.9700   15.2 MD NATL ARBORETUM DC                           
+USC00186800  38.7956  -76.9947   57.9 MD OXON HILL                                   
+USC00187272  39.0400  -77.2542   82.3 MD POTOMAC FLTR PLT                            
+USC00187705  39.1008  -77.1486  134.1 MD ROCKVILLE 1 NE                              
+USC00189070  38.8519  -76.7683   39.6 MD UPPER MARLBORO 3 NNW                        
+USC00191386  41.6569  -69.9592   12.2 MA CHATHAM                                74494
+USC00192372  41.7144  -70.4717   45.7 MA E SANDWICH                                  
+USC00192451  41.7653  -70.6697    9.1 MA E WAREHAM                                   
+USC00192501  41.3853  -70.5181    9.1 MA EDGARTOWN                                   
+USC00193821  41.6650  -70.3039   18.3 MA HYANNIS                                     
+USC00195246  41.5953  -70.9053    5.5 MA NEW BEDFORD COOP                   HCN      
+USC00199227  41.6633  -70.1161    4.6 MA W HARWICH                                   
+USC00199891  41.5325  -70.6589   24.4 MA WOODS HOLE GOLF CLUB                        
+USC00280907  40.8917  -74.3964   85.3 NJ BOONTON 1 SE                       HCN      
+USC00281335  40.7436  -74.3539   54.9 NJ CANOE BROOK                                 
+USC00282023  40.6667  -74.3236   24.4 NJ CRANFORD                                    
+USC00282768  40.8314  -74.2858  106.7 NJ ESSEX FELLS SERVICE BLDG                    
+USC00283704  40.7481  -74.1519    7.3 NJ HARRISON                                    
+USC00284887  40.8858  -74.2261   45.7 NJ LITTLE FALLS                                
+USC00286146  40.9611  -74.0158    3.7 NJ NEW MILFORD                                 
+USC00287079  40.6036  -74.4025   27.4 NJ PLAINFIELD                         HCN      
+USC00287587  41.0917  -74.2683   93.0 NJ RINGWOOD                                    
+USC00289187  41.0444  -74.2933   74.7 NJ WANAQUE RAYMOND DAM                         
+USC00289832  41.0139  -74.0425   31.4 NJ WOODCLIFF LAKE                              
+USC00300889  40.9519  -72.2978   12.8 NY BRIDGEHAMPTON                      HCN      
+USC00300961  40.8369  -73.8494   11.9 NY BRONX                                       
+USC00302129  41.0072  -73.8344   61.0 NY DOBBS FERRY-ARDSLEY                HCN      
+USC00305377  40.7328  -73.6183   29.3 NY MINEOLA                                     
+USC00305796  40.5939  -73.9808    6.1 NY NY AVE V BROOKLYN                           
+USC00306138  40.6328  -73.6269    3.7 NY OCEANSIDE                                   
+USC00306276  41.1322  -72.2583    0.9 NY ORIENT PT SP                                
+USC00308577  40.8217  -73.4908   80.8 NY SYOSSET                                     
+USC00308946  40.6550  -73.5053    3.0 NY WANTAGH CEDAR CREEK                         
+USC00370897  41.1578  -71.5675   39.6 RI BLOCK IS COOP                               
+USC00374266  41.4903  -71.5431   35.7 RI KINGSTON                           HCN      
+USC00375215  41.5000  -71.3500    4.6 RI NEWPORT ROSE                                
+USC00377581  41.6267  -71.2092   27.4 RI TIVERTON                                    
+USC00444909  39.1422  -77.7094  155.4 VA PURCELLVILLE                       HCN      
+USC00445204  38.7333  -77.4925   74.7 VA MANASSAS                                    
+USC00448084  38.9764  -77.4869   87.8 VA WFO STERLING                                
+USC00448396  38.8947  -77.7547  161.5 VA THE PLAINS 2 NNE                            
+USC00448737  38.8922  -77.2892  127.4 VA VIENNA                                      
+USC00448888  38.6811  -77.7678  152.4 VA WARRENTON 3 SE                              
+USS0005K28S  39.4400 -105.9100 3230.9 CO Michigan Creek                              
+USS0006K01S  39.3600 -106.0600 3474.7 CO Hoosier Pass                                
+USS0006K04S  39.0800 -106.6100 3230.9 CO Independence Pass                           
+USS0006K06S  39.3000 -106.6100 2651.8 CO Nast Lake                                   
+USS0006K08S  39.3800 -106.2000 3474.7 CO Fremont Pass                                
+USS0006K10S  39.2900 -106.5500 3169.9 CO Ivanhoe                                     
+USS0006K16S  39.3000 -106.1100 3398.5 CO Buckskin Joe                                
+USS0006K24S  39.4900 -106.1700 3215.6 CO Copper Mountain                             
+USS0006K30S  39.3200 -106.6100 2926.1 CO Kiln                                        
+USS0006K39S  39.6200 -106.3800 3139.4 CO Vail Mountain                               
+USS0006K40S  39.0900 -106.5400 3230.9 CO Brumley                                     
+USS0006K43S  39.0300 -106.0800 3157.7 CO Rough And Tumble                            
+USS0006K44S  39.6000 -106.5400 2889.5 CO Mccoy Park                                  
+USS0006K45S  39.6000 -106.5100 2590.8 CO Beaver Ck Village                           
+USS0006K46S  39.2600 -106.6300 3081.5 CO Chapman Tunnel                              
+USW00012839  25.7906  -80.3164    8.8 FL MIAMI INTL AP                          72202
+USW00012849  26.0719  -80.1536    3.4 FL FT LAUDERDALE HOLLYWOOD AP             74783
+USW00012859  25.7167  -80.2833    4.6 FL MIAMI WSO CITY                              
+USW00012882  25.9069  -80.2803    3.0 FL MIAMI OPA LOCKA AP                          
+USW00012885  26.1969  -80.1708    4.3 FL FT LAUDERDALE EXECUTIVE AP                  
+USW00012888  25.6475  -80.4331    3.0 FL MIAMI KENDALL TAMIAMI EXEC AP               
+USW00013743  38.8483  -77.0342    3.0 VA WASHINGTON REAGAN AP           GSN     72405
+USW00013752  38.9833  -76.4667    2.4 MD ANNAPOLIS NAF                               
+USW00013773  38.5000  -77.3000    3.0 VA QUANTICO MCAS                               
+USW00014707  41.3275  -72.0494    3.0 CT GROTON NEW LONDON AP                        
+USW00014732  40.7794  -73.8803    3.4 NY NEW YORK LAGUARDIA AP                  72503
+USW00014734  40.6825  -74.1694    2.1 NJ NEWARK INTL AP                         72502
+USW00014756  41.2531  -70.0608   13.7 MA NANTUCKET MEM AP                            
+USW00014787  41.5333  -71.2833   52.4 RI NEWPORT STATE AP                            
+USW00014794  41.3497  -71.7989   24.7 RI WESTERLY STATE AP                           
+USW00054743  40.8764  -74.2831   52.7 NJ CALDWELL ESSEX CO AP                        
+USW00054780  41.0731  -71.9233    2.1 NY MONTAUK AP                                  
+USW00054796  41.4911  -71.5414   35.1 RI KINGSTON 1 NW                          72511
+USW00054797  41.4783  -71.5417   32.3 RI KINGSTON 1 W                           72512
+USW00092805  26.2500  -80.1083    6.4 FL POMPANO BEACH AIRPARK                       
+USW00092809  25.9989  -80.2411    2.7 FL HOLLYWOOD NORTH PERRY AP                    
+USW00092811  25.8064  -80.1336    0.3 FL MIAMI BEACH                                 
+USW00093009  39.2292 -106.3169 3027.3 CO LEADVILLE LAKE CO AP                        
+USW00093721  39.1667  -76.6833   47.5 MD BALTIMORE WASH INTL AP                 72406
+USW00093738  38.9408  -77.4636   88.4 VA WASHINGTON DC DULLES AP                72403
+USW00093784  39.2814  -76.6089    6.1 MD MD SCI CTR BALTIMORE               HCN      
+USW00094624  41.6875  -69.9933   20.7 MA CHATHAM MUNI AP                             
+USW00094720  41.6686  -70.2800   16.8 MA HYANNIS BARNSTABLE MUNI AP                  
+USW00094724  41.3931  -70.6150   20.7 MA VINEYARD HAVEN AP                           
+USW00094726  41.6764  -70.9583   24.4 MA NEW BEDFORD MUNI AP                         
+USW00094728  40.7789  -73.9692   39.6 NY NEW YORK CNTRL PK TWR              HCN 72506
+USW00094741  40.8500  -74.0614    2.7 NJ TETERBORO AP                                
+USW00094745  41.0669  -73.7075  115.5 NY WESTCHESTER CO AP                           
+USW00094789  40.6386  -73.7622    3.4 NY NEW YORK JFK INTL AP                   74486

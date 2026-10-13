@@ -14,7 +14,7 @@ import { cn } from '../common';
 import { openElement, runOrNotify, viewVariation } from './actions';
 import { generationBlocker } from './generate';
 import { setDefaultHandoffApp } from './handoff/actions';
-import { usePendingHandoffs } from './handoff/Companion';
+import { usePendingHandoffs } from './handoff/hooks';
 import { appLabel } from './handoff/planned';
 import { effectiveRenderMode, hasImageProviders } from './handoff/prefs';
 import { setHandoffSession } from './handoff/session';
@@ -141,7 +141,8 @@ export function PromptDock({ photo, space }: { photo: Photo; space: Space | unde
   const providers = health?.imageProviders ?? [];
   const apiAvailable = hasImageProviders(health);
   const pending = usePendingHandoffs();
-  const waitingHere = pending.filter((p) => p.photoId === photo.id).length;
+  const waitingHere = pending.filter((p) => p.photoId === photo.id && p.planned.status === 'awaiting-handoff').length;
+  const backHere = pending.filter((p) => p.photoId === photo.id && p.planned.status === 'staged').length;
 
   const zoneById = useMemo(() => new Map((scene?.zones ?? []).map((z) => [z.id, z])), [scene?.zones]);
   const ideas = useMemo(() => ideasForBrief(board ?? [], brief, space?.id ?? null), [board, brief, space?.id]);
@@ -454,15 +455,17 @@ export function PromptDock({ photo, space }: { photo: Photo; space: Space | unde
               </select>
             </label>
           )}
-          {waitingHere > 0 && (
+          {waitingHere + backHere > 0 && (
             <button
               type="button"
-              onClick={() => setHandoffSession({ companion: 'open' })}
+              onClick={() => setHandoffSession({ companion: 'open', staging: null })}
               className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-accent-soft px-2.5 text-xs font-semibold text-accent hover:brightness-95"
               title="Open the hand-off card"
             >
               <Inbox className="size-3.5" />
-              {waitingHere} hand-off{waitingHere === 1 ? '' : 's'} waiting
+              {waitingHere > 0 && `${waitingHere} hand-off${waitingHere === 1 ? '' : 's'} waiting`}
+              {waitingHere > 0 && backHere > 0 && ' · '}
+              {backHere > 0 && `${backHere} back`}
             </button>
           )}
           {hint && (

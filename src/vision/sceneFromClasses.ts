@@ -180,6 +180,7 @@ export function zonesFromClasses(classes: ClassMap, photo: { width: number; heig
   const total = W * H;
   if (total === 0) return [];
   const { grid, kinds } = kindGrid(classes, interior, clip);
+  if (!interior) separateFreestandingWalls(classes, grid, kinds);
   // Light smoothing radius relative to the grid (≈ 0.4% of the long edge).
   const r = Math.max(1, Math.round(Math.max(W, H) * 0.004));
   const found: Found[] = [];
@@ -214,26 +215,23 @@ export function zonesFromClasses(classes: ClassMap, photo: { width: number; heig
     }
   }
 
-  reclassify(found, W, interior);
+  const kept = reclassify(found, W, interior);
 
   const sx = photo.width / W;
   const sy = photo.height / H;
   const zones: OfflineZone[] = [];
   const byKind = new Map<ZoneKind, Found[]>();
-  for (const f of found) byKind.set(f.kind, [...(byKind.get(f.kind) ?? []), f]);
+  for (const f of kept) byKind.set(f.kind, [...(byKind.get(f.kind) ?? []), f]);
   for (const [kind, list] of byKind) {
-    const used = new Map<string, number>();
-    list.sort((a, b) => a.comp.x0 + a.comp.x1 - (b.comp.x0 + b.comp.x1));
-    for (const f of list) {
+    const labels = componentLabels(
+      ZONE_KIND_LABELS[kind],
+      list.map((f) => ({ area: f.comp.area, cx: (f.comp.x0 + f.comp.x1) / 2 })),
+      W,
+    );
+    list.forEach((f, li) => {
       const polygon = largestContour(f.mask, { tolerancePx: 0.9, scaleX: sx, scaleY: sy });
-      if (polygon.length < 3) continue;
-      let label = ZONE_KIND_LABELS[kind];
-      if (list.length > 1) {
-        const pos = positionWord((f.comp.x0 + f.comp.x1) / 2, W);
-        const n = (used.get(pos) ?? 0) + 1;
-        used.set(pos, n);
-        label = `${label} — ${pos}${n > 1 ? ` ${n}` : ''}`;
-      }
+      if (polygon.length < 3) return;
+      const label = labels[li];
       const area = f.comp.area / total;
       const pct = area >= 0.01 ? `about ${Math.round(area * 100)}% of the photo` : 'a small part of the photo';
       zones.push({
@@ -244,25 +242,75 @@ export function zonesFromClasses(classes: ClassMap, photo: { width: number; heig
         area,
         editable: !CONTEXT_ZONE_KINDS.includes(kind),
       });
-    }
+    });
   }
   zones.sort((a, b) => b.area - a.area);
   return zones.slice(0, 28);
 }
 
 /**
- * Kind fixes that need the whole picture: the main building vs neighbours,
- * the front door vs other / garage doors.
+ * Labels for several components of one kind: when one clearly dominates it
+ * keeps the plain name ("Lawn"), the others get their side of the photo
+ * ("Lawn — left"); repeats are numbered ("Windows — left 2").
  */
-function reclassify(found: Found[], W: number, interior: boolean): void {
-  if (interior) {
-    return;
+export function componentLabels(base: string, comps: readonly { area: number; cx: number }[], width: number): string[] {
+  if (comps.length === 1) return [base];
+  const byArea = comps.map((c, i) => ({ ...c, i })).sort((a, b) => b.area - a.area);
+  const dominant = byArea[0].area >= byArea[1].area * 2.5 ? byArea[0].i : -1;
+  const used = new Map<string, number>();
+  const out: string[] = new Array(comps.length);
+  const byX = comps.map((c, i) => ({ ...c, i })).sort((a, b) => a.cx - b.cx);
+  for (const c of byX) {
+    if (c.i === dominant) {
+      out[c.i] = base;
+      continue;
+    }
+    const pos = positionWord(c.cx, width);
+    const n = (used.get(pos) ?? 0) + 1;
+    used.set(pos, n);
+    out[c.i] = `${base} — ${pos}${n > 1 ? ` ${n}` : ''}`;
   }
+  return out;
+}
+
+/**
+ * Outdoors, ADE20K's "wall" is the house wall or a freestanding garden /
+ * retaining wall. A wall blob that is low in the frame and much wider than
+ * tall becomes a retaining wall; the rest stays part of the facade.
+ */
+function separateFreestandingWalls(classes: ClassMap, grid: Uint8Array, kinds: ZoneKind[]): void {
+  const { width: W, height: H, labels } = classes;
+  const wallKind = kinds.indexOf('retaining-wall') + 1 || kinds.push('retaining-wall');
+  const walls = { width: W, height: H, data: new Uint8Array(W * H) };
+  for (let i = 0; i < labels.length; i++) if (labels[i] === ADE.wall) walls.data[i] = 255;
+  const { labels: comp, components } = labelComponents(walls);
+  for (const c of components) {
+    const w = c.x1 - c.x0 + 1;
+    const h = c.y1 - c.y0 + 1;
+    if (!(w >= h * 2.5 && c.y0 >= H * 0.45 && h <= H * 0.25)) continue;
+    for (let y = c.y0; y <= c.y1; y++) {
+      for (let x = c.x0; x <= c.x1; x++) {
+        const i = y * W + x;
+        if (comp[i] === c.label) grid[i] = wallKind;
+      }
+    }
+  }
+}
+
+/**
+ * Kind fixes that need the whole picture: the main building vs neighbours
+ * (and slivers such as a chimney split off by the roof, dropped), the front
+ * door vs other / garage doors.
+ */
+function reclassify(found: Found[], W: number, interior: boolean): Found[] {
+  if (interior) return found;
+  const drop = new Set<Found>();
   const facades = found.filter((f) => f.kind === 'facade').sort((a, b) => b.comp.area - a.comp.area);
   const main = facades[0];
   for (const f of facades.slice(1)) {
     const gap = Math.max(f.comp.x0 - main.comp.x1, main.comp.x0 - f.comp.x1, 0);
     if (f.comp.area < main.comp.area * 0.35 && gap > W * 0.02) f.kind = 'neighbor';
+    else if (f.comp.area < main.comp.area * 0.1) drop.add(f);
   }
   const doors = found.filter((f) => f.kind === 'front-door').sort((a, b) => b.comp.area - a.comp.area);
   let front = false;
@@ -273,6 +321,7 @@ function reclassify(found: Found[], W: number, interior: boolean): void {
     else if (!front) front = true;
     else d.kind = 'door';
   }
+  return found.filter((f) => !drop.has(f));
 }
 
 /** One-line summary of what the offline map found. */
@@ -281,7 +330,7 @@ export function offlineSummary(zones: readonly Pick<OfflineZone, 'kind' | 'edita
   for (const z of zones) counts.set(z.kind, (counts.get(z.kind) ?? 0) + 1);
   const parts = [...counts.entries()].map(([k, n]) => (n > 1 ? `${n}× ${ZONE_KIND_LABELS[k].toLowerCase()}` : ZONE_KIND_LABELS[k].toLowerCase()));
   if (parts.length === 0) return 'Mapped on this device without AI — no clear areas were found; outline the areas to change by hand.';
-  return `Mapped on this device without AI: ${parts.join(', ')}. Outlines are approximate — sharpen them or adjust by hand.`;
+  return `Mapped on this device without AI: ${parts.join(', ')}. No style or architecture notes — those need Claude.`;
 }
 
 export const OFFLINE_MODEL_LABEL = 'On-device (SegFormer-B2';

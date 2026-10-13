@@ -167,19 +167,21 @@ function AwaitingTile({ photo, g, tile, width }: { photo: Photo; g: Generation; 
   const ref = { photoId: photo.id, generationId: g.id, plannedId: tile.plannedId as string };
   const active = useHandoffSession((s) => sameRef(s.active, ref));
   const job = useHandoffSession((s) => s.jobs[ref.plannedId]);
-  const app = tile.app;
+  const defaultApp = useStore((s) => s.studio.handoffApp);
+  // Not prepared yet: it will go to the Studio's hand-off app.
+  const app = tile.app ?? defaultApp;
   return (
     <TileFrame
       width={width}
       selected={active}
       onClick={() => openHandoff(ref)}
-      label={`${tile.label || 'Variation'} — waiting for ${app ? appLabel(app) : 'the hand-off'}`}
+      label={`${tile.label || 'Variation'} — waiting for ${appLabel(app)}`}
       className="border border-dashed border-line-strong bg-surface-2"
     >
       <div className="flex h-full flex-col items-center justify-center gap-1 px-1.5 text-center">
         {job ? <Loader2 className="size-4 animate-spin text-accent" /> : <AppIcon app={app} className="size-4 text-accent" />}
         <span className="line-clamp-2 text-[10px] leading-tight font-medium text-text">{tile.label || 'Waiting'}</span>
-        <span className="text-[9px] text-muted">{job?.kind === 'importing' ? 'Lining up…' : app ? `Waiting · ${appLabel(app)}` : 'Waiting'}</span>
+        <span className="text-[9px] text-muted">{job?.kind === 'importing' ? 'Lining up…' : `Waiting · ${appLabel(app)}`}</span>
       </div>
     </TileFrame>
   );

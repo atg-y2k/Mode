@@ -128,6 +128,7 @@ function getWorker(): Worker {
     if (worker === w) worker = null;
     initPromise = null;
     sentImages.clear();
+    sending.clear();
     w.terminate();
     const err = new VisionError('On-device vision stopped unexpectedly (the device may be low on memory). Try again.', 'crashed');
     failAll(err);
@@ -192,6 +193,7 @@ export function cancelVision(): void {
   worker = null;
   initPromise = null;
   sentImages.clear();
+  sending.clear();
   w?.terminate();
   failAll(new VisionError('Cancelled', 'cancelled'));
   emit({ stage: 'idle', backend: device?.backend });
@@ -211,11 +213,23 @@ function remember(photoId: string, image: ImageDataLike): void {
   while (knownImages.size > 4) knownImages.delete(knownImages.keys().next().value as string);
 }
 
-async function sendImage(photoId: string, image: ImageDataLike): Promise<void> {
+/** Sends in flight, so concurrent calls (a click and a hover) send a photo once. */
+const sending = new Map<string, { image: ImageDataLike; done: Promise<void> }>();
+
+function sendImage(photoId: string, image: ImageDataLike): Promise<void> {
+  const inflight = sending.get(photoId);
+  if (inflight?.image === image) return inflight.done;
   // Copy: the worker takes ownership of the buffer, the runtime keeps its own.
   const data = new Uint8ClampedArray(image.data);
-  await call<boolean>({ op: 'setImage', photoId, width: image.width, height: image.height, data }, [data.buffer]);
-  sentImages.set(photoId, image);
+  const done = call<boolean>({ op: 'setImage', photoId, width: image.width, height: image.height, data }, [data.buffer])
+    .then(() => {
+      sentImages.set(photoId, image);
+    })
+    .finally(() => {
+      if (sending.get(photoId)?.done === done) sending.delete(photoId);
+    });
+  sending.set(photoId, { image, done });
+  return done;
 }
 
 async function ensureImage(photoId: string, image?: ImageDataLike): Promise<void> {
@@ -265,21 +279,35 @@ export async function segmentAt(
   photoId: string,
   prompt: { positive: Pt[]; negative?: Pt[]; box?: { x: number; y: number; w: number; h: number } },
 ): Promise<Mask> {
-  const r = await withImage(photoId, undefined, () => call<SegmentResult>({ op: 'segment', photoId, prompt: toPrompt(prompt) }));
-  return { width: r.width, height: r.height, data: r.mask };
+  return (await segmentClick(photoId, prompt)).mask;
+}
+
+export interface ClickSegment {
+  mask: Mask;
+  /** Decoder's predicted IoU of the chosen candidate. */
+  score: number;
+  /** The chosen candidate's position by size (0 = smallest) out of `ranks` — for "Smaller / Larger". */
+  rank: number;
+  ranks: number;
+  /** Decoder time in ms. */
+  ms: number;
 }
 
 /**
- * Low-resolution mask for hover previews (long edge `maxSize`), with the
- * decoder time so callers can turn previews off on slow devices.
+ * segmentAt with the candidate choice exposed: `rank` picks a candidate by
+ * size (default: the decoder's best, preferring a more specific one when it
+ * scores about as well); `maxSize` returns a low-resolution mask (long edge)
+ * for hover previews. Re-picking a rank of the last prompt is instant.
  */
-export async function segmentPreview(
+export async function segmentClick(
   photoId: string,
   prompt: { positive: Pt[]; negative?: Pt[]; box?: { x: number; y: number; w: number; h: number } },
-  maxSize = 480,
-): Promise<{ mask: Mask; score: number; ms: number }> {
-  const r = await withImage(photoId, undefined, () => call<SegmentResult>({ op: 'segment', photoId, prompt: toPrompt(prompt), maxSize }));
-  return { mask: { width: r.width, height: r.height, data: r.mask }, score: r.score, ms: r.ms };
+  opts: { rank?: number; maxSize?: number } = {},
+): Promise<ClickSegment> {
+  const r = await withImage(photoId, undefined, () =>
+    call<SegmentResult>({ op: 'segment', photoId, prompt: toPrompt(prompt), maxSize: opts.maxSize, rank: opts.rank }),
+  );
+  return { mask: { width: r.width, height: r.height, data: r.mask }, score: r.score, rank: r.rank, ranks: r.ranks, ms: r.ms };
 }
 
 export interface RefineDetail {

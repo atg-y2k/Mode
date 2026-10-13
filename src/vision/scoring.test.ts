@@ -12,6 +12,8 @@ import {
   maskIoU,
   masksTouch,
   rasterizePolygon,
+  pickClickCandidate,
+  sizeOrder,
   zoneAgreement,
   type ClassMap,
 } from './scoring';
@@ -115,5 +117,22 @@ describe('clip and touch', () => {
     const c = rasterizePolygon(100, 100, rect(60, 0, 40, 100));
     expect(masksTouch(a, b, 3)).toBe(true);
     expect(masksTouch(a, c, 3)).toBe(false);
+  });
+});
+
+describe('click candidates', () => {
+  it('orders candidates by size', () => {
+    expect(sizeOrder([21153, 10028, 2888])).toEqual([2, 1, 0]);
+  });
+
+  it('prefers a more specific candidate that scores about as well', () => {
+    // Roof click: whole house 0.450, roof 0.448, dormer 0.364 → the roof.
+    expect(pickClickCandidate([0.45, 0.448, 0.364], [21153, 10028, 2888])).toBe(1);
+    // Lawn: the best is also the smaller one.
+    expect(pickClickCandidate([0.967, 0.98, 0.483], [10351, 9672, 5361])).toBe(1);
+    // A clearly better large candidate wins.
+    expect(pickClickCandidate([0.9, 0.5, 0.2], [5000, 1000, 100])).toBe(0);
+    // Tiny candidates only when they are the best.
+    expect(pickClickCandidate([0.9, 0.88, 0.89], [5000, 1000, 10], 0.05, 50)).toBe(1);
   });
 });

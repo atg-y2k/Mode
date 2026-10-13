@@ -13,10 +13,10 @@ import { fetchDownloadedFile, handoffWatchStatus, watchDownloads } from '../../.
 import { useStore } from '../../../state/store';
 import { importBlobs } from './actions';
 import { readClipboardImage } from './clipboard';
-import { usePendingHandoffs } from './Companion';
+import { usePendingHandoffs } from './hooks';
 import { useToggle, WATCH_DOWNLOADS_KEY } from './prefs';
 import { handoffSession, setHandoffSession, useHandoffSession } from './session';
-import { clipboardChangeSupported, dragLooksImportable, transferImages } from './sources';
+import { clipboardChangeSupported, dragLooksImportable, isEditableTarget, transferImages } from './sources';
 
 function notify(message: string, kind: 'info' | 'success' | 'error' = 'info') {
   useStore.getState().notify(message, kind);
@@ -65,6 +65,31 @@ export function HandoffImportEffects() {
     return () => window.removeEventListener('paste', onPaste, true);
   }, [anyPending]);
 
+  // Drop anywhere in Mode (not only on the photo): what no other drop zone took is the result — and a
+  // stray drop never makes the browser leave Mode to show the file.
+  useEffect(() => {
+    if (!anyPending) return;
+    const onOver = (e: globalThis.DragEvent) => {
+      if (dragLooksImportable(e.dataTransfer)) e.preventDefault();
+    };
+    const onDrop = (e: globalThis.DragEvent) => {
+      if (e.defaultPrevented || !dragLooksImportable(e.dataTransfer)) return;
+      // A link or text dropped into a text field keeps its normal behaviour.
+      if (isEditableTarget(e.target) && !hasImageData(e.dataTransfer)) return;
+      e.preventDefault();
+      if (document.querySelector('[aria-modal="true"]')) return;
+      void transferImages(e.dataTransfer)
+        .then((blobs) => (blobs.length ? importBlobs(blobs) : 0))
+        .catch((err: Error) => notify(err.message, 'error'));
+    };
+    window.addEventListener('dragover', onOver);
+    window.addEventListener('drop', onDrop);
+    return () => {
+      window.removeEventListener('dragover', onOver);
+      window.removeEventListener('drop', onDrop);
+    };
+  }, [anyPending]);
+
   // "Import copied image?" — clipboardchange lists the types without reading the clipboard.
   useEffect(() => {
     if (!anyWaiting || !clipboardChangeSupported()) return;
@@ -104,7 +129,7 @@ export function HandoffImportEffects() {
       stop = watchDownloads(
         (f) => {
           void fetchDownloadedFile(f.id)
-            .then((blob) => importBlobs([blob], `Imported “${f.name}” from your Downloads folder.`))
+            .then((blob) => importBlobs([blob], `Imported “${f.name}” from your Downloads folder.`, { preferWaiting: true }))
             .catch((err: Error) => notify(`Couldn't read ${f.name}: ${err.message}`, 'error'));
         },
         (err) => setHandoffSession({ watch: { ...handoffSession().watch, on: false, error: err.message || 'The Downloads watcher stopped.' } }),
@@ -122,21 +147,29 @@ export function HandoffImportEffects() {
   return null;
 }
 
-/** Banner shown when an image was copied while a hand-off waits (clipboardchange). */
-export function ClipboardOfferBanner() {
+/**
+ * "Import the copied image?" when clipboardchange saw an image while a
+ * hand-off waits: inside the companion card when it is open, else as a
+ * floating banner over the Studio.
+ */
+export function ClipboardOffer({ variant }: { variant: 'card' | 'banner' }) {
   const offer = useHandoffSession((s) => s.clipboardOffer);
+  const companionOpen = useHandoffSession((s) => s.companion === 'open' && !s.pip && !s.staging);
   const pending = usePendingHandoffs();
   const active = useHandoffSession((s) => s.active);
   const [busy, setBusy] = useState(false);
   if (!offer || pending.length === 0) return null;
-  const target = pending.find((p) => p.plannedId === active?.plannedId && p.planned.status === 'awaiting-handoff') ?? pending.find((p) => p.planned.status === 'awaiting-handoff');
+  // One place at a time: the card when it is visible, else the banner.
+  if ((variant === 'card') !== companionOpen) return null;
+  const target =
+    pending.find((p) => p.plannedId === active?.plannedId && p.planned.status === 'awaiting-handoff') ?? pending.find((p) => p.planned.status === 'awaiting-handoff');
   const accept = async () => {
     setBusy(true);
     try {
       const blob = await readClipboardImage();
       setHandoffSession({ clipboardOffer: false });
       if (!blob) notify('The clipboard has no image any more — copy it again or drop the file.', 'info');
-      else await importBlobs([blob]);
+      else await importBlobs([blob], undefined, { preferWaiting: true });
     } catch (err) {
       notify(`Couldn't read the clipboard: ${(err as Error).message || 'permission denied'}. Paste with ⌘V / Ctrl+V instead.`, 'error');
     } finally {
@@ -144,19 +177,31 @@ export function ClipboardOfferBanner() {
     }
   };
   return (
-    <div className="pointer-events-auto absolute top-3 left-1/2 z-40 flex w-[min(30rem,calc(100%-1.5rem))] -translate-x-1/2 items-center gap-2 rounded-xl bg-surface px-3 py-2 shadow-panel ring-1 ring-line" role="status">
+    <div
+      className={
+        variant === 'banner'
+          ? 'pointer-events-auto absolute top-3 left-1/2 z-40 flex w-[min(30rem,calc(100%-1.5rem))] -translate-x-1/2 items-center gap-2 rounded-xl bg-surface px-3 py-2 shadow-panel ring-1 ring-line'
+          : 'flex items-center gap-2 rounded-xl bg-accent-soft px-3 py-2 ring-1 ring-accent/30'
+      }
+      role="status"
+    >
       <ClipboardPaste className="size-4 shrink-0 text-accent" />
       <span className="min-w-0 flex-1 text-xs text-text">
         Import the copied image{target ? <> as <span className="font-semibold">“{target.planned.title}”</span></> : ''}?
       </span>
-      <button type="button" onClick={() => void accept()} disabled={busy} className="h-8 rounded-lg bg-accent px-3 text-xs font-semibold text-accent-fg hover:bg-accent-hover disabled:opacity-60">
+      <button type="button" onClick={() => void accept()} disabled={busy} className="h-8 shrink-0 rounded-lg bg-accent px-3 text-xs font-semibold text-accent-fg hover:bg-accent-hover disabled:opacity-60">
         Import
       </button>
-      <button type="button" onClick={() => setHandoffSession({ clipboardOffer: false })} className="grid size-8 place-items-center rounded-lg text-muted hover:bg-surface-2" aria-label="Dismiss">
+      <button type="button" onClick={() => setHandoffSession({ clipboardOffer: false })} className="grid size-8 shrink-0 place-items-center rounded-lg text-muted hover:bg-surface-2" aria-label="Dismiss">
         <X className="size-4" />
       </button>
     </div>
   );
+}
+
+/** The floating variant, mounted over the Studio center. */
+export function ClipboardOfferBanner() {
+  return <ClipboardOffer variant="banner" />;
 }
 
 /** Drag & drop onto the Studio center while hand-offs are pending: handlers + overlay. */
@@ -166,6 +211,21 @@ export function useHandoffDrop() {
   const depth = useRef(0);
   const enabled = pending.length > 0;
   const waiting = pending.filter((p) => p.planned.status === 'awaiting-handoff');
+
+  // A drag that ends elsewhere (dropped outside, cancelled with Esc) never sends dragleave to us.
+  useEffect(() => {
+    if (!dragging) return;
+    const reset = () => {
+      depth.current = 0;
+      setDragging(false);
+    };
+    window.addEventListener('dragend', reset);
+    window.addEventListener('drop', reset);
+    return () => {
+      window.removeEventListener('dragend', reset);
+      window.removeEventListener('drop', reset);
+    };
+  }, [dragging]);
 
   const handlers = enabled
     ? {
@@ -185,10 +245,11 @@ export function useHandoffDrop() {
           if (depth.current === 0) setDragging(false);
         },
         onDrop: (e: DragEvent) => {
-          if (!dragLooksImportable(e.dataTransfer)) return;
-          e.preventDefault();
           depth.current = 0;
           setDragging(false);
+          // Already imported by a drop zone inside (the companion card).
+          if (e.defaultPrevented || !dragLooksImportable(e.dataTransfer)) return;
+          e.preventDefault();
           void transferImages(e.dataTransfer)
             .then((blobs) => importBlobs(blobs))
             .catch((err: Error) => notify(err.message, 'error'));

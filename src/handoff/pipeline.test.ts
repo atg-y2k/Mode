@@ -132,6 +132,23 @@ describe('runImport (synthetic round trip)', () => {
     expect(transformError(res.transform as Affine, sim.truth, full.crop)).toBeLessThan(2.5);
   }, 60_000);
 
+  it('recovers when the app changed the aspect ratio (16:9 export → square, centre-cropped)', () => {
+    const side = Math.round(exp.outH * 0.9);
+    const sim = simulateReturn(exp.marked, exp.crop, target, { scale: 0.9 * 1.08, zoom: 1, size: { w: side, h: side }, shift: { x: 6, y: 0 } });
+    expect(sim.returned.width).toBe(sim.returned.height);
+    const res = runImport(cv, { original: scene, target, crop: exp.crop, outW: exp.outW, outH: exp.outH, returned: sim.returned });
+    expect(res.report.aligned).toBe(true);
+    expect(res.report.residualPx).toBeLessThan(2);
+    // Compare inside the part of the crop the square return still shows.
+    const back = invertAffine(sim.truth) as Affine;
+    const tl = applyAffine(back, 0, 0);
+    const br = applyAffine(back, side, side);
+    const visible = { x: Math.max(exp.crop.x, tl.x), y: Math.max(exp.crop.y, tl.y), w: 0, h: 0 };
+    visible.w = Math.min(exp.crop.x + exp.crop.w, br.x) - visible.x;
+    visible.h = Math.min(exp.crop.y + exp.crop.h, br.y) - visible.y;
+    expect(transformError(res.transform as Affine, sim.truth, visible)).toBeLessThan(2);
+  }, 60_000);
+
   it('falls back to the plain mapping when the return is unrelated (aligned: false)', () => {
     const other = texturedScene(exp.outW, exp.outH, 99);
     const res = runImport(cv, { original: scene, target, crop: exp.crop, outW: exp.outW, outH: exp.outH, returned: other });

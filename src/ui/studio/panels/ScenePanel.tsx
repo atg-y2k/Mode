@@ -13,6 +13,7 @@ import {
   SPACE_TYPE_LABELS,
   type DesignBrief,
   type Photo,
+  type ProjectLocation,
   type SceneMap,
   type ScenePath,
   type SceneZone,
@@ -21,6 +22,7 @@ import {
 } from '../../../../shared/types';
 import { getStyle } from '../../../assets/design';
 import { useStore } from '../../../state/store';
+import { RefineSection } from '../../../vision/ui/RefineSection';
 import { relativeTime } from '../../shell/format';
 import { pickPhotos } from '../../shell/photoImport';
 import { useSceneJob } from '../../shell/sceneJobs';
@@ -29,6 +31,8 @@ import { clearZoneFocus, deletePath, deleteZone, editBrief, mapScene, refineZone
 import { appendToPrompt, toggleTargetZone } from './briefOps';
 import { useStudioContext } from './context';
 import { zoneIcon } from './icons';
+import { formatHours } from './siteHeader';
+import { SunCard } from './SunCard';
 import { AiUnavailableNote, Callout, InlineText, useAiReady } from './ui';
 import { GROUND_ZONE_KINDS, PATH_KIND_LABELS, SUN_OPTIONS, splitZones, sunLabel, zoneKindLabel } from './zones';
 
@@ -52,10 +56,22 @@ export function ScenePanel() {
       </EmptyState>
     );
   }
-  return <SceneView space={space} photo={photo} scene={scene} brief={brief} />;
+  return <SceneView space={space} photo={photo} scene={scene} brief={brief} location={project.location} />;
 }
 
-function SceneView({ space, photo, scene, brief }: { space: Space; photo: Photo; scene: SceneMap | undefined; brief: DesignBrief }) {
+function SceneView({
+  space,
+  photo,
+  scene,
+  brief,
+  location,
+}: {
+  space: Space;
+  photo: Photo;
+  scene: SceneMap | undefined;
+  brief: DesignBrief;
+  location: ProjectLocation | undefined;
+}) {
   const job = useSceneJob(photo.id);
   const aiReady = useAiReady();
   const [confirmRemap, setConfirmRemap] = useState(false);
@@ -80,11 +96,18 @@ function SceneView({ space, photo, scene, brief }: { space: Space; photo: Photo;
       {job && <MappingProgress queued={job === 'queued'} remapping={!!scene} />}
 
       {!scene ? (
-        !job && <NotMapped photoId={photo.id} />
+        <>
+          {!job && <NotMapped photoId={photo.id} />}
+          {/* On-device tools (vision module): e.g. map the scene without AI. */}
+          <RefineSection photoId={photo.id} />
+        </>
       ) : (
         <>
           <Overview space={space} photo={photo} scene={scene} />
+          {space.kind === 'exterior' && <SunCard photo={photo} scene={scene} location={location} />}
           <Architecture scene={scene} />
+          {/* On-device outline refinement (vision module). */}
+          <RefineSection photoId={photo.id} />
           <Zones photo={photo} scene={scene} brief={brief} setting={space.kind} />
           <Paths photo={photo} paths={scene.paths} />
           {scene.keep.length > 0 && (
@@ -485,6 +508,8 @@ function ZoneRow({ zone, photo, targeted, setting }: { zone: SceneZone; photo: P
               edit((z) => {
                 if (v) z.sun = v;
                 else delete z.sun;
+                // A hand-set rating replaces the sun-study estimate.
+                delete z.sunHours;
               });
             }}
             className="h-8 w-auto py-0 pl-2 text-xs"
@@ -496,6 +521,11 @@ function ZoneRow({ zone, photo, targeted, setting }: { zone: SceneZone; photo: P
               </option>
             ))}
           </Select>
+        )}
+        {showSun && zone.sun && typeof zone.sunHours === 'number' && (
+          <span className="text-[11px] tabular-nums text-subtle" title="Estimated direct sun a day over the growing season (Sun & orientation)">
+            ≈ {formatHours(zone.sunHours)}
+          </span>
         )}
         <Button size="sm" className="max-lg:h-9" variant="ghost" icon={<PenTool className="size-3.5" />} onClick={() => void refineZoneOutline(photo.id, zone.id)} title="Outline this area precisely with the Fine-tune brush and wand">
           Refine outline

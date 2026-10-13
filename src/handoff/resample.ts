@@ -98,81 +98,120 @@ function computeTaps(srcSize: number, srcStart: number, srcLen: number, outLen: 
   return { start, count, weights, maxTaps };
 }
 
-/**
- * Resamples `rect` (continuous source coords, may extend past the edges —
- * edges replicate) of a `channels`-channel interleaved 8-bit image to
- * outW × outH. Shrinking is antialiased; enlarging is Catmull-Rom bicubic.
- */
-function resampleChannels(
-  src: Uint8Array | Uint8ClampedArray,
-  srcW: number,
-  srcH: number,
-  channels: number,
-  rect: Rect,
-  outW: number,
-  outH: number,
-): Float32Array {
-  const tx = computeTaps(srcW, rect.x, rect.w, outW);
-  const ty = computeTaps(srcH, rect.y, rect.h, outH);
-  // Rows of the source the vertical pass needs.
-  let rowLo = srcH;
-  let rowHi = 0;
+/** Source rows [lo, hi) the vertical taps touch. */
+function rowSpan(ty: Taps, outH: number): { lo: number; hi: number } {
+  let lo = Infinity;
+  let hi = 0;
   for (let i = 0; i < outH; i++) {
-    rowLo = Math.min(rowLo, ty.start[i]);
-    rowHi = Math.max(rowHi, ty.start[i] + ty.count[i]);
+    lo = Math.min(lo, ty.start[i]);
+    hi = Math.max(hi, ty.start[i] + ty.count[i]);
   }
-  const rows = Math.max(0, rowHi - rowLo);
-  // Horizontal pass: rows × outW.
-  const mid = new Float32Array(rows * outW * channels);
-  for (let r = 0; r < rows; r++) {
-    const srcRow = (rowLo + r) * srcW * channels;
-    const midRow = r * outW * channels;
-    for (let i = 0; i < outW; i++) {
-      const s = tx.start[i];
-      const n = tx.count[i];
-      const wo = i * tx.maxTaps;
-      const o = midRow + i * channels;
-      for (let c = 0; c < channels; c++) {
-        let acc = 0;
-        let p = srcRow + s * channels + c;
-        for (let k = 0; k < n; k++, p += channels) acc += src[p] * tx.weights[wo + k];
-        mid[o + c] = acc;
-      }
-    }
-  }
-  // Vertical pass.
-  const out = new Float32Array(outW * outH * channels);
-  const rowLen = outW * channels;
-  for (let j = 0; j < outH; j++) {
-    const s = ty.start[j] - rowLo;
-    const n = ty.count[j];
-    const wo = j * ty.maxTaps;
-    const o = j * rowLen;
-    for (let k = 0; k < n; k++) {
-      const w = ty.weights[wo + k];
-      const m = (s + k) * rowLen;
-      for (let x = 0; x < rowLen; x++) out[o + x] += mid[m + x] * w;
-    }
-  }
-  return out;
+  return { lo: lo === Infinity ? 0 : lo, hi };
 }
 
-/** Resamples `rect` of an RGBA image to outW × outH (alpha forced opaque). */
+/**
+ * Resamples `rect` (continuous source coords; taps past the edges are
+ * dropped and the rest renormalized) of an RGBA image to outW × outH.
+ * Shrinking is antialiased; enlarging is Catmull-Rom bicubic. Alpha is
+ * forced opaque. Two separable passes with all four channels per tap.
+ */
 export function resampleRGBA(img: ImageDataLike, rect: Rect, outW: number, outH: number): ImageDataLike {
-  const f = resampleChannels(img.data, img.width, img.height, 4, rect, outW, outH);
+  const src = img.data;
+  const srcW = img.width;
+  const tx = computeTaps(srcW, rect.x, rect.w, outW);
+  const ty = computeTaps(img.height, rect.y, rect.h, outH);
+  const { lo, hi } = rowSpan(ty, outH);
+  const rows = Math.max(0, hi - lo);
+  const rowLen = outW * 4;
+  // Horizontal pass → rows × outW × RGB (alpha dropped).
+  const mid = new Float32Array(rows * rowLen);
+  const txw = tx.weights;
+  const txs = tx.start;
+  const txc = tx.count;
+  const txm = tx.maxTaps;
+  for (let r = 0; r < rows; r++) {
+    const srcRow = (lo + r) * srcW * 4;
+    let o = r * rowLen;
+    for (let i = 0; i < outW; i++, o += 4) {
+      const n = txc[i];
+      const wo = i * txm;
+      let p = srcRow + txs[i] * 4;
+      let ar = 0;
+      let ag = 0;
+      let ab = 0;
+      for (let k = 0; k < n; k++, p += 4) {
+        const w = txw[wo + k];
+        ar += src[p] * w;
+        ag += src[p + 1] * w;
+        ab += src[p + 2] * w;
+      }
+      mid[o] = ar;
+      mid[o + 1] = ag;
+      mid[o + 2] = ab;
+    }
+  }
+  // Vertical pass, one output row at a time into a float accumulator.
   const data = new Uint8ClampedArray(outW * outH * 4);
-  for (let i = 0; i < data.length; i++) data[i] = f[i]; // Uint8ClampedArray clamps & rounds
-  for (let i = 3; i < data.length; i += 4) data[i] = 255;
+  const acc = new Float32Array(rowLen);
+  for (let j = 0; j < outH; j++) {
+    acc.fill(0);
+    const n = ty.count[j];
+    const wo = j * ty.maxTaps;
+    const s0 = ty.start[j] - lo;
+    for (let k = 0; k < n; k++) {
+      const w = ty.weights[wo + k];
+      const m = (s0 + k) * rowLen;
+      for (let x = 0; x < rowLen; x++) acc[x] += mid[m + x] * w;
+    }
+    const o = j * rowLen;
+    for (let x = 0; x < rowLen; x += 4) {
+      data[o + x] = acc[x]; // Uint8ClampedArray clamps & rounds
+      data[o + x + 1] = acc[x + 1];
+      data[o + x + 2] = acc[x + 2];
+      data[o + x + 3] = 255;
+    }
+  }
   return { width: outW, height: outH, data };
 }
 
 /** Resamples `rect` of a single-channel image to outW × outH. */
 export function resampleGray(img: GrayImage, rect: Rect, outW: number, outH: number): GrayImage {
-  const f = resampleChannels(img.data, img.width, img.height, 1, rect, outW, outH);
+  const src = img.data;
+  const srcW = img.width;
+  const tx = computeTaps(srcW, rect.x, rect.w, outW);
+  const ty = computeTaps(img.height, rect.y, rect.h, outH);
+  const { lo, hi } = rowSpan(ty, outH);
+  const rows = Math.max(0, hi - lo);
+  const mid = new Float32Array(rows * outW);
+  for (let r = 0; r < rows; r++) {
+    const srcRow = (lo + r) * srcW;
+    const o = r * outW;
+    for (let i = 0; i < outW; i++) {
+      const n = tx.count[i];
+      const wo = i * tx.maxTaps;
+      const p = srcRow + tx.start[i];
+      let a = 0;
+      for (let k = 0; k < n; k++) a += src[p + k] * tx.weights[wo + k];
+      mid[o + i] = a;
+    }
+  }
   const data = new Uint8Array(outW * outH);
-  for (let i = 0; i < data.length; i++) {
-    const v = f[i];
-    data[i] = v <= 0 ? 0 : v >= 255 ? 255 : Math.round(v);
+  const acc = new Float32Array(outW);
+  for (let j = 0; j < outH; j++) {
+    acc.fill(0);
+    const n = ty.count[j];
+    const wo = j * ty.maxTaps;
+    const s0 = ty.start[j] - lo;
+    for (let k = 0; k < n; k++) {
+      const w = ty.weights[wo + k];
+      const m = (s0 + k) * outW;
+      for (let x = 0; x < outW; x++) acc[x] += mid[m + x] * w;
+    }
+    const o = j * outW;
+    for (let x = 0; x < outW; x++) {
+      const v = acc[x];
+      data[o + x] = v <= 0 ? 0 : v >= 255 ? 255 : Math.round(v);
+    }
   }
   return { width: outW, height: outH, data };
 }

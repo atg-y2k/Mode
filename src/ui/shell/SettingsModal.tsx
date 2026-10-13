@@ -47,7 +47,7 @@ import { ZONE_SOURCE_LABELS } from '../../site/format';
 import { useInvasivesReady, useZipLookup } from '../../site/hooks';
 import { coordsOf, locationForUserZone, locationForZip } from '../../site/location';
 import { SiteSection } from '../../site/ui/SiteSection';
-import { lookupZip, normalizeZip } from '../../site/zip';
+import { lookupZip, normalizeZip, ZONE_SOURCE_NOTE } from '../../site/zip';
 import * as db from '../../state/persistence';
 import { useStore, type StudioState } from '../../state/store';
 import { Badge, Button, Field, Modal, Segmented, TextArea, TextInput, cn } from '../common';
@@ -372,8 +372,9 @@ function ZoneSourceLine({ location, zipUnknown }: { location: ProjectLocation; z
     <p className="flex items-start gap-1.5 text-xs text-muted">
       <Info className="mt-0.5 size-3.5 shrink-0 text-subtle" aria-hidden />
       <span>
-        Zone {location.hardinessZone}: {ZONE_SOURCE_LABELS[location.zoneSource]}
-        {location.zoneSource === 'zip-table' && '. Read at the ZIP centre — hilly or coastal spots can differ by half a zone.'}
+        {location.zoneSource === 'zip-table'
+          ? `Zone ${location.hardinessZone} from your ZIP. ${ZONE_SOURCE_NOTE} It’s read at the ZIP centre — hilly or coastal spots can differ by half a zone.`
+          : `Zone ${location.hardinessZone}: ${ZONE_SOURCE_LABELS[location.zoneSource].toLowerCase()}.`}
       </span>
     </p>
   );

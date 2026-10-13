@@ -81,3 +81,18 @@ export {
   deerPressureLabel,
   type FrostSummary,
 } from './format';
+
+/** Keeping project.location consistent when the ZIP or coordinates change. */
+export {
+  coordsOf,
+  coordsSourceOf,
+  distanceKm,
+  locationForUserZone,
+  locationForZip,
+  photosWithGps,
+  withCoords,
+  type LatLon,
+} from './location';
+
+/** React hooks: invasive list readiness (for memoized ratings) and as-you-type ZIP lookup. */
+export { useInvasivesReady, useZipLookup, type ZipLookupState } from './hooks';

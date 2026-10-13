@@ -6,7 +6,7 @@
  * photoreal variations.
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Blocks, Crosshair, ImagePlus, Lightbulb, Loader2, Minus, Plus, ScanSearch, Sparkles, Sprout, WandSparkles } from 'lucide-react';
+import { Blocks, Crosshair, ImagePlus, Lightbulb, Loader2, Minus, Plus, ScanSearch, Sparkles, WandSparkles } from 'lucide-react';
 import type { DesignBrief, ElementType, IdeaItem, Photo, Project, SceneMap, Space } from '../../../../shared/types';
 import { elementsForSetting } from '../../../assets/design';
 import { useStore } from '../../../state/store';
@@ -15,10 +15,13 @@ import { useSceneJob } from '../../shell/sceneJobs';
 import { Button, EmptyState, IconButton, PanelHeader, Section, Segmented, TextArea, Toggle } from '../../common';
 import { generationBlocker } from '../generate';
 import { addElement, clearZoneFocus, editBrief, generateBrief, mapScene, openRunGrid, typeBrief } from './actions';
-import { PLANT_MATURITY_OPTIONS, hasCustomIdeas, includedIdeaIds, isBriefEmpty, resetIdeas, toggleIdea, toggleTargetZone } from './briefOps';
+import { hasCustomIdeas, includedIdeaIds, isBriefEmpty, resetIdeas, toggleIdea, toggleTargetZone } from './briefOps';
 import { useStudioContext } from './context';
 import { ElementCard } from './ElementCard';
+import { growthExamples, type GrowthExample } from './growth';
+import { GrowthSlider } from './GrowthSlider';
 import { elementIcon } from './icons';
+import { SuggestedEditChips } from './SuggestedEditChips';
 import { BlobImage, Callout, Chip, ClimateCallout } from './ui';
 import { isDesignZone } from './zones';
 
@@ -102,6 +105,16 @@ function BriefComposer({
         subtitle="Compose your idea from design elements, then generate photoreal variations of your photo."
       />
 
+      <SuggestedEditChips
+        photo={photo}
+        scene={scene}
+        brief={brief}
+        setting={setting}
+        onAdded={(id) => {
+          if (id) scrollTarget.current = id;
+        }}
+      />
+
       <ClimateCallout setting={setting} className="mx-4 mt-4" />
 
       <Section
@@ -125,6 +138,7 @@ function BriefComposer({
                 setting={setting}
                 expanded={activeElementId === el.id}
                 targetZoneIds={brief.targetZoneIds}
+                plantMaturity={brief.plantMaturity}
                 index={i}
                 count={brief.elements.length}
               />
@@ -138,7 +152,7 @@ function BriefComposer({
 
       {setting === 'exterior' && (
         <Section title="Plants">
-          <PlantMaturity photoId={photo.id} value={brief.plantMaturity} />
+          <PlantMaturity photoId={photo.id} brief={brief} />
         </Section>
       )}
 
@@ -311,23 +325,20 @@ function AreasSection({ photo, scene, brief }: { photo: Photo; scene: SceneMap |
 
 // ---------------------------------------------------------------------------
 
-function PlantMaturity({ photoId, value }: { photoId: string; value: DesignBrief['plantMaturity'] }) {
-  const hint = PLANT_MATURITY_OPTIONS.find((o) => o.value === value)?.hint;
+/** Plant growth for the whole brief, with rough heights of the plants chosen in its elements. */
+function PlantMaturity({ photoId, brief }: { photoId: string; brief: DesignBrief }) {
+  const examples = useMemo(() => {
+    const byName = new Map<string, GrowthExample>();
+    for (const el of brief.elements) for (const ex of growthExamples(el, el.dimensions, 3)) byName.set(ex.name, ex);
+    return [...byName.values()].sort((a, b) => b.heights[2] - a.heights[2]).slice(0, 3);
+  }, [brief.elements]);
   return (
-    <div className="flex flex-col gap-2">
-      <p className="flex items-center gap-1.5 text-xs font-medium text-muted">
-        <Sprout className="size-3.5 text-success" aria-hidden />
-        Show new plants as
-      </p>
-      <Segmented
-        size="sm"
-        className="w-full"
-        value={value}
-        onChange={(v) => editBrief(photoId, (b) => void (b.plantMaturity = v))}
-        options={PLANT_MATURITY_OPTIONS.map((o) => ({ value: o.value, label: o.label, title: o.hint }))}
-      />
-      {hint && <p className="text-[11px] text-subtle">{hint}</p>}
-    </div>
+    <GrowthSlider
+      label="Show new plants as"
+      value={brief.plantMaturity}
+      examples={examples}
+      onChange={(v) => editBrief(photoId, (b) => void (b.plantMaturity = v))}
+    />
   );
 }
 

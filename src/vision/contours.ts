@@ -306,3 +306,45 @@ export function maskContours(grid: GridLike, opts: ContourOptions = {}): Pt[][] 
 export function largestContour(grid: GridLike, opts: ContourOptions = {}): Pt[] {
   return maskContours(grid, { ...opts, maxRings: 1 })[0] ?? [];
 }
+
+/**
+ * One polygon for a mask with several significant parts (a lawn split by the
+ * walk): each part's outer ring, joined to the others by zero-width "keyhole"
+ * bridges between their closest vertices. Even-odd filling and point-in-
+ * polygon tests are unaffected by the bridges (they are traversed twice), so
+ * every part stays inside the zone's outline. Parts smaller than `minShare`
+ * of the mask's area are dropped; at most `maxParts` are kept.
+ */
+export function zonePolygon(grid: GridLike, opts: ContourOptions & { minShare?: number; maxParts?: number } = {}): Pt[] {
+  const threshold = opts.threshold ?? 128;
+  let total = 0;
+  for (let i = 0; i < grid.data.length; i++) if (grid.data[i] >= threshold) total++;
+  if (total === 0) return [];
+  const minArea = Math.max(opts.minArea ?? 1, total * (opts.minShare ?? 0.08));
+  const rings = maskContours(grid, { ...opts, minArea, maxRings: opts.maxParts ?? 6 });
+  return joinRings(rings);
+}
+
+/** Joins clockwise rings into one keyhole polygon (largest first, then nearest). */
+export function joinRings(rings: readonly Pt[][]): Pt[] {
+  const usable = rings.filter((r) => r.length >= 3);
+  if (usable.length === 0) return [];
+  let shape = usable[0].map((p) => ({ ...p }));
+  const rest = usable.slice(1);
+  while (rest.length) {
+    // The ring closest to the shape so far, and the closest vertex pair.
+    let best = { r: 0, i: 0, j: 0, d: Infinity };
+    rest.forEach((ring, r) => {
+      for (let i = 0; i < shape.length; i++) {
+        for (let j = 0; j < ring.length; j++) {
+          const d = (shape[i].x - ring[j].x) ** 2 + (shape[i].y - ring[j].y) ** 2;
+          if (d < best.d) best = { r, i, j, d };
+        }
+      }
+    });
+    const ring = rest.splice(best.r, 1)[0];
+    const rotated = [...ring.slice(best.j), ...ring.slice(0, best.j)];
+    shape = [...shape.slice(0, best.i + 1), ...rotated, { ...rotated[0] }, { ...shape[best.i] }, ...shape.slice(best.i + 1)];
+  }
+  return shape;
+}

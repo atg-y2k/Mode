@@ -30,33 +30,26 @@ import {
   Upload,
   X,
 } from 'lucide-react';
-import { useEffect, useRef, useState, type DragEvent, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type DragEvent, type MouseEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import type { HandoffPack } from '../../../../shared/types';
-import { chatgptDeepLink, GEMINI_APP_URL } from '../../../handoff';
+import { CHATGPT_URL, chatgptDeepLink, GEMINI_APP_URL } from '../../../handoff';
 import { downloadBlob } from '../../../lib/imageImport';
 import { useStore } from '../../../state/store';
 import { cn } from '../../common';
-import { useBlobUrl } from '../hooks';
+import { useBlobUrl, useElementSize } from '../hooks';
 import { importBlobs, openHandoff, openStaging, retryPrepare, skipPlanned, switchPendingApp } from './actions';
 import { AlignmentBadge, AppIcon, useFlash } from './bits';
-import { eventWindow, openAppTab, writeImage, writeText } from './clipboard';
+import { clipboardAvailable, eventWindow, openAppTab, writeImage, writeText } from './clipboard';
 import { BUSY_DAY, countToday, recordHandoff, useHandoffLog, usageHint } from './log';
+import { usePendingHandoffs } from './hooks';
+import { ClipboardOffer } from './ImportLayer';
 import { ensurePack, packBlob, packPng, warmPack } from './pack';
-import { appLabel, otherApp, projectPendingHandoffs, sameRef, type PendingItem } from './planned';
+import { appLabel, otherApp, sameRef, type PendingItem } from './planned';
 import { closeCompanionPip, openCompanionPip, pipSupported } from './pip';
 import { TEMPORARY_CHAT_KEY, setToggle, useToggle, WATCH_DOWNLOADS_KEY } from './prefs';
-import { setHandoffSession, useHandoffSession } from './session';
+import { handoffSession, setHandoffSession, useHandoffSession } from './session';
 import { dragLooksImportable, transferImages } from './sources';
-
-const CHATGPT_HOME = 'https://chatgpt.com/';
-
-/** Pending hand-offs of the project (active photo first), re-rendering on change. */
-export function usePendingHandoffs(): PendingItem[] {
-  const project = useStore((s) => s.project);
-  const photoId = useStore((s) => s.selection.photoId);
-  return projectPendingHandoffs(project, photoId);
-}
 
 function notify(message: string, kind: 'info' | 'success' | 'error' = 'info') {
   useStore.getState().notify(message, kind);
@@ -86,7 +79,7 @@ function Step({ n, done, title, children }: { n: number; done?: boolean; title: 
   );
 }
 
-function SmallButton({ onClick, icon, children, title, done }: { onClick: (e: React.MouseEvent<HTMLButtonElement>) => void; icon: ReactNode; children: ReactNode; title?: string; done?: boolean }) {
+function SmallButton({ onClick, icon, children, title, done }: { onClick: (e: MouseEvent<HTMLButtonElement>) => void; icon: ReactNode; children: ReactNode; title?: string; done?: boolean }) {
   return (
     <button
       type="button"
@@ -103,14 +96,14 @@ function SmallButton({ onClick, icon, children, title, done }: { onClick: (e: Re
   );
 }
 
-/** Drop / paste / pick zone for the returned image. */
-function ResultDrop({ busy, message, compact }: { busy: boolean; message?: string; compact?: boolean }) {
+/** Drop / paste / pick zone for the returned image (always visible at the bottom of the companion). */
+function ResultDrop({ busy, message, highlight }: { busy: boolean; message?: string; highlight?: boolean }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [over, setOver] = useState(false);
   const depth = useRef(0);
   const onDrop = (e: DragEvent) => {
+    // preventDefault marks the drop as handled for the Studio-wide drop target around the card.
     e.preventDefault();
-    e.stopPropagation();
     depth.current = 0;
     setOver(false);
     void transferImages(e.dataTransfer)
@@ -134,28 +127,28 @@ function ResultDrop({ busy, message, compact }: { busy: boolean; message?: strin
       }}
       onDrop={onDrop}
       className={cn(
-        'flex flex-col items-center justify-center gap-1.5 rounded-xl border-2 border-dashed text-center transition-colors',
-        compact ? 'px-3 py-3' : 'px-3 py-4',
-        over ? 'border-accent bg-accent-soft' : 'border-line-strong bg-surface-2/50',
+        'flex min-h-14 items-center gap-2.5 rounded-xl border-2 border-dashed px-3 py-2 transition-colors',
+        over ? 'border-accent bg-accent-soft' : highlight ? 'border-accent/60 bg-accent-soft/50' : 'border-line-strong bg-surface-2/50',
       )}
     >
       {busy ? (
         <span className="flex items-center gap-2 text-xs font-medium text-text">
-          <Loader2 className="size-4 animate-spin text-accent" />
+          <Loader2 className="size-4 shrink-0 animate-spin text-accent" />
           {message ?? 'Lining the result up with your photo…'}
         </span>
       ) : (
         <>
-          <ImageUp className={cn('size-5', over ? 'text-accent' : 'text-muted')} />
-          <span className="text-xs leading-snug text-muted">
-            <span className="font-medium text-text">Drop the result here</span> or paste it (⌘V / Ctrl+V)
+          <ImageUp className={cn('size-5 shrink-0', over || highlight ? 'text-accent' : 'text-muted')} />
+          <span className="min-w-0 flex-1 text-xs leading-snug text-muted">
+            <span className="block font-medium text-text">Drop the result here</span>
+            or paste it anywhere (⌘V / Ctrl+V)
           </span>
           <button
             type="button"
             onClick={() => inputRef.current?.click()}
-            className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs font-medium text-accent hover:bg-accent-soft"
+            className="inline-flex h-8 shrink-0 items-center gap-1 rounded-lg border border-line bg-surface px-2 text-xs font-medium text-text hover:bg-surface-2"
           >
-            <Upload className="size-3.5" /> Choose file…
+            <Upload className="size-3.5" /> File…
           </button>
           <input
             ref={inputRef}
@@ -204,7 +197,7 @@ function DownloadsWatch() {
 // Active item
 // ---------------------------------------------------------------------------
 
-function ActiveItem({ item, variant }: { item: PendingItem; variant: 'inline' | 'pip' }) {
+function ActiveItem({ item, onSent }: { item: PendingItem; onSent: (sent: boolean) => void }) {
   const job = useHandoffSession((s) => s.jobs[item.plannedId]);
   const error = useHandoffSession((s) => s.errors[item.plannedId]);
   const studioApp = useStore((s) => s.studio.handoffApp);
@@ -221,7 +214,6 @@ function ActiveItem({ item, variant }: { item: PendingItem; variant: 'inline' | 
   const markedThumb = useBlobUrl(pack?.markedImageId);
   const staged = planned.status === 'staged';
   const preparing = job?.kind === 'preparing' || (!pack && !error && !staged);
-  const importing = job?.kind === 'importing';
 
   // Prepare lazily when shown (also after a reload); warm the PNG so the copy click finds it ready.
   useEffect(() => {
@@ -231,26 +223,37 @@ function ActiveItem({ item, variant }: { item: PendingItem; variant: 'inline' | 
       .catch(() => undefined); // shown as the item's error
   }, [item.plannedId, pack?.cleanImageId, app, staged, error]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => setOpened(false), [item.plannedId]);
+  useEffect(() => setOpened(false), [item.plannedId, app]);
+  useEffect(() => onSent(opened), [opened, onSent]);
 
   const deepLink = pack && app === 'chatgpt' ? chatgptDeepLink(pack.prompt, { temporary }) : null;
+  // Clipboard images need a secure context (https or localhost) — e.g. not Mode opened over plain http from a phone.
+  const canCopy = clipboardAvailable(window);
+  const appUrl = app === 'chatgpt' ? (deepLink ?? (temporary ? `${CHATGPT_URL}?temporary-chat=true` : CHATGPT_URL)) : GEMINI_APP_URL;
 
   /** Clipboard write first (synchronously, PNG as a promise), then the app tab — no await before write(). */
-  const copyAndOpen = (e: React.MouseEvent<HTMLButtonElement>) => {
+  const copyAndOpen = (e: MouseEvent<HTMLButtonElement>) => {
     if (!pack) return;
     const win = eventWindow(e);
+    if (!canCopy) {
+      openAppTab(win, appUrl);
+      recordHandoff(app, planned.id);
+      setOpened(true);
+      void download();
+      return;
+    }
     const copy = writeImage(win, packPng(pack.markedImageId));
-    openAppTab(win, app === 'chatgpt' ? (deepLink ?? (temporary ? `${CHATGPT_HOME}?temporary-chat=true` : CHATGPT_HOME)) : GEMINI_APP_URL);
+    openAppTab(win, appUrl);
     recordHandoff(app, planned.id);
     setOpened(true);
     copy.then(flashPhoto, (err: Error) =>
-      notify(`Couldn't copy the photo (${err.message || 'clipboard refused'}). Use “Download photo” and attach the file in ${appLabel(app)}.`, 'error'),
+      notify(`Couldn't copy the photo (${err.message || 'clipboard refused'}). Use “Download” below and attach the file in ${appLabel(app)}.`, 'error'),
     );
   };
-  const copyImage = (e: React.MouseEvent<HTMLButtonElement>, id: string, done: () => void) => {
+  const copyImage = (e: MouseEvent<HTMLButtonElement>, id: string, done: () => void) => {
     writeImage(eventWindow(e), packPng(id)).then(done, (err: Error) => notify(`Couldn't copy the image: ${err.message || 'clipboard refused'}.`, 'error'));
   };
-  const copyPrompt = (e: React.MouseEvent<HTMLButtonElement>) => {
+  const copyPrompt = (e: MouseEvent<HTMLButtonElement>) => {
     if (!pack) return;
     writeText(eventWindow(e), pack.prompt).then(flashPrompt, () => notify("Couldn't copy the prompt — select it below and copy it by hand.", 'error'));
   };
@@ -267,7 +270,7 @@ function ActiveItem({ item, variant }: { item: PendingItem; variant: 'inline' | 
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-start gap-3">
-        <div className="relative h-16 w-20 shrink-0 overflow-hidden rounded-lg bg-surface-3">
+        <div className="relative h-14 w-16 shrink-0 overflow-hidden rounded-lg bg-surface-3">
           {markedThumb.url ? (
             <img src={markedThumb.url} alt="Marked photo" className="h-full w-full object-cover" draggable={false} />
           ) : (
@@ -328,9 +331,14 @@ function ActiveItem({ item, variant }: { item: PendingItem; variant: 'inline' | 
               className="inline-flex h-10 items-center justify-center gap-2 rounded-xl bg-accent px-3 text-sm font-semibold text-accent-fg shadow-sm transition-colors hover:bg-accent-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:opacity-50"
             >
               {preparing ? <Loader2 className="size-4 animate-spin" /> : copiedPhoto ? <Check className="size-4" /> : <ClipboardCopy className="size-4" />}
-              {preparing ? 'Preparing the photo…' : `Copy photo & open ${appLabel(app)}`}
+              {preparing ? 'Preparing the photo…' : `${canCopy ? 'Copy' : 'Save'} photo & open ${appLabel(app)}`}
               {!preparing && <ExternalLink className="size-3.5 opacity-70" />}
             </button>
+            {!canCopy && (
+              <span className="text-[11px] leading-snug text-warning">
+                Copying images needs https or localhost, so the photo is saved to your Downloads — attach it in {appLabel(app)} with + or drag it in.
+              </span>
+            )}
             {app === 'chatgpt' && (
               <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-muted">
                 <input type="checkbox" checked={temporary} onChange={(e) => setToggle(TEMPORARY_CHAT_KEY, e.target.checked)} className="accent-[var(--accent)]" />
@@ -361,21 +369,22 @@ function ActiveItem({ item, variant }: { item: PendingItem; variant: 'inline' | 
             n={3}
             title={
               app === 'gemini'
-                ? 'When the image is ready, use Download full size (right-click copy is only a small preview) and bring it back:'
-                : 'When the image is ready, download it (or Copy image) and bring it back:'
+                ? 'When the image is ready, use Download full size (right-click copy is only a small preview), then drop or paste it below.'
+                : 'When the image is ready, download it (or Copy image), then drop or paste it below.'
             }
-          >
-            <ResultDrop busy={importing} message={job?.message} compact={variant === 'pip'} />
-          </Step>
+          />
         </ol>
       )}
 
       {pack && !staged && (
         <div className="flex flex-col gap-2">
           <div className="flex flex-wrap gap-1.5">
-            <SmallButton onClick={copyPrompt} icon={<Copy className="size-3.5" />} done={copiedPrompt} title="The full prompt for this variation">
-              Copy prompt
-            </SmallButton>
+            {deepLink && (
+              // Without a prefill link the prompt button is already step 2.
+              <SmallButton onClick={copyPrompt} icon={<Copy className="size-3.5" />} done={copiedPrompt} title="The full prompt for this variation">
+                Copy prompt
+              </SmallButton>
+            )}
             <SmallButton onClick={(e) => copyImage(e, pack.markedImageId, flashMarked)} icon={<ClipboardCopy className="size-3.5" />} done={copiedMarked} title="The photo with the area outlined">
               Marked photo
             </SmallButton>
@@ -399,7 +408,11 @@ function ActiveItem({ item, variant }: { item: PendingItem; variant: 'inline' | 
             <p className="max-h-48 overflow-y-auto rounded-lg bg-surface-2 p-2.5 text-[11px] leading-relaxed whitespace-pre-wrap text-text select-text">{pack.prompt}</p>
           )}
           <ul className="flex flex-col gap-0.5 text-[11px] leading-snug text-muted">
-            <li>· A new chat for each variation keeps results clean.</li>
+            <li>
+              {item.generation.mode === 'compare'
+                ? '· Compare run: start every option in a new chat from this same photo — never from another option’s result.'
+                : '· A new chat for each variation keeps results clean.'}
+            </li>
             {app === 'gemini' ? (
               <li>· Pick a Pro / Thinking image model if you have one — not Flash-Lite.</li>
             ) : (
@@ -440,6 +453,8 @@ export function CompanionPanel({ variant, onCollapse }: { variant: 'inline' | 'p
   const today = countToday(log, app);
   const hint = usageHint(app, today);
   const other = otherApp(app);
+  const activeJob = active ? jobs[active.plannedId] : undefined;
+  const [sent, setSent] = useState(false);
 
   if (!active) {
     return (
@@ -480,64 +495,67 @@ export function CompanionPanel({ variant, onCollapse }: { variant: 'inline' | 'p
 
       <div className="scroll-thin flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-3.5 py-3">
         {items.length > 1 && (
-          <ul className="flex flex-col gap-0.5" aria-label="Waiting hand-offs">
-            {items.map((i) => {
+          <div className="flex flex-wrap items-center gap-1" role="list" aria-label="Hand-offs of this project">
+            {items.map((i, n) => {
               const selected = i === active;
               const busy = jobs[i.plannedId];
+              const status =
+                i.planned.status === 'staged' ? 'back — review it' : busy ? (busy.kind === 'importing' ? 'lining up…' : 'preparing…') : 'waiting';
               return (
-                <li key={`${i.generationId}:${i.plannedId}`}>
-                  <button
-                    type="button"
-                    onClick={() => openHandoff(i)}
-                    aria-current={selected ? 'true' : undefined}
-                    className={cn(
-                      'flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs transition-colors',
-                      selected ? 'bg-accent-soft text-text' : 'text-muted hover:bg-surface-2 hover:text-text',
-                    )}
-                  >
-                    <span
-                      className={cn(
-                        'size-2 shrink-0 rounded-full',
-                        i.planned.status === 'staged' ? 'bg-success' : busy ? 'animate-pulse bg-accent' : 'bg-line-strong',
-                      )}
-                      aria-hidden
-                    />
-                    <span className="min-w-0 flex-1 truncate font-medium">{i.planned.optionLabel || i.planned.title}</span>
-                    <span className="shrink-0 text-[10px]">
-                      {i.planned.status === 'staged' ? 'Review' : busy ? (busy.kind === 'importing' ? 'Lining up…' : 'Preparing…') : i.planned.handoff ? appLabel(i.planned.handoff.app) : 'Waiting'}
-                    </span>
-                  </button>
-                </li>
+                <button
+                  key={`${i.generationId}:${i.plannedId}`}
+                  type="button"
+                  role="listitem"
+                  onClick={() => openHandoff(i)}
+                  aria-current={selected ? 'true' : undefined}
+                  aria-label={`${i.planned.optionLabel || i.planned.title} — ${status}`}
+                  title={`${i.planned.optionLabel || i.planned.title} — ${status}`}
+                  className={cn(
+                    'relative inline-flex h-7 min-w-7 items-center justify-center gap-1 rounded-full px-2 text-[11px] font-semibold transition-colors',
+                    selected ? 'bg-accent text-accent-fg' : 'bg-surface-2 text-muted hover:text-text',
+                    busy && 'animate-pulse',
+                  )}
+                >
+                  {i.planned.status === 'staged' ? <ScanSearch className="size-3.5" /> : n + 1}
+                  {i.planned.status === 'staged' && (
+                    <span className="absolute -top-0.5 -right-0.5 size-2 rounded-full bg-success ring-2 ring-surface" aria-hidden />
+                  )}
+                </button>
               );
             })}
-          </ul>
+          </div>
         )}
 
-        <ActiveItem item={active} variant={variant} />
+        <ClipboardOffer variant="card" />
+        <ActiveItem item={active} onSent={setSent} />
+      </div>
 
-        <div className="flex flex-col gap-2 border-t border-line pt-3">
-          <DownloadsWatch />
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted">
-            {hint && <span>{hint}.</span>}
-            {waiting.length > 0 && (
-              <button
-                type="button"
-                onClick={() => switchPendingApp(other)}
-                className="inline-flex items-center gap-1 font-medium text-accent hover:underline"
-                title={`Prepare the ${waiting.length} waiting variation${waiting.length === 1 ? '' : 's'} for ${appLabel(other)} instead`}
-              >
-                <ArrowLeftRight className="size-3" />
-                {today >= BUSY_DAY ? `Hit a limit? Switch ${waiting.length} to ${appLabel(other)}` : `Switch waiting to ${appLabel(other)}`}
-              </button>
-            )}
-          </div>
+      <div className="flex shrink-0 flex-col gap-2 border-t border-line bg-surface px-3.5 pt-2.5 pb-3">
+        <ResultDrop busy={activeJob?.kind === 'importing'} message={activeJob?.message} highlight={sent} />
+        <DownloadsWatch />
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted">
+          {hint && <span>{hint}.</span>}
+          {waiting.length > 0 && (
+            <button
+              type="button"
+              onClick={() => switchPendingApp(other)}
+              className="inline-flex items-center gap-1 font-medium text-accent hover:underline"
+              title={`Prepare the ${waiting.length} waiting variation${waiting.length === 1 ? '' : 's'} for ${appLabel(other)} instead`}
+            >
+              <ArrowLeftRight className="size-3" />
+              {today >= BUSY_DAY ? `Hit a limit? Switch ${waiting.length} to ${appLabel(other)}` : `Switch waiting to ${appLabel(other)}`}
+            </button>
+          )}
         </div>
       </div>
     </div>
   );
 }
 
-/** Inline host: floating card / collapsed pill over the Studio, plus the PiP portal. */
+/** Below this size of the photo pane the open card floats over the window (bottom right / bottom sheet). */
+const FLOAT_BELOW = { width: 640, height: 560 };
+
+/** Inline host: card / collapsed pill over the Studio (floating over the window when the pane is small), plus the PiP portal. */
 export function CompanionDock() {
   const items = usePendingHandoffs();
   const companion = useHandoffSession((s) => s.companion);
@@ -546,27 +564,56 @@ export function CompanionDock() {
   const waiting = items.filter((i) => i.planned.status === 'awaiting-handoff').length;
   const back = items.length - waiting;
 
-  // Nothing pending: close the floating window.
+  // Nothing pending: close the floating window. Leaving the Studio closes it too (it renders from here).
   useEffect(() => {
     if (items.length === 0 && pip) closeCompanionPip();
   }, [items.length, pip]);
+  useEffect(
+    () => () => {
+      if (handoffSession().pip) closeCompanionPip();
+    },
+    [],
+  );
 
-  if (items.length === 0) return null;
+  // Opening a run side by side makes room: the card folds to its pill (opening a hand-off from the grid unfolds it).
+  const gridId = useStore((s) => s.studio.gridGenerationId);
+  useEffect(() => {
+    if (gridId && handoffSession().companion === 'open') setHandoffSession({ companion: 'collapsed' });
+  }, [gridId]);
+
+  // A short or narrow photo pane (phones, small laptop screens) can't hold the steps: the card floats over the window instead.
+  const paneRef = useRef<HTMLDivElement>(null);
+  const pane = useElementSize(paneRef);
+  const floating = pane.width > 0 && (pane.width < FLOAT_BELOW.width || pane.height < FLOAT_BELOW.height);
+
   const portal = pip && !pip.closed ? createPortal(<PipFrame />, pip.document.body) : null;
-  const open = companion === 'open' && !pip && !staging;
+  const open = items.length > 0 && companion === 'open' && !pip && !staging;
+  const card = (className: string) => (
+    <div
+      className={cn('flex flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-panel', className)}
+      role="dialog"
+      aria-label="Hand-off companion"
+      onPointerDown={(e) => e.stopPropagation()}
+    >
+      <CompanionPanel variant="inline" onCollapse={() => setHandoffSession({ companion: 'collapsed' })} />
+    </div>
+  );
 
   return (
     <>
+      <div ref={paneRef} className="pointer-events-none absolute inset-0" aria-hidden />
       {portal}
-      {open ? (
-        <div
-          className="absolute z-30 flex max-h-[calc(100%-1rem)] flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-panel max-sm:inset-x-2 max-sm:bottom-2 max-sm:max-h-[78%] sm:top-[3.75rem] sm:right-3 sm:bottom-16 sm:h-auto sm:max-h-[calc(100%-7.75rem)] sm:w-[22rem]"
-          role="dialog"
-          aria-label="Hand-off companion"
-          onPointerDown={(e) => e.stopPropagation()}
-        >
-          <CompanionPanel variant="inline" onCollapse={() => setHandoffSession({ companion: 'collapsed' })} />
-        </div>
+      {items.length === 0 ? null : open ? (
+        floating ? (
+          createPortal(
+            card(
+              'fixed z-40 right-4 bottom-4 w-[22rem] max-h-[min(42rem,calc(100dvh-2rem))] max-sm:inset-x-2 max-sm:w-auto max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom))] max-sm:max-h-[calc(100dvh-6rem)]',
+            ),
+            document.body,
+          )
+        ) : (
+          card('absolute z-30 top-[3.75rem] right-3 w-[22rem] max-h-[calc(100%-4.5rem)]')
+        )
       ) : (
         !staging && (
           <button
@@ -575,6 +622,7 @@ export function CompanionDock() {
             onPointerDown={(e) => e.stopPropagation()}
             className="absolute z-30 inline-flex h-9 items-center gap-2 rounded-full bg-accent pr-3 pl-2.5 text-xs font-semibold text-accent-fg shadow-lg transition-colors hover:bg-accent-hover max-sm:right-3 max-sm:bottom-3 sm:top-[3.75rem] sm:right-3"
             title={pip ? 'The hand-off card is floating in its own window' : 'Open the hand-off card'}
+            aria-label={`${waiting > 0 ? `${waiting} hand-off${waiting === 1 ? '' : 's'} waiting` : ''}${waiting > 0 && back > 0 ? ', ' : ''}${back > 0 ? `${back} back for review` : ''} — open the hand-off card`}
           >
             {pip ? <PictureInPicture2 className="size-4" /> : <ChevronDown className="size-4" />}
             {waiting > 0 ? `${waiting} hand-off${waiting === 1 ? '' : 's'} waiting` : `${back} back for review`}

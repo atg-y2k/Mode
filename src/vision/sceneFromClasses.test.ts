@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { Pt } from '../../shared/types';
 import { ADE } from './ade20k';
 import { pointInPolygon } from './prompts';
-import { buildOfflineScene, kindGrid, offlineCategory, offlineSummary, zonesFromClasses, type ClipMaps } from './sceneFromClasses';
+import { buildOfflineScene, componentLabels, kindGrid, offlineCategory, offlineSummary, zonesFromClasses, type ClipMaps } from './sceneFromClasses';
 import type { ClassMap } from './scoring';
 
 /**
@@ -25,6 +25,8 @@ function houseScene(): ClassMap {
   paint(0, 95, W, H, ADE.grass);
   paint(92, 95, 108, H, ADE.path);
   paint(2, 70, 22, 95, ADE.building); // neighbour, far left
+  paint(162, 88, 199, 98, ADE.wall); // low garden wall, right
+  paint(145, 22, 151, 30, ADE.building); // chimney sliver above the roof band
   return { width: W, height: H, labels };
 }
 
@@ -43,6 +45,9 @@ describe('zonesFromClasses', () => {
     expect(kinds).toContain('neighbor');
     expect(kinds.filter((k) => k === 'windows')).toHaveLength(2);
     expect(kinds.filter((k) => k === 'lawn')).toHaveLength(2);
+    expect(kinds).toContain('retaining-wall');
+    // The chimney sliver is not a second facade.
+    expect(kinds.filter((k) => k === 'facade')).toHaveLength(1);
 
     const sky = zones.find((z) => z.kind === 'sky')!;
     expect(sky.editable).toBe(false);
@@ -72,7 +77,7 @@ describe('zonesFromClasses', () => {
     const roof = new Float32Array(n);
     for (let y = 30; y < 50; y++) for (let x = 40; x < 160; x++) roof[y * classes.width + x] = 0.9;
     // Spill onto the sky must not become roof.
-    for (let y = 20; y < 30; y++) for (let x = 40; x < 160; x++) roof[y * classes.width + x] = 0.9;
+    for (let y = 20; y < 30; y++) for (let x = 60; x < 140; x++) roof[y * classes.width + x] = 0.9;
     const clip: ClipMaps = { width: classes.width, height: classes.height, probs: { roof } };
     const zones = zonesFromClasses(classes, photo, false, clip);
     const r = zones.find((z) => z.kind === 'roof');
@@ -99,6 +104,19 @@ describe('zonesFromClasses', () => {
 
   it('returns nothing for an empty class map', () => {
     expect(zonesFromClasses({ width: 0, height: 0, labels: new Uint8Array(0) }, photo, false)).toEqual([]);
+  });
+});
+
+describe('componentLabels', () => {
+  it('keeps the plain name for a dominant component and sides for the rest', () => {
+    expect(componentLabels('Facade', [{ area: 1000, cx: 100 }, { area: 50, cx: 180 }], 200)).toEqual(['Facade', 'Facade — right']);
+    expect(componentLabels('Lawn', [{ area: 500, cx: 30 }, { area: 400, cx: 170 }], 200)).toEqual(['Lawn — left', 'Lawn — right']);
+    expect(componentLabels('Windows', [{ area: 10, cx: 10 }, { area: 10, cx: 20 }, { area: 10, cx: 190 }], 200)).toEqual([
+      'Windows — left',
+      'Windows — left 2',
+      'Windows — right',
+    ]);
+    expect(componentLabels('Sky', [{ area: 10, cx: 10 }], 200)).toEqual(['Sky']);
   });
 });
 

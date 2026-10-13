@@ -21,6 +21,7 @@
  */
 import { SPACE_TYPE_LABELS, spaceKindOf } from '../../shared/types';
 import type { DesignBrief, ElementType, HandoffApp, Pt, SceneMap, ScenePath, SceneZone, ZoneKind } from '../../shared/types';
+import { pointInPolygon } from '../engine/geometry';
 import type { Rect } from './resample';
 
 /** Hard ceiling for a hand-off prompt (URL-safe for the ChatGPT prefill link). */
@@ -50,6 +51,8 @@ export interface PromptContext {
   place?: string;
   /** Extra hard requirements for the change ("It must still lead from the driveway to the front door."). */
   constraints?: string[];
+  /** The change is about a door or window itself (keep "other" openings). Guessed from the change text when omitted. */
+  openingsInTarget?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -109,18 +112,21 @@ export function splitSentences(text: string): string[] {
     .filter(Boolean);
 }
 
-// Sentences of a plan instruction that the hand-off template already says (better, in the app's own phrasing).
+// Generic sentences of a plan instruction that the hand-off template already says (in the app's own
+// phrasing). Specific requirements ("Keep the lavender low, under the sills", "keep the lamp post")
+// are part of the change and stay.
 const BOILERPLATE: RegExp[] = [
-  /^(keep|preserve|maintain|retain|leave)\b/i,
-  /^(do not|don't|never)\s+(change|alter|modify|move|crop|zoom|add (any )?(text|people))/i,
   /\b(camera (position|angle)|framing|aspect ratio|perspective and lens)\b/i,
+  /\b(time of day|sun direction|daylight from the windows)\b/i,
+  /\b(house|room|home)['’]s architecture\b/i,
+  /\beverything (else|outside)\b/i,
   /^photo-?realistic\b/i,
-  /^(new (materials|finishes)[^.]*\b(sit|follow)\b)/i,
+  /^new (materials|finishes)\b[^.]*\b(sit|follow)\b/i,
   /^add no (text|people)/i,
+  /^(do not|don't|never)\s+(crop|zoom|add (any )?(text|people))/i,
   /^(return|output) (one|a|the)\b/i,
   /^show (the )?plants\b/i,
   /^change only\b/i,
-  /^everything (else|outside)\b/i,
   /\bedges blend naturally\b/i,
 ];
 
@@ -172,9 +178,15 @@ const HOUSE_NOUN = /\b(house|home|bungalow|cottage|cabin|villa|townhouse|townhom
 const ROOM_NOUN = /\b(room|kitchen|bath|bathroom|bedroom|office|hallway|entryway|basement|laundry|nursery|den|study|foyer|loft|space|suite)$/i;
 const YARD_PLACES = /^(front yard|backyard|back yard|side yard|garden|patio|deck|pool area|driveway)$/i;
 
+/** A style label short enough for the opening sentence: up to the first comma / "with", ≤ 6 words. */
+function shortStyle(style: string): string {
+  const head = stripTrailingPunct(style).split(/,|;|\s+with\s+|\s+—\s+|\s+-\s+|\(/i)[0].trim();
+  return head.split(/\s+/).slice(0, 6).join(' ');
+}
+
 /** "my 1950s ranch house", "the backyard of my Craftsman bungalow", "my kitchen". */
 export function subjectPhrase(style: string, interior: boolean, place?: string): string {
-  const s = stripTrailingPunct(style);
+  const s = shortStyle(style);
   const pl = place ? lowerFirst(stripTrailingPunct(place)) : '';
   if (interior) {
     if (s && ROOM_NOUN.test(s)) return `my ${lowerFirstStyle(s)}`;
@@ -231,6 +243,11 @@ export function mentionsPlants(text: string): boolean {
   return PLANT_WORDS.test(text);
 }
 
+/** A change sentence acting on a door / window ("paint the front door navy", "add black shutters"). */
+const OPENING_CHANGE = /\b(replace|paint|repaint|swap|change|add|install|remove|stain|refinish|new)\b[^.]{0,40}?\b(doors?|windows?|shutters?)\b/i;
+
+const OPENING_KINDS = new Set<ZoneKind>(['front-door', 'garage-door', 'windows', 'door', 'window']);
+
 const EDGING_WORDS = /\b(edg(e|es|ing)|border(s|ed)?|curb(s|ing)?|kerb|trim|outline)\b/i;
 
 // ---------------------------------------------------------------------------
@@ -286,7 +303,7 @@ function chatgptTemplate(s: Slots): string {
   lines.push(`MATCH THE PHOTO: ${s.light}; same white balance, exposure, contrast, sharpness and grain; ${groundPhrase(s.interior)}.`);
   if (s.color) {
     lines.push(
-      `The ${s.color} outline is only a selection marker: remove it completely and do not add any border, edging or line along it${s.edgingInChange ? ' beyond what the change above describes' : ''}.`,
+      `The ${s.color} outline is only a selection marker: remove it completely and do not add any border, edging or line along it${s.edgingInChange ? ' (the only edging is the one the change describes)' : ''}.`,
     );
   }
   lines.push('Do not change anything else.');
@@ -302,12 +319,12 @@ function geminiTemplate(s: Slots): string {
     : `every${s.openingsTargeted ? ' other' : ''} door and window stays where it is with the same size and shape`;
   if (s.color) {
     paras.push(
-      `Using the provided photo of ${s.subject}, change only ${s.area}, which is marked with a ${s.color} outline. ${changeBody} ` +
+      `Using the provided photo of ${s.subject}${s.refs.length ? ' (Image 1)' : ''}, change only ${s.area}, which is marked with a ${s.color} outline. ${changeBody} ` +
         `Keep everything else in the image exactly the same, preserving the original style, lighting and composition: leave ${keepList} untouched, ${openings}, and everything outside the outline remains exactly as it is.`,
     );
   } else {
     paras.push(
-      `Using the provided photo of ${s.subject}, make this change: ${changeBody} ` +
+      `Using the provided photo of ${s.subject}${s.refs.length ? ' (Image 1)' : ''}, make this change: ${changeBody} ` +
         `Preserve the original style, lighting and composition: leave ${keepList} untouched, and ${openings}.`,
     );
   }
@@ -315,7 +332,7 @@ function geminiTemplate(s: Slots): string {
     `Keep the same camera angle, framing and lens and the same ${s.ratio} aspect ratio, with the whole scene visible edge to edge and nothing cropped, zoomed or extended. ` +
       `The light should match the photo — ${s.light} — with the same color balance, exposure and sharpness, and ${groundPhrase(s.interior)}.` +
       (s.color
-        ? ` The ${s.color} outline is only a selection marker: remove it completely, so the finished photo shows no outline, border or line where it was${s.edgingInChange ? ' beyond what the change describes' : ''}.`
+        ? ` The ${s.color} outline is only a selection marker: remove it completely, so the finished photo shows no outline, border or line where it was${s.edgingInChange ? ' (the only edging is the one the change describes)' : ''}.`
         : ''),
   );
   if (s.refs.length) paras.push(refSentencesGemini(s.refs));
@@ -345,16 +362,17 @@ export function buildHandoffPrompt(ctx: PromptContext): string {
     subject: subjectPhrase(ctx.style, ctx.interior, ctx.place),
     area: truncateWords(stripTrailingPunct(ctx.areaText) || 'the outlined area', 200),
     extras: extrasParts.join(' '),
-    light: truncateWords(lowerFirst(stripTrailingPunct(ctx.light)) || defaultLight(ctx.interior), 180),
+    light: truncateWords(lowerFirst(stripTrailingPunct(ctx.light).replace(/\s*;\s*/g, ', ')) || defaultLight(ctx.interior), 180),
     ratio: clean(ctx.ratio) || 'original',
     color,
     refs,
     interior: ctx.interior,
     edgingInChange: EDGING_WORDS.test(change),
-    openingsTargeted: /\b(door|doors|window|windows|shutters?)\b/i.test(`${ctx.areaText} ${change}`),
+    openingsTargeted: ctx.openingsInTarget ?? OPENING_CHANGE.test(change),
   };
   const render = ctx.app === 'gemini' ? geminiTemplate : chatgptTemplate;
   let keep = ctx.keep.map((k) => stripTrailingPunct(k)).filter(Boolean);
+  if (whole) keep = keep.map((k) => k.replace(/\s+(outside|beyond) the outline$/i, ''));
   keep = keep.filter((k, i) => keep.findIndex((o) => o.toLowerCase() === k.toLowerCase()) === i).map((k) => truncateWords(k, 90));
 
   let text = render({ ...base, change, keep });
@@ -434,7 +452,7 @@ const INTERIOR_ORDER: ZoneKind[] = [
 /** Generic keep phrase per zone kind (used when a kind has several zones or no usable label). */
 const KIND_PHRASE: Partial<Record<ZoneKind, string>> = {
   'front-door': 'the front door and its surround',
-  windows: 'every window (same number, size and position)',
+  windows: 'the windows',
   'garage-door': 'the garage door',
   roof: 'the roof and roofline',
   facade: "the house's walls, siding and colors",
@@ -458,7 +476,7 @@ const KIND_PHRASE: Partial<Record<ZoneKind, string>> = {
   mailbox: 'the mailbox',
   neighbor: 'the neighboring houses',
   street: 'the street',
-  window: 'every window and its trim',
+  window: 'the windows and their trim',
   door: 'the doors and openings',
   ceiling: 'the ceiling and its height',
   wall: 'the walls and their color',
@@ -566,6 +584,35 @@ function insideShare(a: Box, b: Box): number {
   const iy = Math.max(0, Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0));
   return (ix * iy) / Math.max(1, (a.x1 - a.x0) * (a.y1 - a.y0));
 }
+
+/** Share of points sampled along a path's centerline that fall inside `polygon`. */
+function shareOfRouteInside(path: Pick<ScenePath, 'points'>, polygon: readonly Pt[]): number {
+  const pts = path.points.filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+  if (pts.length === 0) return 0;
+  if (pts.length === 1) return pointInPolygon(pts[0], polygon) ? 1 : 0;
+  let inside = 0;
+  let total = 0;
+  for (let i = 1; i < pts.length; i++) {
+    for (let k = 0; k < 10; k++) {
+      const t = k / 10;
+      total++;
+      if (pointInPolygon({ x: pts[i - 1].x + (pts[i].x - pts[i - 1].x) * t, y: pts[i - 1].y + (pts[i].y - pts[i - 1].y) * t }, polygon)) inside++;
+    }
+  }
+  total++;
+  if (pointInPolygon(pts[pts.length - 1], polygon)) inside++;
+  return inside / total;
+}
+
+/** Significant words of a phrase (for matching keep-list items to visible zones). */
+function keyWords(text: string): string[] {
+  return (text.toLowerCase().match(/[a-z]{4,}/g) ?? []).filter((w) => !STOP_WORDS.has(w));
+}
+const STOP_WORDS = new Set([
+  ...['with', 'from', 'that', 'this', 'their', 'left', 'right', 'front', 'back', 'side', 'center', 'centre', 'middle', 'along', 'near', 'behind', 'there'],
+  ...['existing', 'mature', 'large', 'small', 'tall', 'wide', 'narrow', 'house', 'home', 'keep', 'original', 'painted'],
+  ...['black', 'white', 'gray', 'grey', 'brown', 'green', 'blue', 'cream', 'beige', 'navy', 'dark', 'light', 'pale', 'yellow', 'orange', 'purple', 'pink', 'silver', 'golden'],
+]);
 
 /** Ground zones a route (driveway → door) can run through. */
 const ROUTE_KINDS = new Set<ZoneKind>(['walkway', 'driveway', 'steps', 'patio', 'sidewalk']);
@@ -691,7 +738,7 @@ export function promptContextFromScene(
 
   // Keep list: routes first (driveway → door), then zones by kind priority, then the scene keep-list.
   const keep: string[] = [];
-  const routeTargets = targetZones.filter((z) => ROUTE_KINDS.has(z.kind)).map((z) => boxOf(z.polygon)).filter((b): b is Box => !!b);
+  const routeTargets = targetZones.filter((z) => ROUTE_KINDS.has(z.kind) && z.polygon.length >= 3);
   for (const p of scene.paths) {
     if (pathIds.has(p.id) || p.kind === 'suggested') continue;
     const box = pathBox(p);
@@ -699,10 +746,16 @@ export function promptContextFromScene(
     const route = routeWords(p);
     if (!route) continue;
     // A route running through a walkway / driveway being redesigned is a requirement of the change, not a keep item.
-    if (box && routeTargets.some((t) => insideShare(box, t) >= 0.4)) constraints.push(`It must still lead ${route}.`);
+    if (routeTargets.some((z) => shareOfRouteInside(p, z.polygon) >= 0.15)) constraints.push(`It must still lead ${route}.`);
     else keep.push(`the path ${route}`);
   }
   const targetPathBoxes = targetPaths.map(pathBox).filter((b): b is Box => !!b);
+  // Kinds the change is about: the targets, or for whole-image edits the kinds the instruction names.
+  const change = changeFromInstruction(extras.instruction || '');
+  const conflictKinds = whole ? (Object.keys(KIND_CONFLICT) as ZoneKind[]).filter((k) => KIND_CONFLICT[k]?.test(change)) : [...targetKinds];
+  const conflicts = conflictKinds.map((k) => KIND_CONFLICT[k]).filter((r): r is RegExp => !!r);
+  const cropped = view.w * view.h < 0.9 * frame.width * frame.height;
+  const visibleWords = new Set<string>();
   const order = interior ? INTERIOR_ORDER : EXTERIOR_ORDER;
   const byKind = new Map<ZoneKind, SceneZone[]>();
   for (const z of scene.zones) {
@@ -711,6 +764,9 @@ export function promptContextFromScene(
     if (!visibleIn(box, view)) continue;
     // The walkway a targeted path redraws is part of the change.
     if (box && ROUTE_KINDS.has(z.kind) && targetPathBoxes.some((t) => insideShare(box, t) >= 0.5)) continue;
+    for (const w of keyWords(`${z.label} ${z.description}`)) visibleWords.add(w);
+    // Whole-image edits: don't ask to keep what the instruction changes.
+    if (whole && conflictKinds.includes(z.kind)) continue;
     const list = byKind.get(z.kind) ?? [];
     list.push(z);
     byKind.set(z.kind, list);
@@ -729,11 +785,12 @@ export function promptContextFromScene(
       keep.push(generic);
     }
   }
-  const conflicts = [...targetKinds].map((k) => KIND_CONFLICT[k]).filter((r): r is RegExp => !!r);
   for (const item of scene.keep.slice(0, 6)) {
     const t = stripTrailingPunct(item);
     if (!t || t.length > 80) continue;
     if (conflicts.some((re) => re.test(t))) continue;
+    // In a crop, only name things that are actually in the picture (else the model may add them).
+    if (cropped && !keyWords(t).some((w) => visibleWords.has(w))) continue;
     keep.push(withArticle(t));
   }
 
@@ -745,6 +802,7 @@ export function promptContextFromScene(
   return {
     ...base,
     markerColorName: whole ? '' : extras.markerColorName,
+    openingsInTarget: (whole ? conflictKinds : [...targetKinds]).some((k) => OPENING_KINDS.has(k)),
     areaText,
     keep: keepItems,
     light,

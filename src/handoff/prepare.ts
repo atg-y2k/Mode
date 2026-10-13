@@ -19,7 +19,7 @@ import {
   bandBounds,
   compositeBand,
   distanceSquared,
-  isWholeTarget,
+  isWholeCoverage,
   markerGapExportPx,
   markerMarginPhotoPx,
   markerStroke,
@@ -284,78 +284,83 @@ export function chooseMarkerColor(img: ImageDataLike, rect?: Rect): MarkerColor 
 
 /**
  * Draws the outline-only marker (in place) on an export image covering
- * `crop` of the photo: the band (photo size) is sampled into the export, a
- * distance transform finds the pixels `gap` beyond its edge, and an
- * anti-aliased ring of ink with a 1 px dark halo on both sides is blended in.
+ * `crop` of the photo: a distance field to the band's edge (band ≥
+ * BAND_EDGE_THRESHOLD) is computed at photo resolution around the band,
+ * sampled bilinearly at export resolution, and an anti-aliased ring of ink
+ * with a 1 px dark halo on both sides is blended in `gap` beyond the edge.
  */
 export function drawMarker(exportImg: ImageDataLike, band: Mask, crop: Rect, color: MarkerColor): void {
   const { width: W, height: H, data } = exportImg;
-  const sx = crop.w / W;
+  const bounds = bandBounds(band);
+  if (!bounds) return;
+  const sx = crop.w / W; // photo px per export px
   const sy = crop.h / H;
   const scale = W / crop.w; // export px per photo px
-  // Band ≥ threshold, bilinear-sampled at export resolution (smooth contour).
-  const inside = new Uint8Array(W * H);
-  const bw = band.width;
-  const bh = band.height;
-  const bd = band.data;
-  for (let v = 0; v < H; v++) {
-    const py = crop.y + (v + 0.5) * sy - 0.5;
-    let y0 = Math.floor(py);
-    let fy = py - y0;
-    if (y0 < 0) {
-      y0 = 0;
-      fy = 0;
-    } else if (y0 >= bh - 1) {
-      y0 = bh - 1;
-      fy = 0;
-    }
-    const y1 = fy > 0 ? y0 + 1 : y0;
-    for (let u = 0; u < W; u++) {
-      const px = crop.x + (u + 0.5) * sx - 0.5;
-      let x0 = Math.floor(px);
-      let fx = px - x0;
-      if (x0 < 0) {
-        x0 = 0;
-        fx = 0;
-      } else if (x0 >= bw - 1) {
-        x0 = bw - 1;
-        fx = 0;
-      }
-      const x1 = fx > 0 ? x0 + 1 : x0;
-      const val =
-        bd[y0 * bw + x0] * (1 - fx) * (1 - fy) + bd[y0 * bw + x1] * fx * (1 - fy) + bd[y1 * bw + x0] * (1 - fx) * fy + bd[y1 * bw + x1] * fx * fy;
-      if (val >= BAND_EDGE_THRESHOLD) inside[v * W + u] = 1;
-    }
-  }
-  const dist2 = distanceSquared(W, H, (i) => inside[i] === 1);
   const { width: ink, halo } = markerStroke(Math.max(W, H));
   const gap = markerGapExportPx(scale);
-  const inkStart = gap + halo; // inner edge of the ink
+  const inkStart = gap + halo; // inner edge of the ink (export px from the band edge)
   const inkEnd = inkStart + ink;
   const outer = inkEnd + halo;
+  // Distance field (photo px) on the band bounds + ring reach.
+  const pad = Math.ceil((outer + 2) / Math.min(scale, H / crop.h)) + 2;
+  const bx0 = Math.max(0, bounds.x - pad);
+  const by0 = Math.max(0, bounds.y - pad);
+  const bx1 = Math.min(band.width, bounds.x + bounds.w + pad);
+  const by1 = Math.min(band.height, bounds.y + bounds.h + pad);
+  const fw = bx1 - bx0;
+  const fh = by1 - by0;
+  const bd = band.data;
+  const bw = band.width;
+  const d2 = distanceSquared(fw, fh, (i) => bd[(by0 + Math.floor(i / fw)) * bw + bx0 + (i % fw)] >= BAND_EDGE_THRESHOLD);
+  const field = new Float32Array(fw * fh);
+  for (let i = 0; i < field.length; i++) field[i] = Math.sqrt(d2[i]);
+  // Export pixels covering the field.
+  const u0 = Math.max(0, Math.floor((bx0 - crop.x) / sx));
+  const v0 = Math.max(0, Math.floor((by0 - crop.y) / sy));
+  const u1 = Math.min(W, Math.ceil((bx1 - crop.x) / sx));
+  const v1 = Math.min(H, Math.ceil((by1 - crop.y) / sy));
+  const lo = gap - 1;
+  const hi = outer + 1;
+  // Quick reject in photo px (a pixel's distance changes by ≤ 1.5 px within the bilinear cell).
+  const rejectLo = lo / scale - 2;
+  const rejectHi = hi / scale + 2;
   const cr = parseInt(color.hex.slice(1, 3), 16);
   const cg = parseInt(color.hex.slice(3, 5), 16);
   const cb = parseInt(color.hex.slice(5, 7), 16);
-  const lo2 = (gap - 1) * (gap - 1);
-  const hi2 = (outer + 1) * (outer + 1);
   const cover = (d: number, a: number, b: number) => Math.max(0, Math.min(1, d - a + 0.5, b - d + 0.5));
-  for (let i = 0; i < W * H; i++) {
-    const d2 = dist2[i];
-    if (d2 < lo2 || d2 > hi2) continue;
-    const d = Math.sqrt(d2);
-    const haloA = Math.max(cover(d, gap, inkStart), cover(d, inkEnd, outer)) * 0.75;
-    const inkA = cover(d, inkStart, inkEnd);
-    if (haloA <= 0 && inkA <= 0) continue;
-    const p = i * 4;
-    if (haloA > 0) {
-      data[p] = data[p] * (1 - haloA);
-      data[p + 1] = data[p + 1] * (1 - haloA);
-      data[p + 2] = data[p + 2] * (1 - haloA);
-    }
-    if (inkA > 0) {
-      data[p] = data[p] + (cr - data[p]) * inkA;
-      data[p + 1] = data[p + 1] + (cg - data[p + 1]) * inkA;
-      data[p + 2] = data[p + 2] + (cb - data[p + 2]) * inkA;
+  for (let v = v0; v < v1; v++) {
+    const fy = crop.y + (v + 0.5) * sy - 0.5 - by0;
+    if (fy < 0 || fy > fh - 1) continue;
+    const y0 = Math.floor(fy);
+    const ty = fy - y0;
+    const y1 = Math.min(fh - 1, y0 + 1);
+    for (let u = u0; u < u1; u++) {
+      const fx = crop.x + (u + 0.5) * sx - 0.5 - bx0;
+      if (fx < 0 || fx > fw - 1) continue;
+      const x0 = Math.floor(fx);
+      const near = field[y0 * fw + x0];
+      if (near < rejectLo || near > rejectHi) continue;
+      const tx = fx - x0;
+      const x1 = Math.min(fw - 1, x0 + 1);
+      const top = near + (field[y0 * fw + x1] - near) * tx;
+      const bottom = field[y1 * fw + x0] + (field[y1 * fw + x1] - field[y1 * fw + x0]) * tx;
+      // Distance to the band edge in export px (pixel-centre distances overshoot the edge by ~½ px).
+      const d = (top + (bottom - top) * ty - 0.5) * scale;
+      if (d < lo || d > hi) continue;
+      const haloA = Math.max(cover(d, gap, inkStart), cover(d, inkEnd, outer)) * 0.75;
+      const inkA = cover(d, inkStart, inkEnd);
+      if (haloA <= 0 && inkA <= 0) continue;
+      const p = (v * W + u) * 4;
+      if (haloA > 0) {
+        data[p] = data[p] * (1 - haloA);
+        data[p + 1] = data[p + 1] * (1 - haloA);
+        data[p + 2] = data[p + 2] * (1 - haloA);
+      }
+      if (inkA > 0) {
+        data[p] = data[p] + (cr - data[p]) * inkA;
+        data[p + 1] = data[p + 1] + (cg - data[p + 1]) * inkA;
+        data[p + 2] = data[p + 2] + (cb - data[p + 2]) * inkA;
+      }
     }
   }
 }
@@ -379,10 +384,14 @@ export interface RenderedHandoff {
   coverage: number;
 }
 
+/** Crops `rect` of an image and resizes it to w × h (pure resampler by default; the browser passes a canvas one). */
+export type Resizer = (img: ImageDataLike, rect: Rect, w: number, h: number) => ImageDataLike;
+
 export interface RenderOptions {
   app: HandoffApp;
   maxEdge?: number;
   fullFrame?: boolean;
+  resize?: Resizer;
 }
 
 /**
@@ -395,9 +404,10 @@ export function renderHandoff(image: ImageDataLike, target: Mask, opts: RenderOp
   if (target.width !== W || target.height !== H) {
     throw new Error(`prepareHandoff: mask ${target.width}×${target.height} does not match the photo ${W}×${H}`);
   }
-  const whole = isWholeTarget(target);
-  const coverage = whole ? 1 : maskCoverageShare(target);
-  const band = whole ? null : compositeBand(target);
+  const share = maskCoverageShare(target);
+  const whole = isWholeCoverage(share);
+  const coverage = whole ? 1 : share;
+  const band = whole ? null : compositeBand(target, share);
   const bounds = band ? bandBounds(band) : null;
   // Marker margin at the smallest export scale this photo can get (a full
   // frame at the crop edge): crops only enlarge more, so the marker always fits.
@@ -406,7 +416,7 @@ export function renderHandoff(image: ImageDataLike, target: Mask, opts: RenderOp
   const plan = planExport(W, H, bounds, coverage, opts.app, { fullFrame: opts.fullFrame, margin });
   const maxEdge = opts.maxEdge ?? (plan.mode === 'crop' ? CROP_MAX_EDGE : FULL_MAX_EDGE);
   const { outW, outH } = exportSize(plan.crop, maxEdge);
-  const clean = resampleRGBA(image, plan.crop, outW, outH);
+  const clean = (opts.resize ?? resampleRGBA)(image, plan.crop, outW, outH);
   const marked: ImageDataLike = { width: outW, height: outH, data: new Uint8ClampedArray(clean.data) };
   let markerColor = '';
   let colorName = '';
