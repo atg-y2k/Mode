@@ -511,7 +511,10 @@ function Thumb({ v, photo, active, caption, branches }: { v: Variation; photo: P
 }
 
 function RunStatus({ g }: { g: Generation }) {
-  if (g.status === 'awaiting') return <Badge tone="accent">Hand-off</Badge>;
+  if (g.status === 'awaiting') {
+    const { waiting, staged } = handoffCounts(g);
+    return <Badge tone="accent">{waiting ? `Hand-off · ${waiting}` : staged ? 'To review' : 'Hand-off'}</Badge>;
+  }
   if (g.status === 'failed') return <Badge tone="danger">Failed</Badge>;
   if (g.status === 'partial') return <Badge tone="warning">Partial</Badge>;
   return null;

@@ -18,11 +18,15 @@ export function formatMonthDay(md: string | undefined): string {
 }
 
 export interface FrostSummary {
-  /** "Apr 12" — median last spring frost. */
+  /** True when the nearest station records no freeze in a typical year (no dates, `headline` instead). */
+  frostFree?: boolean;
+  /** "Frost-free most years (HILO INTL AP, HI, 2 km)" — only for frost-free spots. */
+  headline?: string;
+  /** "Apr 12" — median last spring frost ('' when frost-free). */
   lastFrost: string;
   /** "1 in 10 years: Apr 28" */
   lastFrostLate?: string;
-  /** "Oct 21" — median first fall frost. */
+  /** "Oct 21" — median first fall frost ('' when frost-free). */
   firstFrost: string;
   /** "1 in 10 years: Oct 6" */
   firstFrostEarly?: string;
@@ -33,13 +37,24 @@ export interface FrostSummary {
 }
 
 export function frostSummary(frost: NonNullable<SiteProfile['frost']>): FrostSummary {
+  const sourceLine = `NOAA 1991–2020 normals · ${frost.station} (${formatDistanceKm(frost.distanceKm)})`;
+  if (frost.frostFree || (!frost.lastSpring50 && !frost.firstFall50)) {
+    // No 32 °F freeze in a typical year at the nearest station: there are no dates, not "no records".
+    return {
+      frostFree: true,
+      headline: `Frost-free most years (${frost.station}, ${formatDistanceKm(frost.distanceKm)})`,
+      lastFrost: '',
+      firstFrost: '',
+      sourceLine,
+    };
+  }
   return {
     lastFrost: formatMonthDay(frost.lastSpring50),
     lastFrostLate: frost.lastSpring90 ? `1 in 10 years: ${formatMonthDay(frost.lastSpring90)}` : undefined,
     firstFrost: formatMonthDay(frost.firstFall50),
     firstFrostEarly: frost.firstFall10 ? `1 in 10 years: ${formatMonthDay(frost.firstFall10)}` : undefined,
     season: frost.freeDays !== undefined ? `~${Math.round(frost.freeDays)} frost-free days` : undefined,
-    sourceLine: `NOAA 1991–2020 normals · ${frost.station} (${formatDistanceKm(frost.distanceKm)})`,
+    sourceLine,
   };
 }
 

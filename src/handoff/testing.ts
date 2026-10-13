@@ -95,6 +95,8 @@ export interface SimulateOptions {
   cast?: { gain: [number, number, number]; offset: [number, number, number] };
   /** Colour of the edit painted inside the target (stripes alternate with a darker shade). */
   editColor?: [number, number, number];
+  /** Leave the target as exported (the "app" returned the original — the wrong-image case). */
+  noEdit?: boolean;
   /** Extra change outside the target: a solid disc in photo px. */
   outsideChange?: { x: number; y: number; r: number; color: [number, number, number] };
   noise?: number;
@@ -131,7 +133,7 @@ export function simulateReturn(exportImg: ImageDataLike, crop: Rect, target: Mas
       const px = Math.floor(ph.x);
       const py = Math.floor(ph.y);
       const inPhoto = px >= 0 && py >= 0 && px < target.width && py < target.height;
-      if (inPhoto && target.data[py * target.width + px] > 128) {
+      if (!opts.noEdit && inPhoto && target.data[py * target.width + px] > 128) {
         const stripe = Math.floor((u + v) / 12) % 2 === 0 ? 1 : 0.75;
         d[p] = edit[0] * stripe;
         d[p + 1] = edit[1] * stripe;

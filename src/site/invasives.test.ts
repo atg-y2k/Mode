@@ -5,6 +5,7 @@ import {
   findInvasive,
   invasiveStatus,
   invasiveStatusSync,
+  invasiveCoverageNote,
   invasivesReady,
   loadInvasives,
   onInvasivesLoaded,
@@ -142,7 +143,8 @@ describe('verdicts', () => {
 
   it('distinguishes established (not invasive) and other localities', () => {
     expect(invasiveStatusSync('Lavandula angustifolia')).toMatchObject({ invasive: false, level: 1 });
-    expect(invasiveStatusSync('Lavandula angustifolia')?.note).toMatch(/not listed as invasive/);
+    expect(invasiveStatusSync('Lavandula angustifolia')?.note).toMatch(/not on the USGS US-RIIS v2.0 invasive list \(no state list available\)/);
+    expect(invasiveStatusSync('Lavandula angustifolia')?.note).not.toMatch(/not invasive/i);
     expect(invasiveStatusSync('Mentha piperita')).toMatchObject({ invasive: false, level: 0 });
     expect(invasiveStatusSync('Mentha piperita')?.note).toMatch(/invasive in Alaska/);
     expect(invasiveStatusSync('Mentha piperita', 'AK')).toMatchObject({ invasive: true, level: 2 });
@@ -156,9 +158,13 @@ describe('verdicts', () => {
     expect(invasiveStatusSync('Euonymus fortunei', 'HI')?.note).toBeUndefined();
   });
 
-  it('says "not listed" for parseable names and null for the rest', () => {
-    expect(invasiveStatusSync('Echinacea purpurea')).toEqual({ invasive: false, level: 0 });
+  it('says "not listed" (never "not invasive") for parseable names and null for the rest', () => {
+    expect(invasiveStatusSync('Echinacea purpurea')).toEqual({ invasive: false, listed: false, level: 0 });
+    expect(invasiveStatusSync('Berberis thunbergii')?.listed).toBe(true);
     expect(invasiveStatusSync('Hosta')).toBeNull();
+    expect(invasiveCoverageNote('HI')).toBe(
+      "Invasive flags come from USGS US-RIIS v2.0 (Hawaii). No state list available — check your state's invasive plant list too.",
+    );
   });
 
   it('is null until the list has loaded', () => {
@@ -181,9 +187,10 @@ describe('verdicts', () => {
   it('invasiveStatus (async contract) resolves from the cache; null when it cannot load', async () => {
     expect(await invasiveStatus('Lonicera japonica')).toEqual({
       invasive: true,
+      listed: true,
       note: expect.stringMatching(/Japanese honeysuckle/),
     });
-    expect(await invasiveStatus('Echinacea purpurea')).toEqual({ invasive: false });
+    expect(await invasiveStatus('Echinacea purpurea')).toEqual({ invasive: false, listed: false });
     setInvasivesData(null);
     expect(await loadInvasives()).toBe(false); // no page to fetch from in node
     expect(await invasiveStatus('Berberis thunbergii')).toBeNull();
@@ -204,10 +211,10 @@ describe('bundled public/data/invasives.json', () => {
     }
     expect(invasiveStatusSync("Pennisetum setaceum 'Rubrum'")?.invasive).toBe(true);
     expect(invasiveStatusSync('Buddleia davidii')?.invasive).toBe(true);
-    // Introduced but not invasive; natives aren't listed.
-    expect(invasiveStatusSync('Lavandula angustifolia')).toMatchObject({ invasive: false, level: 1 });
-    expect(invasiveStatusSync('Echinacea purpurea')).toEqual({ invasive: false, level: 0 });
-    expect(invasiveStatusSync('Ilex glabra')).toEqual({ invasive: false, level: 0 });
+    // Introduced but not invasive; natives aren't listed (no entry — not a verdict).
+    expect(invasiveStatusSync('Lavandula angustifolia')).toMatchObject({ invasive: false, listed: true, level: 1 });
+    expect(invasiveStatusSync('Echinacea purpurea')).toEqual({ invasive: false, listed: false, level: 0 });
+    expect(invasiveStatusSync('Ilex glabra')).toEqual({ invasive: false, listed: false, level: 0 });
   });
 
   it('has unique names and well-formed status digits', () => {

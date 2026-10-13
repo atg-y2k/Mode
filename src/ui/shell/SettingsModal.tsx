@@ -5,8 +5,10 @@
  *   (ZIP centre / photo GPS / exact), deer pressure, frost dates & soil
  *   (server site profile), native-plant link-outs, "Look up climate" (AI) →
  *   climate card, location notes.
- * - Image generation: default provider (from /api/health) and quality
- *   (store.studio.provider / quality, remembered on this device).
+ * - Images: hand-off (Gemini plan Free / Google AI plan, which photo the
+ *   main button copies, advanced per-app aspect ratios — localStorage, see
+ *   studio/handoff/prefs), default image-API provider (from /api/health) and
+ *   quality (store.studio.provider / quality, remembered on this device).
  * - Appearance: System / Light / Dark.
  * - AI & server: status, how to enable keys, server access token.
  * - Storage & data: usage, persistence, back up / import / delete project.
@@ -40,7 +42,8 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import type { ImageProviderId } from '../../../shared/api';
-import type { ClimateProfile, ProjectLocation } from '../../../shared/types';
+import type { ClimateProfile, HandoffApp, ProjectLocation } from '../../../shared/types';
+import { HANDOFF_RATIOS } from '../../handoff/prepare';
 import { ARCHITECTURAL_STYLES, DESIGN_THEMES } from '../../assets/design';
 import { fetchClimate } from '../../lib/studio';
 import { ZONE_SOURCE_LABELS } from '../../site/format';
@@ -50,6 +53,7 @@ import { SiteSection } from '../../site/ui/SiteSection';
 import { lookupZip, normalizeZip, ZONE_SOURCE_NOTE } from '../../site/zip';
 import * as db from '../../state/persistence';
 import { useStore, type StudioState } from '../../state/store';
+import { GEMINI_PLAN_KEY, PASTE_IMAGE_KEY, RATIOS_KEY_PREFIX, ratioOverride, setPref, useGeminiPlan, usePasteImage, usePref } from '../studio/handoff/prefs';
 import { Badge, Button, Field, Modal, Segmented, TextArea, TextInput, cn } from '../common';
 import { aiLevel, aiSummary, imageProvidersOf } from './AiStatus';
 import { errorText, formatBytes, isValidZip, normalizeZone, relativeTime } from './format';
@@ -452,6 +456,7 @@ function GenerationTab() {
 
   return (
     <>
+      <HandoffGroup />
       <Group title="Image provider" description="Which model renders photoreal variations. You can also switch per run in the Studio.">
         {providers.length === 0 ? (
           <div className="rounded-xl border border-dashed border-line-strong p-4 text-sm text-muted">
@@ -503,6 +508,113 @@ function GenerationTab() {
         <Check className="size-3.5" aria-hidden /> Remembered on this device for every project.
       </p>
     </>
+  );
+}
+
+/** Hand-off preferences (this device): Gemini plan, which photo to paste, advanced aspect ratios. */
+function HandoffGroup() {
+  const plan = useGeminiPlan();
+  const paste = usePasteImage();
+  return (
+    <Group
+      title="Hand-off to ChatGPT / Gemini"
+      description="Mode prepares the photo and the prompt; you paste them into your own ChatGPT or Gemini app and bring the picture back."
+    >
+      <PrefRow
+        label="Gemini plan"
+        hint={
+          plan === 'paid'
+            ? 'Inspiration images go along as references; after an image appears, More → Redo with Pro uses Nano Banana Pro.'
+            : `${plan ? '' : 'Not set — treated as Free. '}Free accounts may only get the Lite image model, which isn’t designed for editing photos: Mode warns, suggests ChatGPT and never attaches reference images.`
+        }
+      >
+        <Segmented<'free' | 'paid'>
+          value={plan ?? 'free'}
+          onChange={(v) => setPref(GEMINI_PLAN_KEY, v)}
+          options={[
+            { value: 'free', label: 'Free' },
+            { value: 'paid', label: 'Google AI plan' },
+          ]}
+          className="w-full sm:w-auto"
+        />
+      </PrefRow>
+      <PrefRow
+        label="Photo the main button copies"
+        hint={
+          paste === 'marked'
+            ? 'Recommended: the photo with the area outlined — the prompt tells the app to remove the outline, and Mode restores everything around it.'
+            : 'The photo without the outline — the prompt names the area in words only. “Marked photo” stays one click away in the hand-off card.'
+        }
+      >
+        <Segmented<'marked' | 'clean'>
+          value={paste}
+          onChange={(v) => setPref(PASTE_IMAGE_KEY, v === 'marked' ? null : v)}
+          options={[
+            { value: 'marked', label: 'Marked (recommended)' },
+            { value: 'clean', label: 'Clean' },
+          ]}
+          className="w-full sm:w-auto"
+        />
+      </PrefRow>
+      <details className="group rounded-xl border border-line px-3 py-2">
+        <summary className="cursor-pointer text-xs font-medium text-muted select-none hover:text-text">Advanced: aspect ratios each app returns</summary>
+        <div className="mt-3 flex flex-col gap-3 pb-1">
+          <p className="text-xs leading-relaxed text-muted">
+            The exported photo is snapped to one of these (by growing the crop, never squashing). Only change them after checking what your app really returns —
+            e.g. “1:1, 3:2, 2:3”. Leave empty for the defaults.
+          </p>
+          <RatioField app="chatgpt" label="ChatGPT" />
+          <RatioField app="gemini" label="Gemini" />
+        </div>
+      </details>
+    </Group>
+  );
+}
+
+/** A labelled preference row (a div, not a <label>: clicking the text must not press the first option). */
+function PrefRow({ label, hint, children }: { label: string; hint?: ReactNode; children: ReactNode }) {
+  return (
+    <div role="group" aria-label={label} className="flex flex-col gap-1.5 text-sm">
+      <span className="text-xs font-medium text-muted">{label}</span>
+      {children}
+      {hint && <span className="text-xs text-subtle">{hint}</span>}
+    </div>
+  );
+}
+
+function RatioField({ app, label }: { app: HandoffApp; label: string }) {
+  const stored = usePref(RATIOS_KEY_PREFIX + app) ?? '';
+  const [text, setText] = useState(stored);
+  useEffect(() => setText(stored), [stored]);
+  const parsed = ratioOverride(app, text);
+  const defaults = HANDOFF_RATIOS[app].map((r) => r.label).join(', ');
+  const commit = () => {
+    const value = ratioOverride(app, text);
+    setPref(RATIOS_KEY_PREFIX + app, value.length ? value.map((r) => r.label).join(', ') : null);
+  };
+  return (
+    <Field
+      label={label}
+      hint={
+        text.trim() && parsed.length === 0
+          ? 'Not understood — the defaults are used.'
+          : parsed.length
+            ? `Using ${parsed.map((r) => r.label).join(' · ')}`
+            : `Defaults: ${defaults.replace(/, /g, ' · ')}`
+      }
+    >
+      <TextInput
+        value={text}
+        placeholder={defaults}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') commit();
+        }}
+        aria-label={`${label} aspect ratios`}
+        spellCheck={false}
+      />
+    </Field>
   );
 }
 

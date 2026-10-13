@@ -8,6 +8,15 @@
  * come back as tag 17). It is imported on demand so it stays out of the main
  * bundle. exifr's own Blob reader needs FileReader (browser only), so the file
  * is read into an ArrayBuffer here — just the head for JPEGs, where EXIF lives.
+ *
+ * Verified against the bundled exifr 7.1.3 builds (C13; capture.test.ts with
+ * an iPhone-structured JPEG, __fixtures__/iphone-gps-heading.jpg):
+ * - `parse(file, { pick: [...] })` THROWS in the mini and lite builds (and in
+ *   the full build it drops GPSLongitudeRef, flipping western longitudes), so
+ *   the whole TIFF/EXIF/GPS block is parsed instead;
+ * - `exifr.gps()` returns only latitude/longitude — no heading;
+ * - the heading is read as `GPSImgDirection`, or tag 17 (0x0011) should a
+ *   build without dictionaries ever be used.
  */
 import type { PhotoCapture } from '../../shared/types';
 
@@ -82,7 +91,8 @@ export function captureFromTags(tags: Record<string, unknown> | null | undefined
     out.lat = Math.round(lat * 1e6) / 1e6;
     out.lon = Math.round(lon * 1e6) / 1e6;
   }
-  const heading = tags.GPSImgDirection;
+  // GPSImgDirection is GPS tag 0x0011 (17): the key exifr uses when it has no tag dictionary.
+  const heading = tags.GPSImgDirection ?? tags[17];
   if (finite(heading) && heading >= 0 && heading <= 360) out.headingDeg = Math.round((heading % 360) * 10) / 10;
 
   const parts = wallClock(tags.DateTimeOriginal ?? tags.CreateDate);

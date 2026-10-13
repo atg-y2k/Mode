@@ -122,8 +122,10 @@ describe('fetch helpers', () => {
 });
 
 describe('watchDownloads', () => {
-  function watchServer(opts: { on?: boolean; available?: boolean; fail?: Response } = {}) {
+  function watchServer(opts: { on?: boolean; available?: boolean; fail?: Response; ticket?: () => Response } = {}) {
+    let tickets = 0;
     return mockFetch((url, init) => {
+      if (url === API_PATHS.handoffEventsTicket && init?.method === 'POST') return opts.ticket?.() ?? json({ ticket: `T${++tickets}` });
       if (url === API_PATHS.handoffWatch && init?.method === 'POST') {
         if (opts.fail) return opts.fail.clone();
         const on = (JSON.parse(String(init.body)) as { on: boolean }).on;
@@ -134,16 +136,24 @@ describe('watchDownloads', () => {
     });
   }
 
-  it('turns watching on, then streams new files once each', async () => {
+  const watchPosts = (calls: Call[]) => calls.filter((c) => c.url === API_PATHS.handoffWatch && c.init?.method === 'POST');
+
+  it('turns watching on, then streams new files once each (with a single-use ticket, never the token, in the URL)', async () => {
     stubToken('tok en');
     const calls = watchServer();
     const files: DownloadedFile[] = [];
     const onError = vi.fn();
     const stop = watchDownloads((f) => files.push(f), onError, { EventSource: ES });
     await flush();
+    await flush();
     expect(JSON.parse(String(calls[0].init?.body))).toEqual({ on: true });
+    const ticketCall = calls.find((c) => c.url === API_PATHS.handoffEventsTicket);
+    expect(ticketCall?.init?.method).toBe('POST');
+    expect((ticketCall?.init?.headers as Record<string, string>)['x-mode-token']).toBe('tok en');
+    expect((ticketCall?.init?.headers as Record<string, string>)['Content-Type']).toBe('application/json');
     const es = lastSource();
-    expect(es.url).toBe(`${API_PATHS.handoffEvents}?token=tok+en`);
+    expect(es.url).toBe(`${API_PATHS.handoffEvents}?ticket=T1`);
+    expect(es.url).not.toContain('tok');
     es.emit('ready', { available: true, dir: '~/Downloads', on: true });
     es.emit('file', { id: 'a1', name: 'ChatGPT Image.png', size: 1234, mtime: 5 }, '1');
     es.emit('file', { id: 'a1', name: 'ChatGPT Image.png', size: 1234, mtime: 5 }, '1'); // replayed after a reconnect
@@ -160,7 +170,67 @@ describe('watchDownloads', () => {
     expect(off?.init?.keepalive).toBe(true);
     expect(onError).not.toHaveBeenCalled();
     stop(); // idempotent
-    expect(calls.filter((c) => c.init?.method === 'POST')).toHaveLength(2);
+    expect(watchPosts(calls)).toHaveLength(2);
+  });
+
+  it('without a token, opens the stream without a ticket', async () => {
+    const calls = watchServer();
+    watchDownloads(() => undefined, vi.fn(), { EventSource: ES });
+    await flush();
+    expect(lastSource().url).toBe(API_PATHS.handoffEvents);
+    expect(calls.some((c) => c.url === API_PATHS.handoffEventsTicket)).toBe(false);
+  });
+
+  it('fetches a fresh ticket for every re-created stream (the old one is used up)', async () => {
+    stubToken('tok');
+    const calls = watchServer();
+    watchDownloads(() => undefined, vi.fn(), { EventSource: ES, retryDelayMs: 1 });
+    await new Promise((r) => setTimeout(r, 5));
+    const first = lastSource();
+    expect(first.url).toBe(`${API_PATHS.handoffEvents}?ticket=T1`);
+    first.emit('ready', { available: true, on: true });
+    first.emit('file', { id: 'x', name: 'a.png', size: 1, mtime: 1 }, '4');
+    // The browser's own reconnect replays the used ticket: 401, so the stream closes.
+    first.fail(true);
+    await new Promise((r) => setTimeout(r, 20));
+    const second = lastSource();
+    expect(second).not.toBe(first);
+    expect(second.url).toBe(`${API_PATHS.handoffEvents}?ticket=T2&since=4`);
+    expect(calls.filter((c) => c.url === API_PATHS.handoffEventsTicket)).toHaveLength(2);
+  });
+
+  it('retries a ticket request while the server is down, and gives up on a refused token', async () => {
+    stubToken('tok');
+    let answer: () => Response = () => new Response('proxy error', { status: 502 });
+    watchServer({ ticket: () => answer() });
+    const onError = vi.fn();
+    watchDownloads(() => undefined, onError, { EventSource: ES, retryDelayMs: 1 });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(onError).not.toHaveBeenCalled();
+    expect(FakeEventSource.instances).toHaveLength(0);
+    answer = () => json({ error: { code: 'unauthorized', message: 'The access token was not accepted.' } }, 401);
+    await new Promise((r) => setTimeout(r, 80));
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0][0].message).toBe('The access token was not accepted.');
+    expect(FakeEventSource.instances).toHaveLength(0);
+  });
+
+  it('stopping while a ticket is on its way never opens a stream', async () => {
+    stubToken('tok');
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((r) => (release = r));
+    watchServer({ ticket: () => json({ ticket: 'late' }) });
+    const base = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === API_PATHS.handoffEventsTicket) await gate;
+      return base(url, init);
+    }));
+    const stop = watchDownloads(() => undefined, vi.fn(), { EventSource: ES });
+    await flush();
+    stop();
+    release();
+    for (let i = 0; i < 5; i++) await flush();
+    expect(FakeEventSource.instances).toHaveLength(0);
   });
 
   it('reports the server stopping (e.g. 30 minutes idle) once and closes the stream', async () => {
@@ -176,7 +246,7 @@ describe('watchDownloads', () => {
     expect(es.readyState).toBe(FakeEventSource.CLOSED);
     stop();
     await flush();
-    expect(calls.filter((c) => c.init?.method === 'POST')).toHaveLength(1); // no {on:false} after the server stopped
+    expect(watchPosts(calls)).toHaveLength(1); // no {on:false} after the server stopped
   });
 
   it('turns watching back on when a reconnect finds it off (server restarted)', async () => {

@@ -18,6 +18,8 @@ export interface OptionInput {
   plants?: PlantId[];
   /** 'all' = planted together (default); 'any' = alternatives for different conditions. */
   plantMode?: 'all' | 'any';
+  /** 'grow' = the choice changes the element's footprint (wider / curvier / larger): the target gets room beside it. */
+  footprint?: 'grow';
 }
 
 export interface DimensionInput {
@@ -48,7 +50,7 @@ export function buildElements(inputs: ElementInput[]): { defs: ElementDef[]; opt
     const dimensions = el.dimensions.map((dim): ElementDimension => {
       const options = dim.options.map((o): ElementOption => {
         if (o.plants && o.plants.length > 0) optionPlants.set(optionKey(el.type, dim.id, o.id), { plants: [...o.plants], mode: o.plantMode ?? 'all' });
-        return { id: o.id, label: o.label, description: o.description, promptText: o.promptText, visual: o.visual, rationale: o.rationale };
+        return { id: o.id, label: o.label, description: o.description, promptText: o.promptText, visual: o.visual, rationale: o.rationale, ...(o.footprint ? { footprint: o.footprint } : {}) };
       });
       const out: ElementDimension = { id: dim.id, label: dim.label, question: dim.question, options };
       if (dim.multiple) out.multiple = true;

@@ -47,6 +47,7 @@ vi.mock('../../../state/persistence', () => ({
   putMask: async () => undefined,
   getMask: async () => undefined,
   deleteMasks: async () => undefined,
+  generationOwnedIds: () => ({ blobIds: [], maskIds: [] }),
   saveLibrary: async () => undefined,
   saveProject: async () => undefined,
   projectMeta: (p: Project) => ({ id: p.id, name: p.name, updatedAt: p.updatedAt, createdAt: p.createdAt, spaceCount: 0, photoCount: 0 }),
@@ -261,6 +262,17 @@ describe('DesignPanel', () => {
     await waitFor(() => expect(startRun).toHaveBeenCalledWith({ photoId: 'pho_1', mode: 'variations' }));
   });
 
+  it('says a wider or curvier path gets room on the lawn beside it, and drops the note for the old footprint', () => {
+    render(<panels.DesignPanel />);
+    fireEvent.click(screen.getByRole('button', { name: 'Pathway' }));
+    // Defaults: gentle curve, 5 ft.
+    expect(screen.getByText(/Room to curve and widen: the lawn alongside the walk may change too/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('radio', { name: /StraightDirect, formal line/ }));
+    fireEvent.click(screen.getByRole('radio', { name: /Keep currentSame width as the walk today/ }));
+    expect(draft().elements[0].choices.width).toEqual(['keep-width']);
+    expect(screen.queryByText(/Room to curve and widen/)).toBeNull();
+  });
+
   it('compares options of one question on the photo', async () => {
     render(<panels.DesignPanel />);
     fireEvent.click(screen.getByRole('button', { name: 'Pathway' }));
@@ -338,6 +350,36 @@ describe('ScenePanel', () => {
     const mask = runtime.getMask(region.maskId)!;
     expect(mask.data[600 * 1200 + 600]).toBe(255);
     expect(mask.data[100 * 1200 + 100]).toBe(0);
+  });
+
+  it('questions the space type after a Claude map, never after an on-device guess', () => {
+    // Claude read the photo as a backyard while the space is a front yard: offer to change the space type.
+    useStore.getState().updateScene('pho_1', (sc) => void (sc.category = 'backyard'), {});
+    render(<panels.ScenePanel />);
+    expect(screen.getByText(/Mode reads this photo as a/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Make “Front yard” a backyard' })).toBeTruthy();
+    cleanup();
+    // The on-device map guesses from the class mix alone (CLIPSeg without SegFormer): no nagging.
+    useStore.getState().updateScene(
+      'pho_1',
+      (sc) => {
+        sc.category = 'garden';
+        sc.model = 'On-device (CLIPSeg, no AI)';
+      },
+      {},
+    );
+    render(<panels.ScenePanel />);
+    expect(screen.queryByText(/Mode reads this photo as a/)).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Make “Front yard” a/ })).toBeNull();
+  });
+
+  it('puts the on-device map first when AI is off', () => {
+    useStore.setState({ project: makeProject(false), health: { ok: true, ai: { enabled: false, model: null }, imageProvider: { enabled: false, name: null, model: null } } });
+    render(<panels.ScenePanel />);
+    const onDevice = screen.getByTestId('refine-section');
+    const title = screen.getByText('Map this photo');
+    expect(onDevice.compareDocumentPosition(title) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getAllByTestId('refine-section')).toHaveLength(1);
   });
 
   it('offers to map a photo without a scene', () => {
@@ -671,7 +713,7 @@ describe('Branching history', () => {
     window.addEventListener('mode:open-handoff', onOpen);
     try {
       render(<panels.HistoryPanel />);
-      expect(screen.getByText('2 waiting for hand-off')).toBeTruthy();
+      expect(screen.getByText('Waiting for hand-off · 2')).toBeTruthy();
       fireEvent.click(screen.getByRole('button', { name: 'Continue hand-off' }));
       expect(seen).toHaveBeenCalledWith({ generationId: 'gen_2' });
       expect(useHandoffSession.getState().active).toBeNull();

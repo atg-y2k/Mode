@@ -45,7 +45,7 @@ import type {
 } from './protocol';
 import { neighbourRole, polygonArea, zonePrompt } from './prompts';
 import { analysisSize, logitsToCoverage, logitsToLabels, logitsToProbs } from './resample';
-import { CLIP_PROMPTS, offlineCategory, zonesFromClasses, type ClipKey, type ClipMaps } from './sceneFromClasses';
+import { CLIP_ONLY_CLASSES, CLIP_PROMPTS, classMapFromClip, offlineCategory, zonesFromClasses, type ClipClass, type ClipKey, type ClipMaps } from './sceneFromClasses';
 import {
   MIN_REFINE_IOU,
   candidateScore,
@@ -473,15 +473,28 @@ async function ensureClassMap(photoId: string): Promise<ClassMap> {
 async function ensureClipMaps(photoId: string): Promise<ClipMaps> {
   const have = clipMaps.get(photoId);
   if (have) return have;
+  const keys = Object.keys(CLIP_PROMPTS) as ClipKey[];
+  const { width, height, planes } = await clipProbs(
+    photoId,
+    keys.map((k) => CLIP_PROMPTS[k]),
+    'Looking for roofs, drives and beds…',
+  );
+  const probs: ClipMaps['probs'] = {};
+  keys.forEach((k, i) => {
+    probs[k] = planes[i];
+  });
+  const maps: ClipMaps = { width, height, probs };
+  clipMaps.set(photoId, maps);
+  return maps;
+}
+
+/** CLIPSeg probabilities for a list of prompts on the analysis grid (one plane per prompt). */
+async function clipProbs(photoId: string, prompts: readonly string[], message: string): Promise<{ width: number; height: number; planes: Float32Array[] }> {
   const img = imageOf(photoId);
   return withModel('clipseg', async (m) => {
-    setStatus({ stage: 'encoding', backend: m.backend, message: 'Looking for roofs, drives and beds…' });
+    setStatus({ stage: 'encoding', backend: m.backend, message });
     const { model, processor, tokenizer } = m.clipseg!;
-    const keys = Object.keys(CLIP_PROMPTS) as ClipKey[];
-    const text = tokenizer(
-      keys.map((k) => CLIP_PROMPTS[k]),
-      { padding: true, truncation: true },
-    );
+    const text = tokenizer([...prompts], { padding: true, truncation: true });
     const pixels = await processor(img);
     const { logits } = (await model({ ...text, pixel_values: pixels.pixel_values } as never)) as { logits: Tensor };
     const dims = logits.dims;
@@ -489,14 +502,37 @@ async function ensureClipMaps(photoId: string): Promise<ClipMaps> {
     const lw = dims[dims.length - 1];
     const data = toFloat32(logits);
     const size = analysisSize(img.width, img.height);
-    const probs: ClipMaps['probs'] = {};
-    keys.forEach((k, i) => {
-      probs[k] = logitsToProbs(data, lw, lh, size.width, size.height, i * lw * lh);
-    });
-    const maps: ClipMaps = { width: size.width, height: size.height, probs };
-    clipMaps.set(photoId, maps);
-    return maps;
+    const planes = prompts.map((_, i) => logitsToProbs(data, lw, lh, size.width, size.height, i * lw * lh));
+    return { width: size.width, height: size.height, planes };
   });
+}
+
+/** Class-map cache key for a CLIPSeg-only map (kept apart from SegFormer's). */
+const clipOnlyKey = (photoId: string, interior: boolean) => `${photoId}#clip-${interior ? 'int' : 'ext'}`;
+const clipOnlyOverrides = new Lru<ClipMaps>(3);
+
+/**
+ * A class map from CLIPSeg prompts alone (the SegFormer licence was declined):
+ * each pixel takes its most likely prompt's ADE20K class, so the offline map
+ * pipeline runs unchanged. Exterior override planes (roof, driveway…) come
+ * from the same pass.
+ */
+async function ensureClipOnlyMap(photoId: string, interior: boolean): Promise<{ classes: ClassMap; clip?: ClipMaps }> {
+  const key = clipOnlyKey(photoId, interior);
+  const have = classMaps.get(key);
+  if (have) return { classes: have, clip: interior ? undefined : clipOnlyOverrides.get(key) };
+  const list: readonly ClipClass[] = interior ? CLIP_ONLY_CLASSES.interior : CLIP_ONLY_CLASSES.exterior;
+  const t0 = performance.now();
+  const { width, height, planes } = await clipProbs(
+    photoId,
+    list.map((c) => c.prompt),
+    interior ? 'Finding walls, floor, cabinets…' : 'Finding lawn, walls, roof, paths…',
+  );
+  const { classes, clip } = classMapFromClip(planes, list, width, height);
+  console.debug(`[vision] CLIPSeg-only map ${Math.round(performance.now() - t0)} ms (${list.length} prompts)`);
+  classMaps.set(key, classes);
+  if (!interior) clipOnlyOverrides.set(key, clip);
+  return { classes, clip: interior ? undefined : clip };
 }
 
 // ---------------------------------------------------------------------------
@@ -603,14 +639,17 @@ async function refineOne(photoId: string, zone: RefineZoneInput, context: Refine
  * settled before the big areas around them and can be cut out of them.
  * Results come back in the input order.
  */
-async function refine(id: number, photoId: string, zones: RefineZoneInput[], context: RefineZoneInput[]): Promise<RefineZoneResult[]> {
+async function refine(id: number, photoId: string, zones: RefineZoneInput[], context: RefineZoneInput[], semantic: boolean): Promise<RefineZoneResult[]> {
   imageOf(photoId);
   let classMap: ClassMap | null = null;
-  try {
-    classMap = await ensureClassMap(photoId);
-  } catch (err) {
-    // The semantic check is a bonus: sharpen without it.
-    console.warn('[vision] semantic check unavailable', err);
+  // Without SegFormer (licence declined) candidates are judged by outline overlap alone.
+  if (semantic) {
+    try {
+      classMap = await ensureClassMap(photoId);
+    } catch (err) {
+      // The semantic check is a bonus: sharpen without it.
+      console.warn('[vision] semantic check unavailable', err);
+    }
   }
   await ensureEmbeddings(photoId);
   const ctx = context.length ? context : zones;
@@ -634,8 +673,14 @@ async function refine(id: number, photoId: string, zones: RefineZoneInput[], con
 // Offline map / kind guess
 // ---------------------------------------------------------------------------
 
-async function offlineMap(photoId: string, interior: boolean): Promise<OfflineMapResult> {
+async function offlineMap(photoId: string, interior: boolean, semantic: boolean): Promise<OfflineMapResult> {
   const img = imageOf(photoId);
+  if (!semantic) {
+    // SegFormer licence declined: CLIPSeg prompts stand in for the semantic classes.
+    const { classes, clip } = await ensureClipOnlyMap(photoId, interior);
+    const zones = zonesFromClasses(classes, { width: img.width, height: img.height }, interior, clip);
+    return { zones, category: offlineCategory(classes, interior), usedClip: true, usedSegformer: false };
+  }
   const classes = await ensureClassMap(photoId);
   let clip: ClipMaps | undefined;
   if (!interior) {
@@ -646,12 +691,12 @@ async function offlineMap(photoId: string, interior: boolean): Promise<OfflineMa
     }
   }
   const zones = zonesFromClasses(classes, { width: img.width, height: img.height }, interior, clip);
-  return { zones, category: offlineCategory(classes, interior), usedClip: !!clip };
+  return { zones, category: offlineCategory(classes, interior), usedClip: !!clip, usedSegformer: true };
 }
 
 /** Zone kind of the dominant mapped class under a mask, from the cached class map (no model run). */
 function kindOf(photoId: string, mask: Mask, interior: boolean): string | null {
-  const classes = classMaps.get(photoId);
+  const classes = classMaps.get(photoId) ?? classMaps.get(clipOnlyKey(photoId, interior));
   if (!classes) return null;
   const counts = new Map<string, number>();
   let total = 0;
@@ -670,6 +715,16 @@ function kindOf(photoId: string, mask: Mask, interior: boolean): string | null {
   if (total === 0) return null;
   const [kind, n] = [...counts.entries()].sort((p, q) => q[1] - p[1])[0] ?? [null, 0];
   return kind && n / total >= 0.5 ? kind : null;
+}
+
+/** Drops every semantic map of a photo (SegFormer, CLIPSeg overrides, CLIPSeg-only maps). */
+function forgetClassMaps(photoId: string): void {
+  classMaps.delete(photoId);
+  clipMaps.delete(photoId);
+  for (const interior of [false, true]) {
+    classMaps.delete(clipOnlyKey(photoId, interior));
+    clipOnlyOverrides.delete(clipOnlyKey(photoId, interior));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -705,8 +760,7 @@ async function handle(req: WorkerRequest): Promise<{ data: unknown; transfer?: T
       images.set(req.photoId, rgba.rgb());
       lastClick = null;
       embeddings.delete(req.photoId);
-      classMaps.delete(req.photoId);
-      clipMaps.delete(req.photoId);
+      forgetClassMaps(req.photoId);
       return { data: true };
     }
     case 'encode':
@@ -717,19 +771,18 @@ async function handle(req: WorkerRequest): Promise<{ data: unknown; transfer?: T
       return { data: r, transfer: [r.mask.buffer] };
     }
     case 'refine': {
-      const results = await refine(req.id, req.photoId, req.zones, req.context);
+      const results = await refine(req.id, req.photoId, req.zones, req.context, req.semantic !== false);
       return { data: results, transfer: results.flatMap((r) => (r.mask ? [r.mask.buffer] : [])) };
     }
     case 'offlineMap':
-      return { data: await offlineMap(req.photoId, req.interior) };
+      return { data: await offlineMap(req.photoId, req.interior, req.semantic !== false) };
     case 'kindOf':
       return { data: kindOf(req.photoId, { width: req.width, height: req.height, data: req.mask }, req.interior) };
     case 'forget':
       lastClick = null;
       images.delete(req.photoId);
       embeddings.delete(req.photoId);
-      classMaps.delete(req.photoId);
-      clipMaps.delete(req.photoId);
+      forgetClassMaps(req.photoId);
       return { data: true };
   }
 }

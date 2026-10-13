@@ -33,6 +33,8 @@ export const RIIS_LEVEL_LABELS: Record<RiisLevel, string> = {
   3: 'widespread invasive',
 };
 export const RIIS_SOURCE = 'USGS US-RIIS v2.0';
+/** C11: a missing row is never "not invasive" — say what is missing instead. */
+export const NO_STATE_LIST = 'no state list available';
 
 /** Shape of public/data/invasives.json. */
 export interface InvasivesData {
@@ -66,6 +68,13 @@ export interface InvasiveMatch {
 export interface InvasiveVerdict {
   /** True when listed invasive (D2) or widespread invasive (E) in the locality. */
   invasive: boolean;
+  /**
+   * True when US-RIIS has a row for the name (or its species / a form). False
+   * means "no entry" — never a verdict that the plant is not invasive: US-RIIS
+   * is national/regional and Mode bundles no state lists (show "no state list
+   * available", or nothing).
+   */
+  listed: boolean;
   /** US-RIIS level of the matched name in the locality (0 for an infraspecific match). */
   level: RiisLevel;
   note?: string;
@@ -346,24 +355,33 @@ export function describeInvasive(m: InvasiveMatch, locality: Locality = 'L48'): 
     : undefined;
   if (m.match === 'infraspecific') {
     // Only varieties/subspecies are listed — not a verdict on the whole species.
-    return formNote ? { invasive: false, level: 0, match: m, note: formNote, formListed: true } : { invasive: false, level: 0, match: m };
+    return formNote
+      ? { invasive: false, listed: true, level: 0, match: m, note: formNote, formListed: true }
+      : { invasive: false, listed: true, level: 0, match: m };
   }
   const lvl = m.status[locality];
-  if (lvl < 2 && formNote) return { invasive: false, level: lvl, match: m, note: formNote, formListed: true };
+  if (lvl < 2 && formNote) return { invasive: false, listed: true, level: lvl, match: m, note: formNote, formListed: true };
   if (lvl >= 2) {
     const listed = `listed as ${lvl === 3 ? 'a widespread invasive' : 'invasive'} in ${where}`;
     const note =
       m.match === 'species'
         ? `${m.query} is a form of ${label(m)}, which is ${listed} (${RIIS_SOURCE})`
         : `${label(m)} is ${listed} (${RIIS_SOURCE}${m.match === 'synonym' ? `; also known as ${m.query}` : ''})`;
-    return { invasive: true, level: lvl, match: m, note };
+    return { invasive: true, listed: true, level: lvl, match: m, note };
   }
   if (lvl === 1) {
-    return { invasive: false, level: 1, match: m, note: `Introduced and established in ${where}, not listed as invasive (${RIIS_SOURCE})` };
+    return {
+      invasive: false,
+      listed: true,
+      level: 1,
+      match: m,
+      note: `Introduced and established in ${where}; not on the ${RIIS_SOURCE} invasive list (${NO_STATE_LIST})`,
+    };
   }
   const elsewhere = (Object.keys(m.status) as Locality[]).filter((l) => l !== locality && m.status[l] >= 2);
   return {
     invasive: false,
+    listed: true,
     level: 0,
     match: m,
     note: elsewhere.length
@@ -374,12 +392,23 @@ export function describeInvasive(m: InvasiveMatch, locality: Locality = 'L48'): 
 
 /**
  * Synchronous status: null until the list has loaded or when the name isn't a
- * parseable scientific name; `{ invasive: false }` when it isn't listed.
+ * parseable scientific name; `{ invasive: false, listed: false }` when US-RIIS
+ * has no entry — which is not "not invasive" (see InvasiveVerdict.listed).
  */
 export function invasiveStatusSync(botanical: string | null | undefined, locality: Locality = 'L48'): InvasiveVerdict | null {
   if (!index || !parseBotanical(botanical)) return null;
   const m = findInvasive(botanical);
-  return m ? describeInvasive(m, locality) : { invasive: false, level: 0 };
+  return m ? describeInvasive(m, locality) : { invasive: false, listed: false, level: 0 };
+}
+
+/**
+ * What the invasive check covers, for settings / plant cards. US-RIIS is
+ * national (lower 48, Alaska, Hawaii); the USDA PLANTS state lists cover only
+ * 12 states and Mode bundles none, so a plant without a flag is "not flagged",
+ * never "not invasive".
+ */
+export function invasiveCoverageNote(locality: Locality = 'L48'): string {
+  return `Invasive flags come from ${RIIS_SOURCE} (${LOCALITY_NAMES[locality]}). No state list available — check your state's invasive plant list too.`;
 }
 
 /**
@@ -390,9 +419,9 @@ export function invasiveStatusSync(botanical: string | null | undefined, localit
 export async function invasiveStatus(
   botanical: string,
   locality: Locality = 'L48',
-): Promise<{ invasive: boolean; note?: string } | null> {
+): Promise<{ invasive: boolean; listed: boolean; note?: string } | null> {
   await loadInvasives();
   const v = invasiveStatusSync(botanical, locality);
   if (!v) return null;
-  return v.note ? { invasive: v.invasive, note: v.note } : { invasive: v.invasive };
+  return v.note ? { invasive: v.invasive, listed: v.listed, note: v.note } : { invasive: v.invasive, listed: v.listed };
 }

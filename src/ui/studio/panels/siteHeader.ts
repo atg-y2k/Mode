@@ -88,12 +88,3 @@ export function siteHeader(location: ProjectLocation | undefined, spot: readonly
   const text = [zone ?? 'Zone unknown', sun ?? 'Sun not set', deer ?? 'Deer pressure unknown'].join(' · ');
   return { zone, sun, exposure, hours, deer, gaps, text };
 }
-
-/**
- * The feasibility context with the project's deer-pressure setting applied
- * (Settings wins over what the AI climate notes imply), so option ratings
- * agree with the header.
- */
-export function withSiteDeer(ctx: FeasibilityContext, location: ProjectLocation | undefined): FeasibilityContext {
-  return location?.deerPressure && ctx.deerPressure !== location.deerPressure ? { ...ctx, deerPressure: location.deerPressure } : ctx;
-}

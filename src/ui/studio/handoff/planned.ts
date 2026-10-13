@@ -4,7 +4,8 @@
  * returned files are assigned to them, and how a variation's provenance and
  * alignment read in the UI. No store access — unit-tested in node.
  */
-import type { AlignmentReport, Generation, HandoffApp, PlannedVariation, Photo, Project, VariationSource } from '../../../../shared/types';
+import type { AlignmentReport, DesignBrief, Generation, HandoffApp, PlannedVariation, Photo, Project, VariationSource } from '../../../../shared/types';
+import { growChoice } from '../maskFromZones';
 
 /** A planned item and where it lives. */
 export interface PlannedRef {
@@ -93,22 +94,27 @@ export function sameRef(a: PlannedRef | null | undefined, b: PlannedRef | null |
 }
 
 /**
- * Which pending items N returned files go to: the active item first (when it
- * is still pending), then the other items still waiting for a hand-off, in
- * order. A single file always goes to the active item (replacing a staged
- * result), else to the first waiting one.
+ * Which pending items N returned files go to. A single file goes to the
+ * active item (replacing its staged result when it is already back), else to
+ * the first waiting one. Several files fill only the items still waiting for
+ * a hand-off, in order — the active item first when it is waiting, then the
+ * rest of its run, then the other runs — so a result already back is never
+ * replaced (and the files never shift by one item). With nothing waiting, a
+ * file replaces the active (else the first) staged result.
  */
 export function assignTargets(items: readonly PendingItem[], active: PlannedRef | null, count: number): PendingItem[] {
   if (count <= 0) return [];
-  const first = active ? items.find((i) => sameRef(i, active)) : undefined;
+  const hit = active ? items.find((i) => sameRef(i, active)) : undefined;
+  // Several files fill the items still waiting; only a single file may replace a staged result.
+  const first = hit && (count === 1 || hit.planned.status === 'awaiting-handoff') ? hit : undefined;
   const awaiting = items.filter((i) => i.planned.status === 'awaiting-handoff' && i !== first);
   // Prefer the active item's run, then the rest.
-  const sameRun = first ? awaiting.filter((i) => i.generationId === first.generationId) : [];
+  const sameRun = hit ? awaiting.filter((i) => i.generationId === hit.generationId) : [];
   const others = awaiting.filter((i) => !sameRun.includes(i));
   const ordered = [...(first ? [first] : []), ...sameRun, ...others];
-  if (!first && ordered.length === 0) {
-    // Only staged items left: a new file replaces the first staged result.
-    const staged = items.find((i) => i.planned.status === 'staged');
+  if (ordered.length === 0) {
+    // Nothing waits: a new file replaces the active (else the first) staged result.
+    const staged = hit ?? items.find((i) => i.planned.status === 'staged');
     return staged ? [staged] : [];
   }
   return ordered.slice(0, count);
@@ -206,4 +212,49 @@ export function alignmentSummary(report: AlignmentReport, outsideAreas?: number)
     warn: false,
     suggestStricter: false,
   };
+}
+
+/**
+ * A result whose model changed things outside the area, for a brief with a
+ * footprint-changing choice (a wider or curvier path…): the new shape most
+ * likely ran past the area that may change — a stricter prompt won't fix
+ * that, letting the ground beside it change will. Null otherwise.
+ */
+export function footprintHint(
+  brief: DesignBrief,
+  report: AlignmentReport | undefined,
+  /** Whether the notable outside changes touch the run's area (unknown → assume they do). */
+  touchesArea = true,
+): { message: string; elementId: string } | null {
+  if (!report || brief.scope === 'whole' || report.outsideChanged < NOTICEABLE_SHARE || !touchesArea) return null;
+  const el = brief.elements.find((e) => growChoice(e) && (e.zoneIds.length > 0 || e.pathIds.length > 0));
+  if (!el) return null;
+  const noun = el.type === 'driveway' ? 'drive' : el.type === 'patio' ? 'patio' : 'path';
+  return { message: `The new ${noun} ran past the area that may change. Let the lawn beside it change and retry.`, elementId: el.id };
+}
+
+/**
+ * Whether any outside-change box lies at the edge of the run's area (its
+ * frozen zones and paths, room included): within ~3 % of the photo's long
+ * edge of their bounding box. Unknown (no snapshot / no boxes) → undefined.
+ */
+export function changesTouchArea(
+  blobs: readonly { x: number; y: number; w: number; h: number }[] | undefined,
+  target: Generation['target'],
+  photo: { width: number; height: number },
+): boolean | undefined {
+  if (!blobs || !target) return undefined;
+  const pts = [...target.zones, ...(target.room?.zones ?? [])].flatMap((z) => z.polygon);
+  const pad = 0.03 * Math.max(photo.width, photo.height);
+  const boxes = [
+    ...(pts.length ? [{ x0: Math.min(...pts.map((p) => p.x)), y0: Math.min(...pts.map((p) => p.y)), x1: Math.max(...pts.map((p) => p.x)), y1: Math.max(...pts.map((p) => p.y)) }] : []),
+    ...target.paths.map((p) => ({
+      x0: Math.min(...p.points.map((q) => q.x)) - p.widthPx,
+      y0: Math.min(...p.points.map((q) => q.y)) - p.widthPx,
+      x1: Math.max(...p.points.map((q) => q.x)) + p.widthPx,
+      y1: Math.max(...p.points.map((q) => q.y)) + p.widthPx,
+    })),
+  ];
+  if (!boxes.length) return undefined;
+  return blobs.some((b) => boxes.some((a) => b.x < a.x1 + pad && b.x + b.w > a.x0 - pad && b.y < a.y1 + pad && b.y + b.h > a.y0 - pad));
 }

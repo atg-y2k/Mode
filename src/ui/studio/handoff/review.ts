@@ -3,9 +3,10 @@
  * is handed off, the user sees Claude's plan, each variation's exact
  * instruction (editable), the marked preview and what stays protected, and
  * chooses Send or Edit. generate.ts opens the review when a run starts and
- * waits for the decision once the plan is ready; ReviewModal (mounted by
- * StudioView) registers itself as the host — without a host (tests, scripts)
- * runs skip the review.
+ * waits for the decision once the plan is ready; ReviewModal (mounted once by
+ * the Workspace whenever a project is open, on every pane and viewport)
+ * registers itself as the host — without a host (tests, scripts) runs skip
+ * the review.
  */
 import { create } from 'zustand';
 import type { HandoffApp, PlantNote } from '../../../../shared/types';

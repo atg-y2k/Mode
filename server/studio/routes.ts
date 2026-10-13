@@ -65,6 +65,7 @@ import {
   describeIdeaPrompt,
   elementOptionsPrompt,
   imageEditPrompt,
+  MAX_PROMPT_CHARS,
   planPrompt,
   recommendPrompt,
   scenePrompt,
@@ -142,7 +143,16 @@ function formatIssues(error: z.ZodError): string {
   return `Invalid request. ${parts.join('; ')}${more}`;
 }
 
+/**
+ * Parses and validates a JSON body. The Content-Type must be application/json
+ * (as createApp's CSRF guard also requires): a cross-site page can only send
+ * that after a CORS preflight, so a text/plain "simple request" from another
+ * site never reaches a Claude or image-provider call.
+ */
 async function readJson<S extends z.ZodType>(c: Context, schema: S): Promise<z.infer<S>> {
+  if ((c.req.header('content-type') ?? '').split(';')[0].trim().toLowerCase() !== 'application/json') {
+    throw new StudioError('bad_request', 'Send the request body as JSON (Content-Type: application/json).', 415);
+  }
   const length = Number(c.req.header('content-length') ?? '0');
   if (Number.isFinite(length) && length > MAX_BODY_BYTES) {
     throw new StudioError('payload_too_large', `The request is too large (limit ${Math.round(MAX_BODY_BYTES / (1024 * 1024))} MB). Try a smaller photo.`, 413);
@@ -156,6 +166,18 @@ async function readJson<S extends z.ZodType>(c: Context, schema: S): Promise<z.i
   const result = schema.safeParse(body);
   if (!result.success) throw badRequest(formatIssues(result.error));
   return result.data;
+}
+
+/**
+ * Backstop for the prompt budget: prompts.ts caps every list, but a request
+ * with very long entries could still add up. Refused before the rate limiter
+ * counts it and before Claude sees it.
+ */
+function boundedPrompt(text: string): string {
+  if (text.length > MAX_PROMPT_CHARS) {
+    throw new StudioError('payload_too_large', 'This request has too much text for one AI call. Remove some ideas or zones and try again.', 413);
+  }
+  return text;
 }
 
 function claudeImage(dataUrl: string): ImageData64 {
@@ -367,6 +389,7 @@ export function registerStudioRoutes<E extends Env>(app: Hono<E>, deps: StudioDe
       const req = await readJson(c, ElementOptionsRequestSchema);
       const client = requireClaude();
       const images = req.image ? [claudeImage(req.image)] : [];
+      const text = boundedPrompt(elementOptionsPrompt(req, TEXTURE_PATTERNS));
       await beforeAi(c);
       const system = await studioSystem();
       const d = deadline(c.req.raw.signal, STUDIO_DEADLINES_MS.elementOptions);
@@ -375,7 +398,7 @@ export function registerStudioRoutes<E extends Env>(app: Hono<E>, deps: StudioDe
         schema: ElementOptionsResultSchema,
         system,
         images,
-        text: elementOptionsPrompt(req, TEXTURE_PATTERNS),
+        text,
         effort: 'medium',
         ...callOptions(c, d),
       });
@@ -391,6 +414,7 @@ export function registerStudioRoutes<E extends Env>(app: Hono<E>, deps: StudioDe
       const req = await readJson(c, RecommendRequestSchema);
       const client = requireClaude();
       const image = claudeImage(req.image);
+      const text = boundedPrompt(recommendPrompt(req));
       await beforeAi(c);
       const system = await studioSystem();
       const d = deadline(c.req.raw.signal, STUDIO_DEADLINES_MS.recommend);
@@ -399,7 +423,7 @@ export function registerStudioRoutes<E extends Env>(app: Hono<E>, deps: StudioDe
         schema: RecommendResultSchema,
         system,
         images: [image],
-        text: recommendPrompt(req),
+        text,
         effort: 'high',
         ...callOptions(c, d),
       });
@@ -447,6 +471,7 @@ export function registerStudioRoutes<E extends Env>(app: Hono<E>, deps: StudioDe
         return c.json(finalizePlan(templatePlan(req, count), req));
       }
       const images = [claudeImage(req.image), ...req.ideaImages.map(claudeImage)];
+      const text = boundedPrompt(planPrompt(req, count));
       await beforeAi(c);
       const system = await studioSystem();
       const d = deadline(c.req.raw.signal, STUDIO_DEADLINES_MS.plan);
@@ -455,7 +480,7 @@ export function registerStudioRoutes<E extends Env>(app: Hono<E>, deps: StudioDe
         schema: PlanResultSchema,
         system,
         images,
-        text: planPrompt(req, count),
+        text,
         effort: 'high',
         ...callOptions(c, d),
       });

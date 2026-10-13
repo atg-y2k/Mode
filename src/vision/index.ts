@@ -2,9 +2,13 @@
  * Free in-browser vision (Transformers.js in a Web Worker, WebGPU when
  * available, else WASM) that makes the scene map precise without paid AI:
  * - EdgeTAM (onnx-community/EdgeTAM-ONNX, Apache-2.0): box + point prompts → exact masks;
- * - SegFormer-B2 ADE20K (Xenova/segformer-b2-finetuned-ade-512-512; NVIDIA
- *   non-commercial license — fine for personal use, flagged in the UI) for
- *   semantic validation and an offline scene map when Claude is not configured;
+ * - SegFormer-B2 ADE20K (Xenova/segformer-b2-finetuned-ade-512-512) for
+ *   semantic validation and an offline scene map when Claude is not
+ *   configured. Its weights are under the NVIDIA Source Code License
+ *   (§3.3: non-commercial, "research or evaluation purposes only"), so it is
+ *   opt-in (./license.ts): the summary is shown before its first use and,
+ *   when declined, sharpening validates by outline overlap only and the
+ *   offline map uses CLIPSeg prompts only;
  * - CLIPSeg (Xenova/clipseg-rd64-refined, Apache-2.0) for classes ADE20K lacks
  *   (roof, driveway, mulch bed, patio).
  * Models download on first use (progress reported) and are cached by the browser.
@@ -17,7 +21,8 @@ import type { Pt, SceneMap, SceneZone, ZoneKind } from '../../shared/types';
 import type { ImageDataLike, Mask } from '../engine/types';
 import { getPhotoImage } from '../state/runtime';
 import { largestContour } from './contours';
-import { formatMB, MODELS, modelBytes, TASK_MODELS, type Backend, type ModelKey, type VisionTask } from './models';
+import { segformerAllowed } from './license';
+import { formatMB, MODELS, modelBytes, taskModels, type Backend, type ModelKey, type VisionTask } from './models';
 import type { InitResult, OfflineMapResult, PromptInput, RefineZoneResult, SegmentResult, WorkerMessage, WorkerRequest, WorkerStatus } from './protocol';
 import { buildOfflineScene } from './sceneFromClasses';
 
@@ -330,15 +335,16 @@ export async function refineZonesDetailed(
   photoId: string,
   image: ImageDataLike,
   zones: SceneZone[],
-  opts: { context?: SceneZone[]; onProgress?: (done: number, total: number) => void } = {},
+  opts: { context?: SceneZone[]; onProgress?: (done: number, total: number) => void; semantic?: boolean } = {},
 ): Promise<Map<string, RefineDetail>> {
   const usable = zones.filter((z) => z.polygon.length >= 3);
   const out = new Map<string, RefineDetail>();
   if (usable.length === 0) return out;
   const strip = (z: SceneZone) => ({ id: z.id, kind: z.kind, polygon: z.polygon.map((p) => ({ x: p.x, y: p.y })) });
   const context = (opts.context ?? zones).filter((z) => z.polygon.length >= 3).map(strip);
+  const semantic = opts.semantic ?? segformerAllowed();
   const results = await withImage(photoId, image, () =>
-    call<RefineZoneResult[]>({ op: 'refine', photoId, zones: usable.map(strip), context }, [], opts.onProgress),
+    call<RefineZoneResult[]>({ op: 'refine', photoId, zones: usable.map(strip), context, semantic }, [], opts.onProgress),
   );
   for (const r of results) {
     out.set(r.zoneId, {
@@ -379,9 +385,9 @@ export async function refineZones(
  * roof (CLIPSeg), door, windows, fence, sky; interiors: wall, floor, ceiling,
  * cabinets, countertop, windows. Category guessed from the class mix.
  */
-export async function offlineSceneMap(photoId: string, image: ImageDataLike, interior: boolean): Promise<SceneMap> {
-  const r = await withImage(photoId, image, () => call<OfflineMapResult>({ op: 'offlineMap', photoId, interior }));
-  return buildOfflineScene(r.zones, r.category, r.usedClip);
+export async function offlineSceneMap(photoId: string, image: ImageDataLike, interior: boolean, semantic = segformerAllowed()): Promise<SceneMap> {
+  const r = await withImage(photoId, image, () => call<OfflineMapResult>({ op: 'offlineMap', photoId, interior, semantic }));
+  return buildOfflineScene(r.zones, r.category, r.usedClip, Date.now(), r.usedSegformer !== false);
 }
 
 /** Mask → simplified clockwise polygon (largest component), in photo px. */
@@ -418,14 +424,31 @@ export async function cachedModels(keys: readonly ModelKey[]): Promise<Partial<R
   }
 }
 
-/** Models a task needs with their download sizes on the detected (or assumed) backend. */
-export function taskDownload(task: VisionTask, skip: Partial<Record<ModelKey, boolean>> = {}): { bytes: number; label: string; models: { key: ModelKey; name: string; bytes: number }[] } {
+/**
+ * Models a task needs with their download sizes on the detected (or assumed)
+ * backend; `semantic` (default: the SegFormer choice) includes SegFormer.
+ */
+export function taskDownload(
+  task: VisionTask,
+  skip: Partial<Record<ModelKey, boolean>> = {},
+  semantic = segformerAllowed(),
+): { bytes: number; label: string; models: { key: ModelKey; name: string; bytes: number }[] } {
   const backend = device?.backend ?? 'wasm';
   const f16 = device?.f16 ?? false;
-  const models = TASK_MODELS[task].filter((k) => !skip[k]).map((key) => ({ key, name: MODELS[key].name, bytes: modelBytes(key, backend, f16) }));
+  const models = taskModels(task, semantic)
+    .filter((k) => !skip[k])
+    .map((key) => ({ key, name: MODELS[key].name, bytes: modelBytes(key, backend, f16) }));
   const bytes = models.reduce((s, m) => s + m.bytes, 0);
   return { bytes, label: formatMB(bytes), models };
 }
 
-export { MODELS, formatMB } from './models';
+export { MODELS, formatMB, taskModels, taskUsesSegformer } from './models';
 export type { ModelKey, VisionTask } from './models';
+export {
+  SEGFORMER_LICENSE,
+  onSegformerChoice,
+  segformerAllowed,
+  segformerChoice,
+  setSegformerChoice,
+  type SegformerChoice,
+} from './license';

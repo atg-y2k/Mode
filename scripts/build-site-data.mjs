@@ -3,15 +3,19 @@
  * Builds Mode's bundled, offline site data (committed under public/data/):
  *
  *   public/data/zones.json      ZIP → [USDA hardiness zone, centroid lat, centroid lon]
- *                               from phzmapi.org all.json (PRISM 2023 map, MIT code).
+ *                               from phzmapi.org all.json (PRISM 2023 map, MIT code),
+ *                               plus zone-only rows [zone] for the ZIPs PRISM's own ZIP
+ *                               tables list but phzmapi drops (no centroid: PO-box and
+ *                               single-organisation ZIPs such as 02455, 06338, 569xx).
  *   public/data/invasives.json  US-RIIS v2.0 plants (USGS, CC0): scientific name, common
  *                               name, status per locality (L48 / AK / HI), synonyms.
  *
  * Usage:
- *   node scripts/build-site-data.mjs                 # download both sources, write both files
+ *   node scripts/build-site-data.mjs                 # download all sources, write both files
  *   node scripts/build-site-data.mjs --only zones    # or --only invasives
- *   node scripts/build-site-data.mjs --phzm ./all.json --riis ./USRIISv2csvFormat.zip
- *                                                    # build from local copies (offline)
+ *   node scripts/build-site-data.mjs --phzm ./all.json --prism ./prism-dir --riis ./USRIISv2csvFormat.zip
+ *                                                    # build from local copies (offline);
+ *                                                    # prism-dir holds phzm_{us,ak,hi,pr}_zipcode_2023.csv
  *
  * Needs Node 22+ (global fetch, zlib). No dependencies: the ZIP archive and the
  * CSV are parsed here. Re-run when phzmapi.org or US-RIIS publish a new version
@@ -26,6 +30,9 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const OUT_DIR = join(ROOT, 'public', 'data');
 
 export const PHZM_URL = 'https://phzmapi.org/all.json';
+/** PRISM Climate Group's ZIP-code tables of the 2023 PHZM (zipcode,zone,trange,zonetitle), one per region. */
+export const PRISM_ZIP_CSV_URL = (region) => `https://prism.oregonstate.edu/phzm/data/2023/phzm_${region}_zipcode_2023.csv`;
+export const PRISM_REGIONS = ['us', 'ak', 'hi', 'pr'];
 /** ScienceBase item "United States Register of Introduced and Invasive Species (US-RIIS) (ver. 2.0, November 2022)". */
 export const RIIS_ITEM_URL = 'https://www.sciencebase.gov/catalog/item/62d59ae5d34e87fffb2dda99';
 /** The item's "USRIISv2csvFormat.zip" file (resolved from the item JSON at build time; this is the fallback). */
@@ -149,8 +156,33 @@ export function parseCsv(text) {
 
 const round = (v) => Math.round(Number(v) * 10 ** COORD_DECIMALS) / 10 ** COORD_DECIMALS;
 
-/** phzmapi.org all.json → { meta…, zips: { "20817": ["7b", 38.997, -77.135] } }. */
-export function buildZones(all) {
+/**
+ * PRISM ZIP CSV text(s) → { "02455": "6b", … }. Rows with a malformed ZIP or
+ * zone are skipped; the first table listing a ZIP wins.
+ */
+export function parsePrismZipCsv(...texts) {
+  const out = {};
+  for (const text of texts) {
+    const rows = parseCsv(String(text).replace(/^\uFEFF/, ''));
+    const header = (rows[0] ?? []).map((h) => h.trim().toLowerCase());
+    const iZip = header.indexOf('zipcode');
+    const iZone = header.indexOf('zone');
+    if (iZip < 0 || iZone < 0) throw new Error('PRISM ZIP table: missing "zipcode" or "zone" column.');
+    for (const r of rows.slice(1)) {
+      const zip = (r[iZip] ?? '').trim().padStart(5, '0');
+      const zone = (r[iZone] ?? '').trim().toLowerCase();
+      if (/^\d{5}$/.test(zip) && /^\d{1,2}[ab]?$/.test(zone) && !(zip in out)) out[zip] = zone;
+    }
+  }
+  return out;
+}
+
+/**
+ * phzmapi.org all.json (+ optional PRISM ZIP tables) → { meta…, zips: { "20817":
+ * ["7b", 38.997, -77.135], "02455": ["6b"] } }. ZIPs only PRISM lists get a
+ * zone-only row (no centroid exists for them); phzmapi rows win otherwise.
+ */
+export function buildZones(all, prism = {}) {
   const src = all?.zipcodes;
   if (!src || typeof src !== 'object') throw new Error('phzmapi all.json: missing "zipcodes".');
   const zips = {};
@@ -166,16 +198,35 @@ export function buildZones(all) {
     }
     zips[zip] = [zone, round(lat), round(lon)];
   }
+  const withCentroid = Object.keys(zips).length;
+  let zoneOnly = 0;
+  let zoneMismatch = 0;
+  for (const zip of Object.keys(prism).sort()) {
+    const zone = prism[zip];
+    if (!/^\d{5}$/.test(zip) || !/^\d{1,2}[ab]?$/.test(zone)) continue;
+    if (zips[zip]) {
+      if (zips[zip][0] !== zone) zoneMismatch++;
+      continue;
+    }
+    zips[zip] = [zone];
+    zoneOnly++;
+  }
+  // Sorted by ZIP as far as JSON key order allows (ZIPs without a leading zero come first).
+  const sorted = Object.fromEntries(Object.keys(zips).sort().map((z) => [z, zips[z]]));
   return {
-    source: 'Derived from the USDA/OSU PRISM 2023 Plant Hardiness Zone Map via phzmapi.org; not the official USDA map.',
+    source: 'Derived from the USDA/OSU PRISM 2023 Plant Hardiness Zone Map via phzmapi.org and the PRISM ZIP-code tables; not the official USDA map.',
     sourceUrl: 'https://phzmapi.org/',
+    prismUrl: 'https://prism.oregonstate.edu/phzm/',
     vintage: String(all.source_vintage ?? '2023'),
     upstreamGenerated: all.generated ?? null,
     generated: new Date().toISOString().slice(0, 10),
-    format: 'zips[zip] = [zone, lat, lon] (ZIP centroid, WGS84)',
-    count: Object.keys(zips).length,
+    format: 'zips[zip] = [zone, lat, lon] (ZIP centroid, WGS84), or [zone] for ZIPs only the PRISM ZIP tables list (no centroid)',
+    count: Object.keys(sorted).length,
+    withCentroid,
+    zoneOnly,
+    zoneMismatch,
     skipped,
-    zips,
+    zips: sorted,
   };
 }
 
@@ -283,11 +334,21 @@ async function main() {
   if (!only || only === 'zones') {
     const phzmPath = argValue(args, '--phzm');
     const raw = phzmPath ? await readFile(phzmPath) : await download(PHZM_URL, 'phzmapi.org all.json');
-    const zones = buildZones(JSON.parse(raw.toString('utf8')));
-    if (zones.count < 35_000) throw new Error(`Only ${zones.count} ZIPs — the source looks truncated; not writing zones.json.`);
+    const prismDir = argValue(args, '--prism');
+    const prismTexts = [];
+    for (const region of PRISM_REGIONS) {
+      const name = `phzm_${region}_zipcode_2023.csv`;
+      prismTexts.push((prismDir ? await readFile(join(prismDir, name)) : await download(PRISM_ZIP_CSV_URL(region), `PRISM ZIP table (${region})`)).toString('utf8'));
+    }
+    const prism = parsePrismZipCsv(...prismTexts);
+    if (Object.keys(prism).length < 39_000) throw new Error(`Only ${Object.keys(prism).length} PRISM ZIPs — the tables look truncated; not writing zones.json.`);
+    const zones = buildZones(JSON.parse(raw.toString('utf8')), prism);
+    if (zones.withCentroid < 35_000) throw new Error(`Only ${zones.withCentroid} ZIPs — the source looks truncated; not writing zones.json.`);
     const json = JSON.stringify(zones);
     await writeFile(join(OUT_DIR, 'zones.json'), json);
-    process.stdout.write(`✓ public/data/zones.json — ${zones.count} ZIPs (${zones.skipped} skipped), ${kb(json.length)}\n`);
+    process.stdout.write(
+      `✓ public/data/zones.json — ${zones.count} ZIPs (${zones.withCentroid} with centroid, ${zones.zoneOnly} zone-only from PRISM, ${zones.zoneMismatch} zone mismatches, ${zones.skipped} skipped), ${kb(json.length)}\n`,
+    );
   }
 
   if (!only || only === 'invasives') {

@@ -4,7 +4,8 @@
  * - drag & drop onto the Studio (files, file items, or an image dragged
  *   from the ChatGPT / Gemini tab — fetched through the server);
  * - "Import copied image?" when `clipboardchange` (Chromium 144+) reports an
- *   image on the clipboard as the user comes back;
+ *   image on the clipboard as the user comes back — never for Mode's own
+ *   copies (the photo, a reference), which fire it too (clipboard.ts);
  * - the optional Downloads-folder watcher (local server, src/lib/handoff).
  */
 import { ClipboardPaste, ImageDown, X } from 'lucide-react';
@@ -12,8 +13,10 @@ import { useEffect, useRef, useState, type DragEvent } from 'react';
 import { fetchDownloadedFile, handoffWatchStatus, watchDownloads } from '../../../lib/handoff';
 import { useStore } from '../../../state/store';
 import { importBlobs } from './actions';
-import { readClipboardImage } from './clipboard';
+import { isOwnClipboardChange, isOwnClipboardImage, readClipboardImage } from './clipboard';
 import { usePendingHandoffs } from './hooks';
+import { sweepFinishedPacks } from './pack';
+import { appLabel } from './planned';
 import { useToggle, WATCH_DOWNLOADS_KEY } from './prefs';
 import { handoffSession, setHandoffSession, useHandoffSession } from './session';
 import { clipboardChangeSupported, dragLooksImportable, isEditableTarget, transferImages } from './sources';
@@ -45,6 +48,12 @@ export function HandoffImportEffects() {
   const anyPending = pending.length > 0;
   const anyWaiting = pending.some((p) => p.planned.status === 'awaiting-handoff');
   const watchOn = useToggle(WATCH_DOWNLOADS_KEY);
+  const projectId = useStore((s) => s.project?.id);
+
+  // Projects saved before finished items released their exports: free them once per open.
+  useEffect(() => {
+    if (projectId) sweepFinishedPacks();
+  }, [projectId]);
 
   // Paste anywhere (capture phase: runs before the Idea board's own window listener).
   useEffect(() => {
@@ -95,6 +104,8 @@ export function HandoffImportEffects() {
     if (!anyWaiting || !clipboardChangeSupported()) return;
     const clip = navigator.clipboard as Clipboard & EventTarget;
     const onChange = (e: Event) => {
+      // clipboardchange also fires for Mode's own copies (the photo, a reference, marked / clean copies).
+      if (isOwnClipboardChange()) return;
       const types = (e as Event & { types?: string[] }).types ?? [];
       if (types.some((t) => t.startsWith('image/'))) setHandoffSession({ clipboardOffer: true });
     };
@@ -169,7 +180,11 @@ export function ClipboardOffer({ variant }: { variant: 'card' | 'banner' }) {
       const blob = await readClipboardImage();
       setHandoffSession({ clipboardOffer: false });
       if (!blob) notify('The clipboard has no image any more — copy it again or drop the file.', 'info');
-      else await importBlobs([blob], undefined, { preferWaiting: true });
+      else if (await isOwnClipboardImage(blob)) {
+        // Still the photo / reference Mode copied (the change came in while Mode was in the background).
+        const app = appLabel(target?.planned.handoff?.app ?? useStore.getState().studio.handoffApp);
+        notify(`That's the image Mode copied — copy the edited picture in ${app} first, or drop the downloaded file.`, 'info');
+      } else await importBlobs([blob], undefined, { preferWaiting: true });
     } catch (err) {
       notify(`Couldn't read the clipboard: ${(err as Error).message || 'permission denied'}. Paste with ⌘V / Ctrl+V instead.`, 'error');
     } finally {

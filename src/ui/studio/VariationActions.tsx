@@ -9,7 +9,7 @@
 import { Columns2, Download, Ellipsis, ImagePlus, PenLine, Sparkles, Trash2, WandSparkles } from 'lucide-react';
 import { useRef, useState, type ReactNode } from 'react';
 import type { Variation } from '../../../shared/types';
-import { useStore } from '../../state/store';
+import { findPhoto, pendingRunsFrom, useStore } from '../../state/store';
 import { Button, cn } from '../common';
 import { downloadVariation, runOrNotify, viewVariation } from './actions';
 import { ProvenanceLine } from './handoff/bits';
@@ -31,6 +31,13 @@ export function compareWithOriginal(v: Variation): void {
 }
 
 export function askDelete(photoId: string, v: Variation): void {
+  const s = useStore.getState();
+  const photo = findPhoto(s.project, photoId)?.photo;
+  // A hand-off still waiting for its result starts from it: deleting would strand that run.
+  if (photo && pendingRunsFrom(photo, v.id).length > 0) {
+    s.notify(`“${v.title}” is the starting image of a hand-off still waiting for its result — finish or skip it first.`, 'error');
+    return;
+  }
   setStudioUI({ confirm: { kind: 'variation', photoId, id: v.id, title: v.title } });
 }
 

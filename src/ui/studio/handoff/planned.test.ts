@@ -4,6 +4,8 @@ import { appendEntry, countToday, startOfDay, usageHint, wasSent } from './log';
 import {
   alignmentSummary,
   assignTargets,
+  changesTouchArea,
+  footprintHint,
   pendingHandoffs,
   rollupStatus,
   sourceLabel,
@@ -86,12 +88,26 @@ describe('pending hand-offs', () => {
 
   it('assigns returned files: active first, then waiting items of its run, then others', () => {
     const ref = (p: PendingItem) => p.plannedId;
-    expect(assignTargets(pending, { photoId: 'pho', generationId: 'new', plannedId: 'n3' }, 3).map(ref)).toEqual(['n3', 'n1', 'o1']);
+    // Several files fill the waiting items; only a single file replaces the active staged result.
+    expect(assignTargets(pending, { photoId: 'pho', generationId: 'new', plannedId: 'n3' }, 3).map(ref)).toEqual(['n1', 'o1']);
+    expect(assignTargets(pending, { photoId: 'pho', generationId: 'new', plannedId: 'n3' }, 1).map(ref)).toEqual(['n3']);
     expect(assignTargets(pending, null, 1).map(ref)).toEqual(['n1']);
     expect(assignTargets(pending, null, 5).map(ref)).toEqual(['n1', 'o1']);
     const onlyStaged = pendingHandoffs(photoWith([gen('g', [item('s', 'staged')])]));
     expect(assignTargets(onlyStaged, null, 1).map(ref)).toEqual(['s']);
+    expect(assignTargets(onlyStaged, { photoId: 'pho', generationId: 'g', plannedId: 's' }, 2).map(ref)).toEqual(['s']);
     expect(assignTargets(pending, null, 0)).toEqual([]);
+  });
+
+  it('a compare run with one result back: the remaining files go to the waiting options, not shifted by one', () => {
+    const ref = (p: PendingItem) => p.plannedId;
+    const compare = pendingHandoffs(
+      photoWith([gen('g', [item('large', 'staged'), item('medium', 'awaiting-handoff'), item('small', 'awaiting-handoff'), item('gravel', 'awaiting-handoff')])]),
+    );
+    const large = { photoId: 'pho', generationId: 'g', plannedId: 'large' };
+    expect(assignTargets(compare, large, 3).map(ref)).toEqual(['medium', 'small', 'gravel']);
+    expect(assignTargets(compare, large, 1).map(ref)).toEqual(['large']);
+    expect(assignTargets(compare, { ...large, plannedId: 'small' }, 2).map(ref)).toEqual(['small', 'medium']);
   });
 });
 
@@ -138,6 +154,50 @@ describe('provenance and alignment', () => {
     expect(alignmentSummary({ ...report, outsideChanged: 0.3 })).toMatchObject({ tone: 'warning', warn: true, suggestStricter: true });
     expect(alignmentSummary({ ...report, aligned: false, inliers: 12 })).toMatchObject({ label: 'Rough fit', warn: true });
     expect(alignmentSummary({ ...report, driftAfter: 9 })).toMatchObject({ tone: 'warning', warn: true });
+  });
+});
+
+describe('footprint hint', () => {
+  const report: AlignmentReport = { inliers: 220, residualPx: 0.8, driftBefore: 6.6, driftAfter: 2.1, outsideChanged: 0.05, aligned: true };
+  const pathway = (choice: string) => ({
+    id: 'el',
+    type: 'pathway' as const,
+    label: 'Walk',
+    zoneIds: ['walk'],
+    pathIds: [],
+    note: '',
+    dimensions: [
+      {
+        id: 'width',
+        label: 'Width',
+        question: '?',
+        options: [
+          { id: 'keep-width', label: 'Keep', description: '', promptText: 'keep' },
+          { id: 'width-6ft', label: '6 ft', description: '', promptText: '6 ft', footprint: 'grow' as const },
+        ],
+      },
+    ],
+    choices: { width: [choice] },
+  });
+  it('a wider path whose result changed things outside: let the lawn change, not a stricter prompt', () => {
+    expect(footprintHint({ ...emptyBrief(), elements: [pathway('width-6ft')] }, report)).toEqual({
+      message: 'The new path ran past the area that may change. Let the lawn beside it change and retry.',
+      elementId: 'el',
+    });
+    expect(footprintHint({ ...emptyBrief(), elements: [pathway('keep-width')] }, report)).toBeNull();
+    expect(footprintHint({ ...emptyBrief(), elements: [pathway('width-6ft')] }, { ...report, outsideChanged: 0.001 })).toBeNull();
+    expect(footprintHint({ ...emptyBrief(), scope: 'whole', elements: [pathway('width-6ft')] }, report)).toBeNull();
+    // Changes far from the walk (e.g. on the house) are not the path running past its area.
+    expect(footprintHint({ ...emptyBrief(), elements: [pathway('width-6ft')] }, report, false)).toBeNull();
+  });
+
+  it('outside changes touch the run’s area when they sit at its edge', () => {
+    const target = { zones: [{ id: 'walk', label: 'Walk', kind: 'walkway' as const, polygon: [{ x: 700, y: 700 }, { x: 900, y: 700 }, { x: 900, y: 1200 }, { x: 700, y: 1200 }] }], paths: [] };
+    const photo = { width: 1600, height: 1200 };
+    expect(changesTouchArea([{ x: 905, y: 900, w: 40, h: 40 }], target, photo)).toBe(true);
+    expect(changesTouchArea([{ x: 420, y: 380, w: 90, h: 70 }], target, photo)).toBe(false);
+    expect(changesTouchArea(undefined, target, photo)).toBeUndefined();
+    expect(changesTouchArea([], undefined, photo)).toBeUndefined();
   });
 });
 

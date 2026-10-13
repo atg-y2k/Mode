@@ -559,6 +559,12 @@ export interface ElementOption {
   rationale?: string;
   /** For plant options: can it actually thrive here (zone, sun, water, space)? */
   feasibility?: PlantFeasibility;
+  /**
+   * 'grow': the choice changes the element's footprint (a wider, curvier or
+   * larger path / drive / patio), so the area that may change gets room
+   * beside it (maskFromZones footprintRoom).
+   */
+  footprint?: 'grow';
 }
 
 /** Whether a plant is a realistic choice for this property and spot. */
@@ -749,6 +755,39 @@ export interface HandoffPack {
   createdAt: number;
 }
 
+/** What the import found about a staged result (persisted: staging asks before keeping an unchanged image after a reload too). */
+export interface StagedChecks {
+  /** Wrong-image check: nothing changed inside the area (the original or an older image came back). */
+  unchanged?: boolean;
+  /** Gemini result whose bottom-right sparkle lands inside the kept area. */
+  watermark?: boolean;
+  /** Median ΔE inside / just outside the area (wrong-image check). */
+  insideMedian?: number;
+  outsideMedian?: number;
+}
+
+/** Evidence behind a staged result's alignment badge, kept so a later review (after a reload) shows it too. */
+export interface StagedReview {
+  /** 8-bit grayscale PNG (≤ 256 px) of where the model changed things outside the area (blob store). */
+  changeMapId?: ID;
+  /** Photo-px boxes of notable outside changes. */
+  blobs: { x: number; y: number; w: number; h: number; area: number }[];
+  /** Why feature alignment wasn't trusted (result fitted by size only). */
+  alignNote?: string;
+}
+
+/** Geometry of a pack an item was already sent with, kept when its waiting items switch apps (the result still comes from that app). */
+export interface HandoffPackGeometry {
+  app: HandoffApp;
+  crop: HandoffPack['crop'];
+  outW: number;
+  outH: number;
+  markerColor: string;
+  ratio?: string;
+  /** When the item was switched to the other app. */
+  switchedAt: number;
+}
+
 /** A variation the plan asked for, before / while it is rendered or handed off. Persisted so runs survive reloads. */
 export interface PlannedVariation {
   id: ID;
@@ -762,8 +801,32 @@ export interface PlannedVariation {
   /** Set once accepted. */
   variationId?: ID;
   handoff?: HandoffPack;
+  /** The pack this item was sent with before its app was switched (see switchPendingApp). */
+  handoffPrev?: HandoffPackGeometry;
   /** A returned image waiting in staging (accept / reject / retry). */
-  staged?: { imageId: ID; thumbId: ID; source: VariationSource };
+  staged?: { imageId: ID; thumbId: ID; source: VariationSource; checks?: StagedChecks; review?: StagedReview };
+}
+
+/**
+ * The areas a run may change, frozen when it started: later scene edits
+ * (re-map, clear, zone delete, undo of "Analyze scene", sharper outlines)
+ * never widen or move it. Refined zone masks are copies owned by the run.
+ */
+export interface RunTarget {
+  zones: Pick<SceneZone, 'id' | 'label' | 'kind' | 'polygon' | 'maskId'>[];
+  paths: Pick<ScenePath, 'id' | 'label' | 'from' | 'to' | 'points' | 'widthPx' | 'kind'>[];
+  /**
+   * Room for footprint-changing choices (a wider or curvier path): the
+   * target zone / path ids whose coverage grows, the ground zones (lawn,
+   * beds…) beside them it may grow into, and the outlines it never covers
+   * (house, steps, trees… near them).
+   */
+  room?: {
+    zoneIds: ID[];
+    pathIds: ID[];
+    zones: Pick<SceneZone, 'id' | 'label' | 'kind' | 'polygon'>[];
+    blockers: Pt[][];
+  };
 }
 
 /** One generated image. */
@@ -811,6 +874,14 @@ export interface Generation {
   renderMode?: 'api' | 'handoff';
   /** Every variation the plan asked for, with its status (persisted; drives retry, hand-off and staging). */
   planned?: PlannedVariation[];
+  /** The areas this run may change, snapshotted when it started (runs from older saves resolve the live scene). */
+  target?: RunTarget;
+  /**
+   * The target mask the hand-off export was prepared with (mask store), frozen
+   * on the first preparation so every import composites against the outline
+   * that was pasted. `fingerprint` describes the live target it came from.
+   */
+  handoffTarget?: { maskId: ID; wholeImage: boolean; fingerprint?: string };
 }
 
 export const RECOMMENDATION_CATEGORIES = [

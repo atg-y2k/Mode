@@ -10,6 +10,7 @@
 import { Check, Eye, GitCompareArrows, Loader2, RotateCcw, ScanSearch, Sparkles, Star, TriangleAlert, X } from 'lucide-react';
 import { useMemo, useRef, useState, type ReactNode } from 'react';
 import type { ElementOption, Generation, Photo, PlantFeasibility, Project, Space } from '../../../shared/types';
+import { useInvasivesReady } from '../../site/hooks';
 import { useStore } from '../../state/store';
 import { cn } from '../common';
 import { chooseCompareOption, viewVariation } from './actions';
@@ -97,7 +98,9 @@ export function CompareGrid({ photo, space, generation: g }: { photo: Photo; spa
   const tiles = runTiles(g, info);
   const hand = g.renderMode === 'handoff';
   const refOf = (tile: Tile) => ({ photoId: photo.id, generationId: g.id, plannedId: tile.plannedId as string });
-  const ratings = useMemo(() => optionRatings(g, project, photo, space), [g, project, photo, space]);
+  // Re-rate once the US-RIIS list has loaded so invasive flags show.
+  const invasivesReady = useInvasivesReady();
+  const ratings = useMemo(() => optionRatings(g, project, photo, space), [g, project, photo, space, invasivesReady]);
   const options = new Map<string, ElementOption>((cmp?.options ?? []).map((o) => [o.id, o]));
   const chosen = cmp?.element ? (photo.draft?.elements.find((e) => e.id === cmp.element!.id)?.choices[cmp.dimension?.id ?? ''] ?? []) : [];
 

@@ -172,14 +172,24 @@ const currentPhoto = () => findPhoto(useStore.getState().project, 'pho')!.photo;
 
 describe('recoverInterruptedRuns', () => {
   it('marks runs a previous session left running as interrupted', () => {
-    setup(undefined, [gen('a', 'running', 2), gen('b', 'running'), gen('c', 'done', 1)]);
+    const planned = { ...gen('b', 'running'), planned: [{ id: 'p1', title: 'T', brief: 'B', status: 'pending' as const }] };
+    setup(undefined, [gen('a', 'running', 2), planned, gen('c', 'done', 1)]);
     expect(recoverInterruptedRuns()).toBe(2);
     const gens = currentPhoto().generations;
     expect(gens.map((g) => g.status)).toEqual(['partial', 'partial', 'done']);
     expect(gens[0].error).toBe(INTERRUPTED);
     expect(gens[0].variations).toHaveLength(2);
+    expect(gens[1].planned![0]).toMatchObject({ status: 'failed' });
     expect(gens[2].error).toBeUndefined();
     expect(recoverInterruptedRuns()).toBe(0);
+  });
+
+  it('drops runs that never got past planning or the review (nothing was rendered or sent)', async () => {
+    setup(undefined, [gen('a', 'running', 2), gen('review', 'running'), gen('c', 'done', 1)]);
+    expect(recoverInterruptedRuns()).toBe(1);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(currentPhoto().generations.map((g) => g.id)).toEqual(['a', 'c']);
+    expect(currentPhoto().generations.some((g) => g.error === INTERRUPTED && g.variations.length === 0)).toBe(false);
   });
 });
 
@@ -325,6 +335,52 @@ describe('hand-off runs', () => {
     expect(g.planned?.[0]).toMatchObject({ status: 'done', variationId: g.variations[0].id });
     expect(g.variations[0]).toMatchObject({ title: 'Take 1', brief: 'Edit the bed: take 1.', source: { kind: 'api' } });
     expect(calls.map((c) => c.path)).toEqual(['/api/studio/render-variation']);
+  });
+
+  it('a run keeps the areas it started with (outline + a copy of the refined mask): a retry after re-mapping still sends its mask', async () => {
+    setup(draft);
+    useStore.getState().mutateProject('x', (d) => void (d.spaces[0].photos[0].imageId = 'img-photo'), { history: false });
+    const refined = createMask(W, H);
+    for (let y = 50; y < 80; y++) for (let x = 10; x < 50; x++) refined.data[y * W + x] = 255;
+    runtime.setMask('msk_bed', refined);
+    fakeBackend({ failRender: true });
+    const id = await startRun({ photoId: 'pho', mode: 'variations', count: 1, showGrid: false });
+    await vi.waitFor(() => expect(currentPhoto().generations[0].status).toBe('failed'));
+    const target = currentPhoto().generations[0].target!;
+    expect(target.zones.map((z) => [z.id, z.label])).toEqual([['bed', 'Bed']]);
+    expect(target.zones[0].maskId).toBeTruthy();
+    expect(target.zones[0].maskId).not.toBe('msk_bed'); // the run owns a copy
+    expect(runtime.getMask(target.zones[0].maskId!)?.data[60 * W + 20]).toBe(255);
+
+    // "Re-map scene": the zone gets a fresh id and the scene's own mask goes away.
+    useStore.getState().setScene('pho', { ...scene, zones: [{ ...scene.zones[0], id: 'bed-new', maskId: undefined }] });
+    runtime.forgetMasks(['msk_bed']);
+    const key = currentPhoto().generations[0].planned![0].id;
+    const calls = fakeBackend();
+    await retryVariation(id, key);
+    await vi.waitFor(() => expect(currentPhoto().generations[0].status).toBe('done'));
+    const render = calls.find((c) => c.path === '/api/studio/render-variation')!;
+    expect(render.body.mask).toEqual(expect.stringMatching(/^data:/)); // not a whole-image edit
+    // Deleting the run deletes its mask copies.
+    await useStore.getState().deleteGeneration('pho', id);
+    expect(runtime.getMask(target.zones[0].maskId!)).toBeUndefined();
+  });
+
+  it('repeating a run whose areas were re-mapped away keeps that run’s areas (never a whole-image edit)', async () => {
+    setup(draft);
+    useStore.setState({ health: NO_PROVIDERS, studio: { ...useStore.getState().studio, renderMode: 'handoff' } });
+    fakeBackend();
+    const old = { zones: [{ id: 'bed', label: 'Bed', kind: 'planting-bed' as const, polygon: scene.zones[0].polygon }], paths: [] };
+    useStore.getState().setScene('pho', { ...scene, zones: [{ ...scene.zones[0], id: 'bed-new', maskId: undefined }] });
+    const id = await startRun({ photoId: 'pho', mode: 'variations', count: 1, brief: draft, target: old });
+    const g = currentPhoto().generations.find((x) => x.id === id)!;
+    expect(g.target?.zones.map((z) => z.id)).toEqual(['bed']);
+    // With the areas still in the scene, the run snapshots the live ones as usual.
+    useStore.getState().setScene('pho', scene);
+    const id2 = await startRun({ photoId: 'pho', mode: 'variations', count: 1, brief: draft, target: { zones: [], paths: [] } });
+    expect(currentPhoto().generations.find((x) => x.id === id2)!.target?.zones.map((z) => z.id)).toEqual(['bed']);
+    cancelRun(id);
+    cancelRun(id2);
   });
 });
 

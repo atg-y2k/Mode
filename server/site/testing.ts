@@ -29,9 +29,19 @@ export interface RecordedCall {
 
 type Service = 'inventory' | 'noaa' | 'sda' | 'epa';
 
+/**
+ * What Soil Data Access serves with HTTP 200 during its daily maintenance
+ * window (00:30–00:45 US Central): an HTML page instead of the JSON table.
+ */
+export const SDA_MAINTENANCE_HTML =
+  '<!DOCTYPE html>\n<html><head><title>Soil Data Access - Maintenance</title></head><body><h1>Soil Data Access is temporarily unavailable</h1><p>The service is undergoing scheduled maintenance. Please try again later.</p></body></html>';
+
 export interface FixtureFetchOptions {
-  /** Make one service fail: 'throw' = network error, a number = that HTTP status. */
-  fail?: Partial<Record<Service, 'throw' | number>>;
+  /**
+   * Make one service fail: 'throw' = network error, a number = that HTTP
+   * status, 'html' = HTTP 200 with an HTML page (SDA maintenance window).
+   */
+  fail?: Partial<Record<Service, 'throw' | 'html' | number>>;
   /** Answer a service only after this many ms. */
   delayMs?: Partial<Record<Service, number>>;
 }
@@ -61,6 +71,7 @@ export function fixtureFetch(opts: FixtureFetchOptions = {}): typeof fetch & { c
     if (delay) await new Promise((r) => setTimeout(r, delay));
     const failure = opts.fail?.[service];
     if (failure === 'throw') throw new TypeError('fetch failed');
+    if (failure === 'html') return new Response(SDA_MAINTENANCE_HTML, { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } });
     if (typeof failure === 'number') return new Response('upstream says no', { status: failure });
     return make();
   };
@@ -68,12 +79,12 @@ export function fixtureFetch(opts: FixtureFetchOptions = {}): typeof fetch & { c
     const url = new URL(input instanceof Request ? input.url : String(input));
     const body = typeof init?.body === 'string' ? init.body : null;
     calls.push({ url: url.href, method: init?.method ?? 'GET', body });
-    if (url.href === NOAA_INVENTORY_URL) return respond('inventory', () => new Response(fixtureText('noaa-inventory-excerpt.txt')));
-    if (url.href.startsWith(NOAA_DATA_URL)) {
-      return respond('noaa', () => new Response(fixtureText(`noaa-normals-${pointFor(url, body)}.json`), { headers: { 'content-type': 'application/json' } }));
-    }
-    if (url.href.startsWith(SDA_URL)) return respond('sda', () => new Response(fixtureText(`sda-${pointFor(url, body)}.json`)));
-    if (url.href.startsWith(EPA_ECOREGION_URL)) return respond('epa', () => new Response(fixtureText(`epa-${pointFor(url, body)}.json`)));
+    // Content types as the live services send them (checked 2026-10-13).
+    const json = (text: string, type = 'application/json;charset=utf-8') => new Response(text, { headers: { 'content-type': type } });
+    if (url.href === NOAA_INVENTORY_URL) return respond('inventory', () => new Response(fixtureText('noaa-inventory-excerpt.txt'), { headers: { 'content-type': 'text/plain' } }));
+    if (url.href.startsWith(NOAA_DATA_URL)) return respond('noaa', () => json(fixtureText(`noaa-normals-${pointFor(url, body)}.json`)));
+    if (url.href.startsWith(SDA_URL)) return respond('sda', () => json(fixtureText(`sda-${pointFor(url, body)}.json`), 'application/json; charset=utf-8'));
+    if (url.href.startsWith(EPA_ECOREGION_URL)) return respond('epa', () => json(fixtureText(`epa-${pointFor(url, body)}.json`), 'application/json;charset=UTF-8'));
     throw new Error(`fixtureFetch: unexpected request ${url.href}`);
   }) as typeof fetch & { calls: RecordedCall[] };
   fn.calls = calls;

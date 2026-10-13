@@ -5,7 +5,7 @@
  * so a stored AI climate profile is kept in step with it.
  */
 import type { PhotoCapture, Project, ProjectLocation, SiteProfile } from '../../shared/types';
-import type { ZipInfo } from './zip';
+import { hasZipCoords, type ZipInfo } from './zip';
 
 /** Exact coordinates farther than this from a new ZIP's centre are treated as another place. */
 const SAME_AREA_KM = 30;
@@ -61,7 +61,7 @@ export function coordsSourceOf(
 ): SiteProfile['coordsSource'] | null {
   const c = coordsOf(location);
   if (!c) return null;
-  if (zipInfo && distanceKm(c, zipInfo) <= SAME_POINT_KM) return 'zip';
+  if (hasZipCoords(zipInfo) && distanceKm(c, zipInfo) <= SAME_POINT_KM) return 'zip';
   if (gpsPoints.some((p) => distanceKm(c, p) <= SAME_POINT_KM)) return 'photo-gps';
   return 'address';
 }
@@ -79,12 +79,18 @@ export function withCoords(current: ProjectLocation, next: LatLon): Partial<Proj
  * (zoneSource 'zip-table', mirrored into the AI climate profile so feasibility
  * reads one zone) and coordinates. Exact coordinates (photo GPS / entered) are
  * kept when they lie in the new ZIP's area; otherwise the ZIP centre is used.
+ * A zone-only ZIP (no centroid) keeps exact coordinates and drops the previous
+ * ZIP's centre (and the site profile measured there).
  */
 export function locationForZip(current: ProjectLocation, info: ZipInfo, previousZip?: ZipInfo | null): Partial<ProjectLocation> {
   const patch: Partial<ProjectLocation> = { zip: info.zip, hardinessZone: info.zone, zoneSource: 'zip-table' };
   if (current.climate && current.climate.hardinessZone !== info.zone) patch.climate = { ...current.climate, hardinessZone: info.zone };
   const prev = coordsOf(current);
-  const atOldCentre = prev && previousZip ? distanceKm(prev, previousZip) <= SAME_POINT_KM : false;
+  const atOldCentre = prev && hasZipCoords(previousZip) ? distanceKm(prev, previousZip) <= SAME_POINT_KM : false;
+  if (!hasZipCoords(info)) {
+    if (atOldCentre) Object.assign(patch, { lat: undefined, lon: undefined, ...(current.site ? { site: undefined } : {}) });
+    return patch;
+  }
   const keepExact = prev && !atOldCentre && distanceKm(prev, info) <= SAME_AREA_KM;
   if (!keepExact) Object.assign(patch, withCoords(current, info));
   return patch;

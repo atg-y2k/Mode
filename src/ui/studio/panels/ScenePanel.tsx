@@ -59,6 +59,25 @@ export function ScenePanel() {
   return <SceneView space={space} photo={photo} scene={scene} brief={brief} location={project.location} />;
 }
 
+/**
+ * What re-mapping / clearing means for runs of this photo that are still
+ * pending (hand-offs waiting or in review, API renders): they keep the areas
+ * they started with — older runs (saved before that was recorded) can't.
+ */
+export function pendingRunsNote(photo: Photo): string {
+  const pending = photo.generations.filter(
+    (g) => g.status === 'running' || (g.planned ?? []).some((p) => p.status === 'awaiting-handoff' || p.status === 'staged' || p.status === 'pending'),
+  );
+  if (pending.length === 0) return '';
+  const kept = pending.filter((g) => g.target).length;
+  const legacy = pending.length - kept;
+  const runs = (n: number) => `${n} run${n === 1 ? '' : 's'}`;
+  return [
+    kept ? ` ${kept === 1 ? 'The run' : `The ${runs(kept)}`} still waiting for a hand-off or rendering keep${kept === 1 ? 's' : ''} ${kept === 1 ? 'its' : 'their'} original areas.` : '',
+    legacy ? ` ${runs(legacy)} from before this version still waiting can't use the old areas after this — start ${legacy === 1 ? 'it' : 'them'} again.` : '',
+  ].join('');
+}
+
 function SceneView({
   space,
   photo,
@@ -77,6 +96,7 @@ function SceneView({
   const [confirmRemap, setConfirmRemap] = useState(false);
   useEffect(() => clearZoneFocus, []);
   const [confirmClear, setConfirmClear] = useState(false);
+  const pendingNote = pendingRunsNote(photo);
 
   return (
     <div className="flex min-h-full flex-col">
@@ -97,9 +117,11 @@ function SceneView({
 
       {!scene ? (
         <>
+          {/* AI off: the on-device map (vision module) is the way to map, so it comes first. */}
+          {!aiReady && <RefineSection photoId={photo.id} />}
           {!job && <NotMapped photoId={photo.id} />}
           {/* On-device tools (vision module): e.g. map the scene without AI. */}
-          <RefineSection photoId={photo.id} />
+          {aiReady && <RefineSection photoId={photo.id} />}
         </>
       ) : (
         <>
@@ -139,7 +161,7 @@ function SceneView({
         open={confirmRemap}
         onClose={() => setConfirmRemap(false)}
         title="Map this photo again?"
-        message="Mode analyzes the photo again and replaces the current areas, paths and architecture notes. Areas picked in your brief will need to be picked again."
+        message={`Mode analyzes the photo again and replaces the current areas, paths and architecture notes. Areas picked in your brief will need to be picked again.${pendingNote}`}
         confirmLabel="Re-map"
         danger={false}
         onConfirm={() => void mapScene(photo.id, true)}
@@ -148,7 +170,7 @@ function SceneView({
         open={confirmClear}
         onClose={() => setConfirmClear(false)}
         title="Clear the scene map?"
-        message="The areas, paths and architecture notes of this photo are removed (you can undo this). Variations already generated are kept."
+        message={`The areas, paths and architecture notes of this photo are removed (you can undo this). Variations already generated are kept.${pendingNote}`}
         confirmLabel="Clear map"
         onConfirm={() => {
           useStore.getState().setScene(photo.id, undefined);
@@ -241,7 +263,9 @@ function Overview({ space, photo, scene }: { space: Space; photo: Photo; scene: 
     { label: 'Orientation', value: scene.orientation },
     { label: 'Boundaries', value: scene.boundaries },
   ].filter((f) => f.value?.trim());
-  const mismatch = scene.category !== space.type && !hideMismatch;
+  // On-device maps guess the category from the class mix alone (no AI): never second-guess the space type with it.
+  const offline = scene.model.startsWith('On-device');
+  const mismatch = !offline && scene.category !== space.type && !hideMismatch;
 
   return (
     <Section title="Overview" action={<Toggle checked={showZones} onChange={(v) => useStore.getState().setStudio({ showZones: v })} label={<span className="text-xs text-muted">Show on photo</span>} />}>

@@ -268,6 +268,25 @@ export interface PageProduct {
   structured: boolean;
 }
 
+/**
+ * Role-like labels ("Homeowner:", "System:", "Assistant:"…) in store text. Page
+ * text reaches the plan prompts through the idea board; prompts.ts frames it
+ * as untrusted data, and this is defence in depth only.
+ */
+const ROLE_LABEL = /\b(homeowner|system|assistant|user|human|developer)\s*:/gi;
+
+/** Store text for Mode: one line, role labels defused ("Homeowner:" → "Homeowner -"), at most `max` characters. */
+export function storeText(value: string, max: number): string {
+  const line = value
+    .replace(/\s+/g, ' ')
+    .replace(ROLE_LABEL, (_m, word: string) => `${word} -`)
+    .trim();
+  return line.length > max ? `${line.slice(0, max - 1).trimEnd()}…` : line;
+}
+
+const SPEC_KEY_MAX = 40;
+const SPEC_VALUE_MAX = 120;
+
 export function parseProductPage(html: string, pageUrl: string): PageProduct {
   const meta = extractMeta(html);
   let node: JsonObject | null = null;
@@ -295,13 +314,13 @@ export function parseProductPage(html: string, pageUrl: string): PageProduct {
         if (!isObject(p)) continue;
         const k = text(p.name);
         const v = text(p.value);
-        if (k && v) specs.push(`${k}: ${v}`);
+        if (k && v) specs.push(`${storeText(k, SPEC_KEY_MAX)}: ${storeText(v, SPEC_VALUE_MAX)}`);
         if (specs.length >= 8) break;
       }
     }
     for (const key of ['size', 'color', 'material', 'height']) {
       const v = text(node[key]);
-      if (v && specs.length < 8) specs.push(`${key[0].toUpperCase()}${key.slice(1)}: ${v}`);
+      if (v && specs.length < 8) specs.push(`${key[0].toUpperCase()}${key.slice(1)}: ${storeText(v, SPEC_VALUE_MAX)}`);
     }
   }
 
@@ -321,9 +340,9 @@ export function parseProductPage(html: string, pageUrl: string): PageProduct {
   }
 
   return {
-    name: name ? name.slice(0, 200) : null,
-    brand: brand ? brand.slice(0, 120) : null,
-    description: description ? description.slice(0, 600) : null,
+    name: name ? storeText(name, 200) || null : null,
+    brand: brand ? storeText(brand, 120) || null : null,
+    description: description ? storeText(description, 600) || null : null,
     imageUrl,
     priceUsd,
     priceText,

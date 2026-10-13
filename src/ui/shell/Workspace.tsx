@@ -2,10 +2,13 @@
  * Project workspace. Desktop (lg+): TopBar + [SpacesSidebar | center |
  * right panel with tab rail]. Phones / small tablets: one pane at a time
  * (store.view.mobilePane) with a bottom nav. Center = StudioView (Studio
- * mode) or EditorView (Fine-tune mode).
+ * mode) or EditorView (Fine-tune mode). The review step before every run
+ * (ReviewModal) is hosted here, outside the pane switch, so a run started
+ * from the Design pane on a phone (or from Fine-tune) is still reviewed.
  */
 import { useEffect } from 'react';
 import { EditorView } from '../editor/EditorView';
+import { ReviewModal } from '../studio/handoff/ReviewModal';
 import { StudioView } from '../studio/StudioView';
 import { selectActivePhoto, selectActiveSpace, useStore } from '../../state/store';
 import { Spinner } from '../common';
@@ -58,6 +61,7 @@ export function Workspace() {
       )}
       <PhotoPicker />
       <AddSpaceModal />
+      <ReviewModal />
     </div>
   );
 }

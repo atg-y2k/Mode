@@ -5,7 +5,7 @@ import { parseSiteProfile } from '../../src/site/profile';
 import { createApp } from '../app';
 import { testConfig } from '../config';
 import { SiteUpstreamError, createSiteProfileService, type SiteProfileService } from './profile';
-import { registerSiteRoutes } from './routes';
+import { SITE_UNAVAILABLE_HEADER, registerSiteRoutes } from './routes';
 import { FIXTURE_POINTS, fixtureFetch } from './testing';
 
 function makeApp(service: SiteProfileService) {
@@ -36,7 +36,20 @@ describe('POST /api/site/profile', () => {
     const p = FIXTURE_POINTS.miami;
     const json = (await (await post(app, { lat: p.lat, lon: p.lon })).json()) as Record<string, unknown>;
     expect(json.coordsSource).toBe('zip');
-    expect(json.frost).toBeUndefined();
+    expect(json.frost).toEqual({ station: 'MIAMI BEACH, FL', distanceKm: 7.7, frostFree: true });
+  });
+
+  it('names the sections that failed temporarily (SDA maintenance page) in a header', async () => {
+    const app = makeApp(createSiteProfileService({ fetch: fixtureFetch({ fail: { sda: 'html' } }), cacheDir: null, log: () => undefined }));
+    const p = FIXTURE_POINTS.rockville;
+    const res = await post(app, { lat: p.lat, lon: p.lon });
+    expect(res.status).toBe(200);
+    expect(res.headers.get(SITE_UNAVAILABLE_HEADER)).toBe('soil');
+    const json = (await res.json()) as Record<string, unknown>;
+    expect(json.soil).toBeUndefined();
+    expect(json.frost).toMatchObject({ station: 'DALECARLIA RSVR, MD' });
+    const complete = await post(makeApp(createSiteProfileService({ fetch: fixtureFetch(), cacheDir: null, log: () => undefined })), { lat: p.lat, lon: p.lon });
+    expect(complete.headers.get(SITE_UNAVAILABLE_HEADER)).toBeNull();
   });
 
   it('validates the body', async () => {

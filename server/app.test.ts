@@ -681,6 +681,11 @@ describe('static web app (production)', () => {
   mkdirSync(join(dir, 'assets'));
   writeFileSync(join(dir, 'index.html'), '<!doctype html><title>Mode</title>');
   writeFileSync(join(dir, 'assets', 'app-abc123.js'), 'console.log("mode")');
+  writeFileSync(join(dir, 'assets', 'ort-wasm-simd-threaded.jsep.mjs'), 'export default 1');
+  writeFileSync(join(dir, 'assets', 'ort-wasm-simd-threaded.jsep.wasm'), Buffer.from([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]));
+  writeFileSync(join(dir, 'assets', 'app-abc123.css'), 'body{}');
+  writeFileSync(join(dir, 'icon.svg'), '<svg xmlns="http://www.w3.org/2000/svg"/>');
+  writeFileSync(join(dir, 'sw.js'), 'self.addEventListener("fetch", () => {})');
   afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
   const { app } = makeApp({ staticDir: dir, production: true });
@@ -709,6 +714,23 @@ describe('static web app (production)', () => {
   it('returns 404 for missing files instead of the app shell', async () => {
     const res = await app.request('/assets/missing.js');
     expect(res.status).toBe(404);
+  });
+
+  it('cross-origin isolates documents and scripts (threaded ONNX Runtime), nothing else', async () => {
+    const isolated = (res: Response) => [res.headers.get('cross-origin-opener-policy'), res.headers.get('cross-origin-embedder-policy')];
+    for (const path of ['/', '/projects/abc', '/assets/app-abc123.js', '/assets/ort-wasm-simd-threaded.jsep.mjs', '/sw.js']) {
+      const res = await app.request(path);
+      expect(res.status, path).toBe(200);
+      expect(isolated(res), path).toEqual(['same-origin', 'credentialless']);
+    }
+    const head = await app.request('/', { method: 'HEAD' });
+    expect(isolated(head)).toEqual(['same-origin', 'credentialless']);
+    // Images, styles, wasm, 404s and the API are served as before.
+    for (const path of ['/icon.svg', '/assets/app-abc123.css', '/assets/ort-wasm-simd-threaded.jsep.wasm', '/assets/missing.js', '/api/health', '/api/unknown']) {
+      const res = await app.request(path);
+      expect(isolated(res), path).toEqual([null, null]);
+    }
+    expect((await app.request('/assets/ort-wasm-simd-threaded.jsep.wasm')).headers.get('content-type')).toBe('application/wasm');
   });
 
   it('keeps the API working', async () => {

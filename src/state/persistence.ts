@@ -8,7 +8,7 @@
  * idb-keyval supports one object store per database, so each store is its own
  * database. Nothing leaves the device except explicit AI requests.
  */
-import { createStore, del, delMany, get, getMany, keys, set, setMany, values, type UseStore } from 'idb-keyval';
+import { createStore, del, delMany, get, getMany, keys, set, setMany, update, values, type UseStore } from 'idb-keyval';
 import { z } from 'zod';
 import { newId } from '../../shared/ids';
 import {
@@ -20,6 +20,7 @@ import {
   type Design,
   type DesignBrief,
   type ElementDimension,
+  type Generation,
   type Photo,
   type Project,
   type ProjectMeta,
@@ -122,15 +123,53 @@ export async function listProjects(): Promise<ProjectMeta[]> {
 }
 
 export async function loadProject(id: string): Promise<Project | undefined> {
-  const raw = await get<unknown>(id, store('projects'));
-  if (!raw) return undefined;
-  return migrateProject(raw);
+  return (await loadProjectRecord(id))?.project;
 }
 
-export async function saveProject(project: Project): Promise<void> {
+/**
+ * The stored document with its save counter (`rev`, kept inside the stored
+ * record but not part of the Project model): a tab passes it back as
+ * `expectedRev` so a stale copy can never overwrite a newer save.
+ */
+export async function loadProjectRecord(id: string): Promise<{ project: Project; rev: number } | undefined> {
+  const raw = await get<unknown>(id, store('projects'));
+  if (!raw) return undefined;
+  return { project: migrateProject(raw), rev: revOf(raw) };
+}
+
+function revOf(raw: unknown): number {
+  return isObj(raw) && typeof raw.rev === 'number' && Number.isFinite(raw.rev) ? raw.rev : 0;
+}
+
+/** A save refused because another tab saved (or deleted) the project after this copy was loaded. */
+export class StaleWriteError extends Error {
+  override name = 'StaleWriteError';
+}
+
+/**
+ * Saves the document and its meta record; returns the new save counter.
+ * With `expectedRev` the write is refused (StaleWriteError) when the stored
+ * document is gone or was saved by someone else since that rev — the check
+ * and the write share one transaction.
+ */
+export async function saveProject(project: Project, opts: { expectedRev?: number } = {}): Promise<number> {
+  let rev = 0;
   // Document first: a missing meta record is rebuilt by listProjects, a missing document is not.
-  await set(project.id, project, store('projects'));
+  await update<unknown>(
+    project.id,
+    (cur) => {
+      const stored = revOf(cur);
+      if (opts.expectedRev !== undefined) {
+        if (cur === undefined) throw new StaleWriteError('This project was deleted in another tab.');
+        if (stored > opts.expectedRev) throw new StaleWriteError('This project changed in another tab.');
+      }
+      rev = stored + 1;
+      return { ...project, rev };
+    },
+    store('projects'),
+  );
   await set(project.id, projectMeta(project), store('meta'));
+  return rev;
 }
 
 /** Deletes the project and every blob / mask it references. */
@@ -160,7 +199,15 @@ export async function deleteProject(id: string): Promise<void> {
 // Blobs & masks
 // ---------------------------------------------------------------------------
 
+/**
+ * Ids written by this page session. The startup sweep never deletes them: a
+ * put-then-reference flow (photo import, variation, idea) writes pixels
+ * before the document that will reference them is saved.
+ */
+const writtenThisSession = new Set<string>();
+
 export async function putBlob(id: string, blob: Blob): Promise<void> {
+  writtenThisSession.add(id);
   await set(id, blob, store('blobs'));
 }
 
@@ -175,6 +222,7 @@ export async function deleteBlobs(ids: string[]): Promise<void> {
 }
 
 export async function putMask(id: string, mask: Mask): Promise<void> {
+  writtenThisSession.add(id);
   const record: StoredMask = { width: mask.width, height: mask.height, rle: encodeMaskRLE(mask) };
   await set(id, record, store('masks'));
 }
@@ -267,23 +315,44 @@ function visitPhotoRefs(photo: Photo, v: RefVisitor): void {
   for (const z of photo.scene?.zones ?? []) swapRef(z, 'maskId', mask);
   for (const d of photo.designs) for (const r of d.aiRenders) swapRef(r, 'imageId', blob);
   for (const g of photo.generations) {
-    for (const vr of g.variations) {
-      swapRef(vr, 'imageId', blob);
-      swapRef(vr, 'thumbId', blob);
-    }
-    for (const pl of g.planned ?? []) {
-      if (pl.handoff) {
-        swapRef(pl.handoff, 'cleanImageId', blob);
-        swapRef(pl.handoff, 'markedImageId', blob);
-      }
-      if (pl.staged) {
-        swapRef(pl.staged, 'imageId', blob);
-        swapRef(pl.staged, 'thumbId', blob);
-      }
-    }
+    visitGenerationRefs(g, v);
     visitBrief(g.brief, v);
   }
   visitBrief(photo.draft, v);
+}
+
+/** Blobs / masks a run owns alone: variations, hand-off packs, staged results and their change maps, its frozen target masks (not its brief's visuals, which the draft may share). */
+function visitGenerationRefs(g: Generation, v: RefVisitor): void {
+  const blob = (id: string) => v.blob(id);
+  const mask = (id: string) => v.mask(id);
+  for (const vr of g.variations) {
+    swapRef(vr, 'imageId', blob);
+    swapRef(vr, 'thumbId', blob);
+  }
+  for (const pl of g.planned ?? []) {
+    if (pl.handoff) {
+      swapRef(pl.handoff, 'cleanImageId', blob);
+      swapRef(pl.handoff, 'markedImageId', blob);
+    }
+    if (pl.staged) {
+      swapRef(pl.staged, 'imageId', blob);
+      swapRef(pl.staged, 'thumbId', blob);
+      if (pl.staged.review) swapRef(pl.staged.review, 'changeMapId', blob);
+    }
+  }
+  for (const z of g.target?.zones ?? []) swapRef(z, 'maskId', mask);
+  if (g.handoffTarget) swapRef(g.handoffTarget, 'maskId', mask);
+}
+
+/** Every blob id and mask id one run owns (for cleanup when the run is deleted). */
+export function generationOwnedIds(g: Generation): { blobIds: string[]; maskIds: string[] } {
+  const blobIds = new Set<string>();
+  const maskIds = new Set<string>();
+  visitGenerationRefs(g, {
+    blob: (id) => (blobIds.add(id), id),
+    mask: (id) => (maskIds.add(id), id),
+  });
+  return { blobIds: [...blobIds], maskIds: [...maskIds] };
 }
 
 /** Every blob id and mask id owned by one photo (for cleanup when the photo or its space is deleted). */
@@ -363,15 +432,36 @@ function migrateBrief(raw: unknown): DesignBrief {
 /** Page-session start: runs created before it cannot still be rendering. */
 const SESSION_START = Date.now();
 
+/** Error text of runs a reload interrupted (the strip and History show it as "Interrupted"). */
+export const INTERRUPTED = 'Interrupted — Mode was closed or reloaded before this run finished.';
+
+const validVariations = (g: Loose) => arr<Loose>(g.variations).filter((v) => isObj(v) && typeof v.imageId === 'string');
+
+/**
+ * A run a previous page session left 'running' before it recorded a plan or
+ * rendered anything (the tab was closed during planning or with the review
+ * open): nothing was sent and it owns no images.
+ */
+function isStaleUnsentRun(g: Loose): boolean {
+  return g.status === 'running' && num(g.createdAt, 0) < SESSION_START && validVariations(g).length === 0 && arr(g.planned).length === 0;
+}
+
+/** Masks a run owns (its frozen target's refined outlines, the hand-off target): removing it needs the store's cleanup. */
+function ownsMasks(g: Loose): boolean {
+  const target = isObj(g.target) ? g.target : {};
+  return isObj(g.handoffTarget) || arr<Loose>(target.zones).some((z) => isObj(z) && typeof z.maskId === 'string');
+}
+
 /** A run left 'running' by a previous page session (tab closed mid-render) can never finish: settle it. */
 function settleInterruptedRun(g: Loose): { status: string; error?: string } {
   const status = typeof g.status === 'string' ? g.status : 'done';
-  if (status !== 'running' || num(g.createdAt, 0) >= SESSION_START) {
+  // An unsent run that owns masks stays 'running': the Studio removes it with its masks (recoverInterruptedRuns).
+  if (status !== 'running' || num(g.createdAt, 0) >= SESSION_START || (isStaleUnsentRun(g) && ownsMasks(g))) {
     return typeof g.error === 'string' ? { status, error: g.error } : { status };
   }
   return {
-    status: arr(g.variations).length ? 'partial' : 'failed',
-    error: typeof g.error === 'string' && g.error ? g.error : 'Interrupted — the app was closed while this run was rendering.',
+    status: validVariations(g).length ? 'partial' : 'failed',
+    error: typeof g.error === 'string' && g.error ? g.error : INTERRUPTED,
   };
 }
 
@@ -386,7 +476,8 @@ export function migrateProject(raw: unknown): Project {
     throw new Error('Not a Mode project document');
   }
   const now = Date.now();
-  const p = structuredClone(raw) as Loose;
+  // `rev` is the stored record's save counter (see saveProject), not part of the model.
+  const { rev: _rev, ...p } = structuredClone(raw) as Loose;
   const spaces = arr<Loose>(p.spaces).filter(isObj).map((sp) => {
     const known = (SPACE_TYPES as readonly string[]).includes(str(sp.type, ''));
     const type = (known ? sp.type : sp.kind === 'exterior' ? 'other-exterior' : 'other-interior') as SpaceType;
@@ -394,7 +485,8 @@ export function migrateProject(raw: unknown): Project {
       let designs = arr(ph.designs).map((d, i) => migrateDesign(d, i, now));
       if (!designs.length) designs = [migrateDesign({ name: 'Option A' }, 0, now)];
       const activeDesignId = designs.some((d) => d.id === ph.activeDesignId) ? (ph.activeDesignId as string) : designs[0].id;
-      const generations = arr<Loose>(ph.generations).filter(isObj).map((g) => ({
+      // Unsent runs from a closed tab are dropped (ones owning masks are removed by the Studio with them).
+      const generations = arr<Loose>(ph.generations).filter((g) => isObj(g) && !(isStaleUnsentRun(g) && !ownsMasks(g))).map((g) => ({
         ...g,
         brief: migrateBrief(g.brief),
         variations: arr<Loose>(g.variations).filter((v) => isObj(v) && typeof v.imageId === 'string'),
@@ -403,6 +495,19 @@ export function migrateProject(raw: unknown): Project {
         provider: str(g.provider, ''),
         model: str(g.model, ''),
         ...settleInterruptedRun(g),
+        // A damaged entry (null, no id, a non-object pack) must not break referencedIds / deleteProject.
+        ...(g.planned !== undefined
+          ? {
+              planned: arr<Loose>(g.planned)
+                .filter((pl) => isObj(pl) && typeof pl.id === 'string' && pl.id)
+                .map(({ handoff, staged, ...pl }) => ({
+                  ...pl,
+                  status: str(pl.status, 'pending'),
+                  ...(isObj(handoff) ? { handoff } : {}),
+                  ...(isObj(staged) ? { staged } : {}),
+                })),
+            }
+          : {}),
       }));
       const scene = isObj(ph.scene)
         ? { ...ph.scene, zones: arr(ph.scene.zones).filter(isObj).map((z) => ({ ...z, polygon: arr(z.polygon) })), paths: arr(ph.scene.paths).filter(isObj), keep: arr(ph.scene.keep), opportunities: arr(ph.scene.opportunities) }
@@ -422,17 +527,24 @@ export function migrateProject(raw: unknown): Project {
     });
     return { ...sp, name: str(sp.name, 'Space'), type, kind: spaceKindOf(type), photos, createdAt: num(sp.createdAt, now) };
   });
-  const ideaBoard = arr<Loose>(p.ideaBoard).filter(isObj).map((it) => ({
-    ...it,
-    id: str(it.id, '') || newId('idea'),
-    kind: str(it.kind, 'note'),
-    title: str(it.title, ''),
-    note: str(it.note, ''),
-    colors: arr<string>(it.colors).filter((c) => typeof c === 'string'),
-    spaceIds: arr<string>(it.spaceIds),
-    active: it.active !== false,
-    createdAt: num(it.createdAt, now),
-  }));
+  const spaceIdSet = new Set(spaces.map((sp) => (sp as Loose).id));
+  const ideaBoard = arr<Loose>(p.ideaBoard).filter(isObj).map((it) => {
+    // Scopes pointing at deleted spaces are dropped; an idea scoped only to deleted
+    // spaces is turned off rather than widened to the whole house (as deleteSpace does).
+    const listed = arr<string>(it.spaceIds).filter((sid) => typeof sid === 'string');
+    const spaceIds = listed.filter((sid) => spaceIdSet.has(sid));
+    return {
+      ...it,
+      id: str(it.id, '') || newId('idea'),
+      kind: str(it.kind, 'note'),
+      title: str(it.title, ''),
+      note: str(it.note, ''),
+      colors: arr<string>(it.colors).filter((c) => typeof c === 'string'),
+      spaceIds,
+      active: it.active !== false && !(listed.length > 0 && spaceIds.length === 0),
+      createdAt: num(it.createdAt, now),
+    };
+  });
   return {
     ...p,
     id: p.id as string,
@@ -538,7 +650,8 @@ const zLoose = z.looseObject({});
 const zRegion = z.looseObject({ id: zId, maskId: zId });
 const zDesign = z.looseObject({ id: zId });
 const zVariation = z.looseObject({ id: zId, imageId: zId, thumbId: zId });
-const zGeneration = z.looseObject({ id: zId, variations: z.array(zVariation).optional() });
+const zPlanned = z.looseObject({ id: zId, status: z.string().optional(), handoff: zLoose.optional(), staged: zLoose.optional() });
+const zGeneration = z.looseObject({ id: zId, variations: z.array(zVariation).optional(), planned: z.array(zPlanned).optional() });
 const zZone = z.looseObject({ id: zId, maskId: zId.optional() });
 const zScene = z.looseObject({ zones: z.array(zZone).optional() });
 const zPhoto = z.looseObject({
@@ -681,30 +794,103 @@ export async function importProjectBundle(file: Blob): Promise<{ project: Projec
   const imported: Project = { ...project, id: newId('prj'), name, updatedAt: Date.now() };
 
   const written = { blobs: [] as string[], masks: [] as string[] };
-  try {
-    // Small batches keep each transaction (and its memory) bounded.
-    for (let i = 0; i < blobEntries.length; i += 8) {
-      const batch = blobEntries.slice(i, i + 8);
-      await setMany(batch, store('blobs'));
-      written.blobs.push(...batch.map(([id]) => id));
+  let projectTouched = false;
+  // Holds off another tab's startup sweep while pixels are stored but not yet referenced.
+  await withStorageInUse(async () => {
+    try {
+      // Small batches keep each transaction (and its memory) bounded.
+      for (let i = 0; i < blobEntries.length; i += 8) {
+        const batch = blobEntries.slice(i, i + 8);
+        for (const [id] of batch) writtenThisSession.add(id);
+        await setMany(batch, store('blobs'));
+        written.blobs.push(...batch.map(([id]) => id));
+      }
+      if (maskEntries.length) {
+        for (const [id] of maskEntries) writtenThisSession.add(id);
+        await setMany(maskEntries, store('masks'));
+        written.masks.push(...maskEntries.map(([id]) => id));
+      }
+      projectTouched = true; // saveProject may write the document and then fail on the meta record
+      await saveProject(imported);
+      // Library last: until everything else is saved nothing references the new blobs,
+      // so a failure anywhere earlier leaves the stored library as it was.
+      if (added.length) await saveLibrary([...stored, ...added]);
+    } catch (err) {
+      await Promise.all([
+        projectTouched ? Promise.all([del(imported.id, store('projects')), del(imported.id, store('meta'))]) : undefined,
+        deleteBlobs(written.blobs),
+        deleteMasks(written.masks),
+      ]).catch(() => undefined);
+      const msg = (err as Error)?.name === 'QuotaExceededError' ? 'Not enough storage space on this device.' : (err as Error)?.message;
+      throw new Error(`Could not save the imported project: ${msg}`);
     }
-    if (maskEntries.length) {
-      await setMany(maskEntries, store('masks'));
-      written.masks.push(...maskEntries.map(([id]) => id));
-    }
-    if (added.length) await saveLibrary([...stored, ...added]);
-    await saveProject(imported);
-  } catch (err) {
-    await Promise.all([deleteBlobs(written.blobs), deleteMasks(written.masks)]).catch(() => undefined);
-    const msg = (err as Error)?.name === 'QuotaExceededError' ? 'Not enough storage space on this device.' : (err as Error)?.message;
-    throw new Error(`Could not save the imported project: ${msg}`);
-  }
+  });
   return { project: imported, library: carried };
 }
 
 // ---------------------------------------------------------------------------
 // Storage housekeeping
 // ---------------------------------------------------------------------------
+
+/**
+ * Cross-tab coordination (Web Locks): every tab with a project open, and every
+ * import in progress, holds GC_LOCK in shared mode; the startup sweep takes it
+ * exclusively and only when nobody holds it. Writers of one project hold
+ * `${PROJECT_LOCK_PREFIX}<id>` (see the store).
+ */
+export const GC_LOCK = 'mode-gc';
+export const PROJECT_LOCK_PREFIX = 'mode-project:';
+
+function lockManager(): LockManager | undefined {
+  return typeof navigator !== 'undefined' ? navigator.locks : undefined;
+}
+
+/** Runs `fn` while holding GC_LOCK in shared mode (waits for a sweep in progress); runs it directly without Web Locks. */
+export async function withStorageInUse<T>(fn: () => Promise<T>): Promise<T> {
+  const locks = lockManager();
+  if (!locks) return fn();
+  return locks.request(GC_LOCK, { mode: 'shared' }, fn) as Promise<T>;
+}
+
+/**
+ * Deletes blobs and masks that no stored project, the library or `keep`
+ * references. Aborts without deleting anything when a project document is
+ * unreadable (its references are unknown). Never touches ids written by this
+ * page session. Callers make sure no other tab is writing (sweepWhenIdle).
+ */
+export async function sweepUnreferenced(keep: Set<string> = new Set()): Promise<{ blobs: number; masks: number }> {
+  // Keys before documents: anything referenced by a document read below was written before it.
+  const [blobKeys, maskKeys] = await Promise.all([keys(store('blobs')), keys(store('masks'))]);
+  const [docs, library] = await Promise.all([values<unknown>(store('projects')), loadLibrary()]);
+  const live = new Set(keep);
+  for (const raw of docs) {
+    if (raw === undefined) continue;
+    const refs = referencedIds(migrateProject(raw)); // throws on an unreadable document: abort
+    for (const id of refs.blobIds) live.add(id);
+    for (const id of refs.maskIds) live.add(id);
+  }
+  for (const a of library) if (a.imageId) live.add(a.imageId);
+  const dead = (ids: IDBValidKey[]) => ids.filter((k): k is string => typeof k === 'string' && !live.has(k) && !writtenThisSession.has(k));
+  const blobs = dead(blobKeys);
+  const masks = dead(maskKeys);
+  await Promise.all([blobs.length ? delMany(blobs, store('blobs')) : undefined, masks.length ? delMany(masks, store('masks')) : undefined]);
+  return { blobs: blobs.length, masks: masks.length };
+}
+
+/**
+ * sweepUnreferenced, but only when no tab has a project open or an import
+ * running (null = skipped, also without Web Locks: other tabs can't be ruled out).
+ */
+export async function sweepWhenIdle(keep?: Set<string>): Promise<{ blobs: number; masks: number } | null> {
+  const locks = lockManager();
+  if (!locks) return null;
+  return locks.request(GC_LOCK, { ifAvailable: true }, async (lock) => {
+    if (!lock) return null;
+    const { held = [], pending = [] } = await locks.query();
+    if ([...held, ...pending].some((l) => l.name?.startsWith(PROJECT_LOCK_PREFIX))) return null;
+    return sweepUnreferenced(keep);
+  }) as Promise<{ blobs: number; masks: number } | null>;
+}
 
 /** Asks the browser not to evict our data (best effort). */
 export async function requestPersistentStorage(): Promise<boolean> {

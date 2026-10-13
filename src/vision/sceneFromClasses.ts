@@ -6,7 +6,7 @@
  * guess from the class mix.
  */
 import { newId } from '../../shared/ids';
-import { CONTEXT_ZONE_KINDS, type SceneMap, type SceneZone, type SpaceType, type ZoneKind } from '../../shared/types';
+import { CONTEXT_ZONE_KINDS, spaceKindOf, type SceneMap, type SceneZone, type SpaceType, type ZoneKind } from '../../shared/types';
 import { growMask, shrinkMask } from '../engine/mask';
 import type { Mask } from '../engine/types';
 import { ZONE_KIND_LABELS } from '../ui/studio/panels/zones';
@@ -23,6 +23,107 @@ export const CLIP_PROMPTS = {
   lawn: 'a lawn',
 } as const;
 export type ClipKey = keyof typeof CLIP_PROMPTS;
+
+/** A CLIPSeg prompt standing in for one ADE20K class (scene map without SegFormer). */
+export interface ClipClass {
+  prompt: string;
+  /** ADE20K class name the prompt's pixels are labelled with. */
+  ade: string;
+  /** Also feeds this CLIP override (roof, driveway…) in kindGrid. */
+  clip?: ClipKey;
+}
+
+/**
+ * Prompts for a scene map from CLIPSeg alone (used when the SegFormer
+ * licence is declined). Each pixel takes the most likely prompt above a
+ * threshold; the prompts map onto ADE20K classes so the usual pipeline
+ * (kind mapping, smoothing, roof / driveway / patio / mulch overrides)
+ * applies unchanged. Roofs are labelled as building first and become roofs
+ * through the override, like with SegFormer.
+ */
+export const CLIP_ONLY_CLASSES: { exterior: readonly ClipClass[]; interior: readonly ClipClass[] } = {
+  exterior: [
+    { prompt: 'the walls of a house', ade: 'house' },
+    { prompt: CLIP_PROMPTS.roof, ade: 'house', clip: 'roof' },
+    { prompt: 'the sky', ade: 'sky' },
+    { prompt: 'a tree', ade: 'tree' },
+    { prompt: CLIP_PROMPTS.lawn, ade: 'grass', clip: 'lawn' },
+    { prompt: 'shrubs and flowers', ade: 'plant' },
+    { prompt: CLIP_PROMPTS.mulch, ade: 'earth', clip: 'mulch' },
+    { prompt: 'a window', ade: 'windowpane' },
+    { prompt: 'a front door', ade: 'door' },
+    { prompt: 'a fence', ade: 'fence' },
+    { prompt: 'a street', ade: 'road' },
+    { prompt: CLIP_PROMPTS.driveway, ade: 'road', clip: 'driveway' },
+    { prompt: 'a sidewalk', ade: 'sidewalk' },
+    { prompt: 'a garden path', ade: 'path' },
+    { prompt: CLIP_PROMPTS.patio, ade: 'floor', clip: 'patio' },
+    { prompt: 'front steps', ade: 'stairs' },
+    { prompt: 'a car', ade: 'car' },
+  ],
+  interior: [
+    { prompt: 'a wall', ade: 'wall' },
+    { prompt: 'a floor', ade: 'floor' },
+    { prompt: 'a ceiling', ade: 'ceiling' },
+    { prompt: 'a window', ade: 'windowpane' },
+    { prompt: 'a door', ade: 'door' },
+    { prompt: 'kitchen cabinets', ade: 'cabinet' },
+    { prompt: 'a countertop', ade: 'countertop' },
+    { prompt: 'a fireplace', ade: 'fireplace' },
+    { prompt: 'stairs', ade: 'stairs' },
+    { prompt: 'a sofa', ade: 'sofa' },
+    { prompt: 'a table', ade: 'table' },
+    { prompt: 'a bed', ade: 'bed' },
+    { prompt: 'a rug', ade: 'rug' },
+    { prompt: 'a lamp', ade: 'lamp' },
+    { prompt: 'a person', ade: 'person' },
+  ],
+};
+
+/** Label of class-map pixels no prompt claimed (not an ADE20K class: maps to no zone). */
+export const UNLABELED = 255;
+
+/**
+ * A class map from CLIPSeg probabilities (one plane per entry of `classes`,
+ * all on the same width×height grid): each pixel gets the ADE20K class of its
+ * most likely prompt when that probability reaches `threshold`, else
+ * UNLABELED. Also returns the override planes (roof, driveway…) for kindGrid.
+ */
+export function classMapFromClip(
+  probs: readonly Float32Array[],
+  classes: readonly ClipClass[],
+  width: number,
+  height: number,
+  threshold = 0.35,
+): { classes: ClassMap; clip: ClipMaps } {
+  const n = width * height;
+  const labels = new Uint8Array(n).fill(UNLABELED);
+  const ids = classes.map((c) => {
+    const id = ADE[c.ade];
+    if (id === undefined) throw new Error(`Unknown ADE20K class "${c.ade}"`);
+    return id;
+  });
+  const planes = classes.map((_, k) => probs[k]).filter((p): p is Float32Array => !!p && p.length >= n);
+  if (planes.length === classes.length) {
+    for (let i = 0; i < n; i++) {
+      let best = -1;
+      let bestP = threshold;
+      for (let k = 0; k < planes.length; k++) {
+        const p = planes[k][i];
+        if (p >= bestP) {
+          bestP = p;
+          best = k;
+        }
+      }
+      if (best >= 0) labels[i] = ids[best];
+    }
+  }
+  const clip: ClipMaps = { width, height, probs: {} };
+  classes.forEach((c, k) => {
+    if (c.clip && probs[k]) clip.probs[c.clip] = probs[k];
+  });
+  return { classes: { width, height, labels }, clip };
+}
 
 /** CLIPSeg probabilities resampled to the class map's grid. */
 export interface ClipMaps {
@@ -154,7 +255,7 @@ function dominantClasses(labels: Uint8Array, compLabels: Int32Array, label: numb
   for (let y = c.y0; y <= c.y1; y++) {
     for (let x = c.x0; x <= c.x1; x++) {
       const i = y * width + x;
-      if (compLabels[i] === label) counts.set(labels[i], (counts.get(labels[i]) ?? 0) + 1);
+      if (compLabels[i] === label && labels[i] !== UNLABELED) counts.set(labels[i], (counts.get(labels[i]) ?? 0) + 1);
     }
   }
   return [...counts.entries()]
@@ -300,7 +401,7 @@ function separateFreestandingWalls(classes: ClassMap, grid: Uint8Array, kinds: Z
 /**
  * Kind fixes that need the whole picture: the main building vs neighbours
  * (and slivers such as a chimney split off by the roof, dropped), the front
- * door vs other / garage doors.
+ * door vs other / garage doors, and walks CLIPSeg took for drives.
  */
 function reclassify(found: Found[], W: number, interior: boolean): Found[] {
   if (interior) return found;
@@ -321,7 +422,66 @@ function reclassify(found: Found[], W: number, interior: boolean): Found[] {
     else if (!front) front = true;
     else d.kind = 'door';
   }
-  return found.filter((f) => !drop.has(f));
+  const kept = found.filter((f) => !drop.has(f));
+  walksFromDrives(kept, W);
+  return kept;
+}
+
+/** Pixels per row of a component, middle value over its rows (its typical width, robust to perspective). */
+function medianRowSpan(f: Found, W: number): number {
+  const { comp, mask } = f;
+  const spans: number[] = [];
+  for (let y = comp.y0; y <= comp.y1; y++) {
+    let n = 0;
+    for (let x = comp.x0, i = y * W + comp.x0; x <= comp.x1; x++, i++) if (mask.data[i]) n++;
+    if (n) spans.push(n);
+  }
+  spans.sort((a, b) => a - b);
+  return spans.length ? spans[spans.length >> 1] : 0;
+}
+
+/** True when a pixel of `b` lies within `d` px of a pixel of `a`. */
+function touches(a: Found, b: Found, W: number, d = 2): boolean {
+  const x0 = Math.max(a.comp.x0 - d, b.comp.x0);
+  const x1 = Math.min(a.comp.x1 + d, b.comp.x1);
+  const y0 = Math.max(a.comp.y0 - d, b.comp.y0);
+  const y1 = Math.min(a.comp.y1 + d, b.comp.y1);
+  if (x0 > x1 || y0 > y1) return false;
+  const H = a.mask.height;
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0; x <= x1; x++) {
+      if (!b.mask.data[y * W + x]) continue;
+      for (let yy = Math.max(0, y - d); yy <= Math.min(H - 1, y + d); yy++) {
+        for (let xx = Math.max(0, x - d); xx <= Math.min(W - 1, x + d); xx++) if (a.mask.data[yy * W + xx]) return true;
+      }
+    }
+  }
+  return false;
+}
+
+const ENTRY_KINDS = new Set<ZoneKind>(['front-door', 'steps', 'porch']);
+
+/**
+ * "A driveway" (CLIPSeg) also fires on a front walk. A drive-labelled part is
+ * a walkway when it is narrow — its typical width under 12% of the frame and
+ * under a fifth of the house's width when the house was found (a walk is
+ * 3–5 ft, a drive 10 ft or more) — or when it leads to the front door, steps
+ * or porch rather than a garage door.
+ */
+function walksFromDrives(found: Found[], W: number): void {
+  const drives = found.filter((f) => f.kind === 'driveway');
+  if (drives.length === 0) return;
+  const house = found.filter((f) => f.kind === 'facade' || f.kind === 'roof');
+  const houseW = house.length ? Math.max(...house.map((f) => f.comp.x1)) - Math.min(...house.map((f) => f.comp.x0)) + 1 : 0;
+  const narrowLimit = houseW >= W * 0.25 ? Math.min(W * 0.12, houseW * 0.2) : W * 0.12;
+  const entries = found.filter((f) => ENTRY_KINDS.has(f.kind));
+  const garages = found.filter((f) => f.kind === 'garage-door');
+  for (const f of drives) {
+    const span = medianRowSpan(f, W);
+    const narrow = span < narrowLimit;
+    const toEntry = span < W * 0.25 && entries.some((e) => touches(f, e, W)) && !garages.some((g) => touches(f, g, W));
+    if (narrow || toEntry) f.kind = 'walkway';
+  }
 }
 
 /** One-line summary of what the offline map found. */
@@ -335,8 +495,11 @@ export function offlineSummary(zones: readonly Pick<OfflineZone, 'kind' | 'edita
 
 export const OFFLINE_MODEL_LABEL = 'On-device (SegFormer-B2';
 
-/** A SceneMap from offline zones (no architecture reading, no paths). */
-export function buildOfflineScene(zones: readonly OfflineZone[], category: SpaceType, usedClip: boolean, now = Date.now()): SceneMap {
+/**
+ * A SceneMap from offline zones (no architecture reading, no paths).
+ * `usedSegformer` false = mapped with CLIPSeg alone (SegFormer licence declined).
+ */
+export function buildOfflineScene(zones: readonly OfflineZone[], category: SpaceType, usedClip: boolean, now = Date.now(), usedSegformer = true): SceneMap {
   const sceneZones: SceneZone[] = zones.map((z) => ({
     id: newId('zone'),
     kind: z.kind,
@@ -360,8 +523,19 @@ export function buildOfflineScene(zones: readonly OfflineZone[], category: Space
     keep: [],
     opportunities: [],
     createdAt: now,
-    model: `${OFFLINE_MODEL_LABEL}${usedClip ? ' + CLIPSeg' : ''}, no AI)`,
+    model: usedSegformer ? `${OFFLINE_MODEL_LABEL}${usedClip ? ' + CLIPSeg' : ''}, no AI)` : 'On-device (CLIPSeg, no AI)',
   };
+}
+
+/**
+ * The category an offline map stores: the space type the user chose. The
+ * on-device guess (class shares only — CLIPSeg alone without SegFormer)
+ * replaces it only when the type is generic ("Other exterior / interior")
+ * and the guess is specific and on the same side (inside / outside).
+ */
+export function offlineSceneCategory(guess: SpaceType, spaceType: SpaceType): SpaceType {
+  const generic = spaceType === 'other-exterior' || spaceType === 'other-interior';
+  return generic && !/^other/.test(guess) && spaceKindOf(guess) === spaceKindOf(spaceType) ? guess : spaceType;
 }
 
 /** Category guess for an offline map. */

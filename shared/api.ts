@@ -45,6 +45,11 @@ export const API_PATHS = {
   handoffWatch: '/api/handoff/watch',
   /** GET (Server-Sent Events): `file` events { id, name, size, mtime } for new images while watching. */
   handoffEvents: '/api/handoff/events',
+  /**
+   * POST {} → { ticket }: a single-use, 60-second ticket for `handoffEvents?ticket=`
+   * (EventSource can't send the x-mode-token header; the token never goes in a URL).
+   */
+  handoffEventsTicket: '/api/handoff/events-ticket',
   /** GET ?id=… → the detected image bytes. */
   handoffFile: '/api/handoff/file',
   /** POST { url } → image bytes (https only, SSRF-guarded) for images dragged in from another tab. */

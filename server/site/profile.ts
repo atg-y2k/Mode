@@ -4,6 +4,10 @@
  * and cached per coordinate rounded to 3 decimals (~100 m — the station
  * choice and the soil map unit don't change within that).
  *
+ * - Frost dates come from the bundled station table (server/site/data,
+ *   built by scripts/build-frost-data.mjs) — no network; only when it can't
+ *   be read does the service fall back to NOAA's station inventory and data
+ *   service.
  * - Upstream queries use the rounded point too, so the precise address
  *   never leaves the server and every cache hit is exact.
  * - Answers with frost and soil settled (data or a definite "none") are
@@ -14,17 +18,21 @@
  *   the answer waits at most ECOREGION_GRACE_MS for it once frost and soil
  *   are in; a late answer still lands in the cache, and a failed one is
  *   retried in the background on a later request (at most hourly).
+ * - An HTML page where JSON was expected (SDA's daily maintenance window
+ *   answers HTTP 200 with HTML) is such a temporary failure, not "no data".
  * - Concurrent requests for the same point share one lookup, and a lookup
  *   finishes (and fills the cache) even if the asking browser goes away.
  */
 import type { SiteProfile } from '../../shared/types';
 import { JsonFileCache } from './cache';
 import { ecoregionUrl, parseEcoregion } from './ecoregion';
+import { FREEZE_TABLE_FILE, loadFreezeTable, type FreezeTable } from './freezeTable';
 import {
   MAX_BATCHES,
   NOAA_INVENTORY_URL,
   STATION_BATCH,
   chooseFrostStation,
+  frostFreeSection,
   frostSection,
   nearestStations,
   normalsUrl,
@@ -58,7 +66,8 @@ export const MEMORY_ENTRIES = 1_000;
 /** The 1991–2020 inventory is fixed; refresh yearly in case NCEI republishes it. */
 export const INVENTORY_TTL_MS = 365 * 24 * 60 * 60 * 1000;
 
-const PROFILE_VERSION = 1;
+/** 2: frost-free spots get a frost section (`frostFree: true`) instead of none. */
+const PROFILE_VERSION = 2;
 const INVENTORY_VERSION = 1;
 const INVENTORY_FILE = `noaa-normals-stations-v${INVENTORY_VERSION}.json`;
 const USER_AGENT = 'ModeHomeStudio/1.0 (site profile; local app)';
@@ -70,6 +79,8 @@ type Soil = NonNullable<SiteProfile['soil']>;
 /** A section's outcome: data, a definite "nothing here", or a failure (not cached). */
 export type Section<T> = { status: 'ok'; value: T } | { status: 'none'; note?: string } | { status: 'error'; reason: string };
 
+export type SiteSection = 'frost' | 'soil' | 'ecoregion';
+
 export interface CachedProfile {
   version: number;
   /** "38.997,-77.135" */
@@ -79,7 +90,7 @@ export interface CachedProfile {
   soil?: Soil;
   ecoregion?: string;
   /** Sections that failed. Profiles with frost or soil failed are never written to disk. */
-  failed?: ('frost' | 'soil' | 'ecoregion')[];
+  failed?: SiteSection[];
   /** Last background attempt to fill a failed ecoregion. */
   ecoregionTriedAt?: number;
 }
@@ -111,10 +122,20 @@ export interface SiteServiceOptions {
   timeouts?: Partial<Record<keyof typeof SITE_TIMEOUTS_MS, number>>;
   /** Fresh lookups per window (default LOOKUP_LIMIT). */
   lookupLimit?: { count: number; windowMs: number };
+  /**
+   * Frost-date station table: omitted = the bundled file, a path = that file,
+   * a parsed table = that table, null = none (NOAA's runtime services only).
+   */
+  freezeTable?: FreezeTable | string | null;
 }
 
 export interface SiteProfileService {
   profile(lat: number, lon: number, coordsSource?: CoordsSource): Promise<SiteProfile>;
+  /**
+   * The profile plus the sections that failed temporarily (upstream down or in
+   * maintenance): asking again in a few minutes may fill them.
+   */
+  profileWithStatus?(lat: number, lon: number, coordsSource?: CoordsSource): Promise<{ profile: SiteProfile; unavailable: SiteSection[] }>;
   /** Drops the memory caches (tests). */
   clearMemory(): void;
 }
@@ -128,6 +149,18 @@ export function roundedPoint(lat: number, lon: number): { lat: number; lon: numb
 }
 
 class UpstreamError extends Error {}
+
+/**
+ * An HTML page where JSON was expected (maintenance or error page served with
+ * HTTP 200). JSON content types are trusted; anything else (text/plain, a
+ * missing header) is judged by the first non-blank character.
+ */
+export function looksLikeHtml(contentType: string, body: string): boolean {
+  const type = contentType.split(';')[0].trim().toLowerCase();
+  if (type === 'application/json' || type.endsWith('+json')) return false;
+  if (type === 'text/html' || type === 'application/xhtml+xml') return true;
+  return body.trimStart().startsWith('<');
+}
 
 /** The promise's value if it settles within `ms`, else null (it keeps running). */
 async function settledWithin<T>(promise: Promise<T>, ms: number): Promise<T | null> {
@@ -171,11 +204,28 @@ export function createSiteProfileService(opts: SiteServiceOptions = {}): SitePro
   };
   let inventory: Promise<NormalsStation[]> | null = null;
 
+  // ---- bundled frost table (primary source; read once) ------------------------
+
+  let freezeTable: Promise<FreezeTable | null> | null = null;
+  const loadTable = (): Promise<FreezeTable | null> => {
+    freezeTable ??= (async () => {
+      const source = opts.freezeTable === undefined ? FREEZE_TABLE_FILE : opts.freezeTable;
+      if (source === null || typeof source !== 'string') return source;
+      try {
+        return await loadFreezeTable(source);
+      } catch (err) {
+        log(`[site] bundled frost table unavailable (${err instanceof Error ? err.message : String(err)}); asking NOAA instead`);
+        return null;
+      }
+    })();
+    return freezeTable;
+  };
+
   // ---- upstream helpers -----------------------------------------------------
 
   type GetInit = { method: 'GET' | 'POST'; accept: string; contentType?: string; body?: string };
 
-  const get = async (url: string, init: GetInit, ms: number, total: AbortSignal, what: string): Promise<string> => {
+  const get = async (url: string, init: GetInit, ms: number, total: AbortSignal, what: string): Promise<{ text: string; contentType: string }> => {
     const signal = AbortSignal.any([AbortSignal.timeout(ms), total]);
     const headers: Record<string, string> = { accept: init.accept, 'user-agent': USER_AGENT };
     if (init.contentType) headers['content-type'] = init.contentType;
@@ -190,14 +240,22 @@ export function createSiteProfileService(opts: SiteServiceOptions = {}): SitePro
       throw new UpstreamError(`${what}: HTTP ${res.status}`);
     }
     try {
-      return await res.text();
+      return { text: await res.text(), contentType: res.headers.get('content-type') ?? '' };
     } catch {
       throw new UpstreamError(`${what}: ${signal.aborted ? 'timed out' : 'connection dropped'}`);
     }
   };
 
+  /**
+   * GET/POST expecting JSON. The content type is checked before parsing: USDA
+   * Soil Data Access answers HTTP 200 with an HTML page during its daily
+   * maintenance window (00:30–00:45 US Central), and an HTML error page from
+   * any service is a temporary failure (partial profile, asked again soon),
+   * not "no data here".
+   */
   const getJson = async (url: string, init: GetInit, ms: number, total: AbortSignal, what: string): Promise<unknown> => {
-    const text = await get(url, init, ms, total, what);
+    const { text, contentType } = await get(url, init, ms, total, what);
+    if (looksLikeHtml(contentType, text)) throw new UpstreamError(`${what}: temporarily unavailable (HTML page instead of data, e.g. maintenance)`);
     try {
       return JSON.parse(text) as unknown;
     } catch {
@@ -216,7 +274,7 @@ export function createSiteProfileService(opts: SiteServiceOptions = {}): SitePro
       const fromFile = (f: InventoryFile) => f.stations.map(([id, lat, lon, state, name]) => ({ id, lat, lon, state, name }));
       if (valid && now() - cached.fetchedAt < INVENTORY_TTL_MS) return fromFile(cached);
       try {
-        const text = await get(NOAA_INVENTORY_URL, { method: 'GET', accept: 'text/plain' }, timeouts.inventory, total, 'NOAA station inventory');
+        const { text } = await get(NOAA_INVENTORY_URL, { method: 'GET', accept: 'text/plain' }, timeouts.inventory, total, 'NOAA station inventory');
         const stations = parseStationInventory(text);
         if (stations.length < 100) throw new UpstreamError('NOAA station inventory: unexpectedly short');
         await disk.write(INVENTORY_FILE, {
@@ -240,6 +298,14 @@ export function createSiteProfileService(opts: SiteServiceOptions = {}): SitePro
   // ---- sections -----------------------------------------------------------------
 
   const frostFor = async (lat: number, lon: number, total: AbortSignal): Promise<Section<Frost>> => {
+    const table = await loadTable();
+    if (table) {
+      // The table holds exactly the stations the runtime path could pick, so its nearest one is the answer.
+      const choice = chooseFrostStation(nearestStations(table.stations, lat, lon), table.records);
+      if (choice.kind === 'dates') return { status: 'ok', value: frostSection(choice) };
+      if (choice.kind === 'frost-free') return { status: 'ok', value: frostFreeSection(choice) };
+      return { status: 'none', note: 'no station with freeze normals within 200 km' };
+    }
     const stations = await loadInventory(total);
     const candidates = nearestStations(stations, lat, lon);
     if (candidates.length === 0) return { status: 'none', note: 'no normals station within 200 km' };
@@ -253,7 +319,7 @@ export function createSiteProfileService(opts: SiteServiceOptions = {}): SitePro
       // Decide only over the stations asked so far (nearest first).
       const choice = chooseFrostStation(candidates.slice(0, (batch + 1) * STATION_BATCH), records);
       if (choice.kind === 'dates') return { status: 'ok', value: frostSection(choice) };
-      if (choice.kind === 'frost-free') return { status: 'none', note: `frost-free climate (${choice.record.name ?? choice.station.id})` };
+      if (choice.kind === 'frost-free') return { status: 'ok', value: frostFreeSection(choice) };
     }
     return { status: 'none', note: 'no nearby station with freeze normals' };
   };
@@ -355,29 +421,38 @@ export function createSiteProfileService(opts: SiteServiceOptions = {}): SitePro
       .finally(() => ecoregionRetries.delete(profile.key));
   };
 
+  const profileWithStatus = async (
+    lat: number,
+    lon: number,
+    coordsSource: CoordsSource = 'zip',
+  ): Promise<{ profile: SiteProfile; unavailable: SiteSection[] }> => {
+    const point = roundedPoint(lat, lon);
+    const hit = memory.get(point.key);
+    let cached: CachedProfile;
+    if (hit && hit.expiresAt > now()) {
+      remember(point.key, hit); // most recently used
+      cached = hit.profile;
+    } else {
+      let pending = inflight.get(point.key);
+      if (!pending) {
+        pending = lookUp(point.key, point.lat, point.lon).finally(() => inflight.delete(point.key));
+        inflight.set(point.key, pending);
+      }
+      cached = await pending;
+    }
+    maybeRetryEcoregion(cached, point.lat, point.lon);
+    const out: SiteProfile = { coordsSource, updatedAt: cached.savedAt };
+    if (cached.frost) out.frost = { ...cached.frost };
+    if (cached.soil) out.soil = { ...cached.soil };
+    if (cached.ecoregion) out.ecoregion = cached.ecoregion;
+    return { profile: out, unavailable: [...(cached.failed ?? [])] };
+  };
+
   return {
     async profile(lat, lon, coordsSource = 'zip') {
-      const point = roundedPoint(lat, lon);
-      const hit = memory.get(point.key);
-      let cached: CachedProfile;
-      if (hit && hit.expiresAt > now()) {
-        remember(point.key, hit); // most recently used
-        cached = hit.profile;
-      } else {
-        let pending = inflight.get(point.key);
-        if (!pending) {
-          pending = lookUp(point.key, point.lat, point.lon).finally(() => inflight.delete(point.key));
-          inflight.set(point.key, pending);
-        }
-        cached = await pending;
-      }
-      maybeRetryEcoregion(cached, point.lat, point.lon);
-      const out: SiteProfile = { coordsSource, updatedAt: cached.savedAt };
-      if (cached.frost) out.frost = { ...cached.frost };
-      if (cached.soil) out.soil = { ...cached.soil };
-      if (cached.ecoregion) out.ecoregion = cached.ecoregion;
-      return out;
+      return (await profileWithStatus(lat, lon, coordsSource)).profile;
     },
+    profileWithStatus,
     clearMemory() {
       memory.clear();
       inventory = null;

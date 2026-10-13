@@ -7,10 +7,22 @@
  *
  * Drawn in screen space (CSS px) from the photo-px geometry so line widths
  * and labels stay crisp at any zoom.
+ *
+ * Zones with a refined mask (zone.maskId — sharpened on this device, tapped,
+ * or refined in Fine-tune) are drawn by the mask's own edge (outer rings and
+ * holes, src/vision/maskEdges) instead of the coarse polygon. Masks load from
+ * storage on demand (only ones that were saved) and their edges are cached
+ * per mask version, so brush edits in Fine-tune show up here.
  */
 import { Check, Leaf, Pencil, Sun, CloudSun, Cloud } from 'lucide-react';
-import { useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { ElementSpec, Photo, PlantFeasibility, Project, Pt, ScenePath, SceneZone, Space } from '../../../shared/types';
+import type { Mask } from '../../engine/types';
+import { useInvasivesReady } from '../../site/hooks';
+import * as db from '../../state/persistence';
+import * as runtime from '../../state/runtime';
+import { useStore } from '../../state/store';
+import { hasEdges, maskEdges, type MaskEdges } from '../../vision/maskEdges';
 import { cn } from '../common';
 import { RatingDot } from './Feasibility';
 import { boundsOf, interiorPoint, placeLabel, pointAlong, polygonArea, toScreen, type SceneHit, type Size, type View } from './geometry';
@@ -29,6 +41,100 @@ const PLANTABLE = new Set<SceneZone['kind']>(['lawn', 'planting-bed', 'yard-bord
 
 const pointsAttr = (pts: readonly Pt[], view: View) =>
   pts.map((p) => `${(p.x * view.scale + view.tx).toFixed(1)},${(p.y * view.scale + view.ty).toFixed(1)}`).join(' ');
+
+/** SVG path data for closed rings (outer rings and holes; draw with fill-rule evenodd). */
+const ringsPath = (rings: readonly (readonly Pt[])[], view: View) =>
+  rings.map((r) => `M${pointsAttr(r, view).replace(/ /g, 'L')}Z`).join('');
+
+// ---------------------------------------------------------------------------
+// Refined zone masks
+// ---------------------------------------------------------------------------
+
+/** Edges per mask object and the mask version they were traced at (brush edits mutate masks in place). */
+const edgeCache = new WeakMap<Mask, { version: number; edges: MaskEdges }>();
+
+/** The zone's loaded, photo-sized mask, if any. */
+function zoneMask(zone: SceneZone, width: number, height: number): Mask | undefined {
+  const mask = zone.maskId ? runtime.getMask(zone.maskId) : undefined;
+  return mask && mask.width === width && mask.height === height ? mask : undefined;
+}
+
+/** Runs `fn` when the main thread is idle (next macrotask where requestIdleCallback is missing). */
+function whenIdle(fn: () => void): () => void {
+  const w = globalThis as { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number; cancelIdleCallback?: (id: number) => void };
+  if (w.requestIdleCallback && w.cancelIdleCallback) {
+    const id = w.requestIdleCallback(fn, { timeout: 200 });
+    return () => w.cancelIdleCallback?.(id);
+  }
+  const t = setTimeout(fn, 0);
+  return () => clearTimeout(t);
+}
+
+/**
+ * Mask edges of the zones that have one. Tracing a 12 MP mask takes ~0.1 s,
+ * so edges are traced off the render path, one mask per idle slice, and
+ * cached per mask version; until then (or while a newer version is traced)
+ * the zone shows its last edge, else its polygon.
+ */
+function useZoneEdges(zones: readonly SceneZone[], width: number, height: number, maskKey: string): Map<string, MaskEdges> {
+  const [traced, setTraced] = useState(0);
+  const versions = useStore.getState().maskVersions;
+  const edges = new Map<string, MaskEdges>();
+  const stale: { mask: Mask; version: number }[] = [];
+  for (const z of zones) {
+    const mask = zoneMask(z, width, height);
+    if (!mask) continue;
+    const version = versions[z.maskId as string] ?? 0;
+    const hit = edgeCache.get(mask);
+    if (hit && hasEdges(hit.edges)) edges.set(z.id, hit.edges);
+    if (!hit || hit.version !== version) stale.push({ mask, version });
+  }
+  const pending = stale.length > 0;
+  useEffect(() => {
+    if (!pending) return;
+    return whenIdle(() => {
+      const next = stale[0];
+      edgeCache.set(next.mask, { version: next.version, edges: maskEdges(next.mask) });
+      setTraced((n) => n + 1);
+    });
+    // Re-run after a mask loads or changes (maskKey) and after each traced mask (traced).
+  }, [pending, maskKey, traced, zones, width, height]);
+  return edges;
+}
+
+/**
+ * Loads the zones' refined masks into the runtime cache — only masks saved in
+ * storage at the photo's size (a missing one must not become an empty mask,
+ * which would make the zone unclickable) — and returns a key that changes
+ * when any of them loads or changes.
+ */
+function useZoneMasks(zones: readonly SceneZone[], width: number, height: number): string {
+  const idsKey = zones
+    .map((z) => z.maskId)
+    .filter((id): id is string => !!id)
+    .join('|');
+  const versions = useStore((s) => (idsKey ? idsKey.split('|').map((id) => s.maskVersions[id] ?? 0).join(',') : ''));
+  const [loads, setLoads] = useState(0);
+  useEffect(() => {
+    const missing = idsKey ? idsKey.split('|').filter((id) => !runtime.getMask(id)) : [];
+    if (missing.length === 0 || width <= 0 || height <= 0) return;
+    let alive = true;
+    void Promise.all(
+      missing.map(async (id) => {
+        const stored = await db.getMask(id).catch(() => undefined);
+        if (!stored || stored.width !== width || stored.height !== height) return false;
+        await runtime.loadMask(id, width, height);
+        return true;
+      }),
+    ).then((loaded) => {
+      if (alive && loaded.some(Boolean)) setLoads((n) => n + 1);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [idsKey, width, height]);
+  return `${versions}:${loads}`;
+}
 
 export interface OverlayProps {
   photo: Photo;
@@ -60,6 +166,8 @@ export function ZoneOverlay({
 }: OverlayProps) {
   const scene = photo.scene;
   const zones = useMemo(() => [...(scene?.zones ?? [])].sort((a, b) => polygonArea(b.polygon) - polygonArea(a.polygon)), [scene?.zones]);
+  const maskKey = useZoneMasks(zones, photo.width, photo.height);
+  const edges = useZoneEdges(zones, photo.width, photo.height, maskKey);
   if (!scene) return null;
   const hoverZone = hover?.kind === 'zone' ? hover.id : null;
   const hoverPath = hover?.kind === 'path' ? hover.id : null;
@@ -73,7 +181,8 @@ export function ZoneOverlay({
   const badges = visibleZones
     .filter((z) => targetZones.has(z.id) && z.id !== hoverZone)
     .map((z) => {
-      const c = interiorPoint(z.polygon);
+      // A refined mask knows a point truly inside it (not in a hole such as a tree bed in the lawn).
+      const c = edges.get(z.id)?.labelPoint ?? interiorPoint(z.polygon);
       return { z, s: toScreen(view, c.x, c.y) };
     })
     .filter(({ s }) => s.x >= 0 && s.y >= 0 && s.x <= stage.width && s.y <= stage.height);
@@ -90,20 +199,32 @@ export function ZoneOverlay({
           const targeted = targetZones.has(z.id);
           const hovered = z.id === hoverZone;
           const focused = z.id === focusZoneId;
+          const halo = { fill: 'none', stroke: 'rgb(0 0 0 / 0.35)', strokeWidth: targeted || hovered || focused ? 4 : 2.5, strokeLinejoin: 'round' as const };
+          const line = {
+            fill: targeted ? 'var(--accent)' : hovered ? 'white' : 'transparent',
+            fillOpacity: targeted ? (hovered ? 0.32 : 0.22) : hovered ? 0.14 : 0,
+            stroke: focused ? 'var(--gold)' : targeted ? 'var(--accent)' : 'white',
+            strokeOpacity: targeted || hovered || focused ? 1 : z.editable ? 0.55 : 0.3,
+            strokeWidth: focused ? 2.5 : targeted || hovered ? 2 : 1.25,
+            strokeDasharray: focused ? '7 5' : z.editable ? undefined : '4 4',
+            strokeLinejoin: 'round' as const,
+          };
+          const edge = edges.get(z.id);
+          if (edge) {
+            // The refined mask's own edge: every part and the holes inside them.
+            const d = ringsPath([...edge.outer, ...edge.holes], view);
+            return (
+              <g key={z.id} data-zone-edge="mask" className={cn(targeted && rendering && 'animate-pulse')}>
+                <path d={d} {...halo} />
+                <path d={d} fillRule="evenodd" {...line} />
+              </g>
+            );
+          }
           const pts = pointsAttr(z.polygon, view);
           return (
-            <g key={z.id} className={cn(targeted && rendering && 'animate-pulse')}>
-              <polygon points={pts} fill="none" stroke="rgb(0 0 0 / 0.35)" strokeWidth={targeted || hovered || focused ? 4 : 2.5} strokeLinejoin="round" />
-              <polygon
-                points={pts}
-                fill={targeted ? 'var(--accent)' : hovered ? 'white' : 'transparent'}
-                fillOpacity={targeted ? (hovered ? 0.32 : 0.22) : hovered ? 0.14 : 0}
-                stroke={focused ? 'var(--gold)' : targeted ? 'var(--accent)' : 'white'}
-                strokeOpacity={targeted || hovered || focused ? 1 : z.editable ? 0.55 : 0.3}
-                strokeWidth={focused ? 2.5 : targeted || hovered ? 2 : 1.25}
-                strokeDasharray={focused ? '7 5' : z.editable ? undefined : '4 4'}
-                strokeLinejoin="round"
-              />
+            <g key={z.id} data-zone-edge="polygon" className={cn(targeted && rendering && 'animate-pulse')}>
+              <polygon points={pts} {...halo} />
+              <polygon points={pts} {...line} />
             </g>
           );
         })}
@@ -268,7 +389,12 @@ export function SceneHoverCard({
   const zone = hover.kind === 'zone' ? photo.scene?.zones.find((z) => z.id === hover.id) : undefined;
   const path = hover.kind === 'path' ? photo.scene?.paths.find((p) => p.id === hover.id) : undefined;
   const setting = space?.kind ?? 'exterior';
-  const checks = useMemo(() => (zone && PLANTABLE.has(zone.kind) ? plantChecksFor(zone, photo, project, setting) : []), [zone, photo, project, setting]);
+  // Re-rate once the US-RIIS list has loaded so invasive flags show.
+  const invasivesReady = useInvasivesReady();
+  const checks = useMemo(
+    () => (zone && PLANTABLE.has(zone.kind) ? plantChecksFor(zone, photo, project, setting) : []),
+    [zone, photo, project, setting, invasivesReady],
+  );
 
   useLayoutEffect(() => {
     const el = ref.current;

@@ -1,22 +1,26 @@
 // @vitest-environment node
 import 'fake-indexeddb/auto';
-import { clear, createStore, set as idbSet } from 'idb-keyval';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { clear, createStore, keys, set as idbSet } from 'idb-keyval';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { AssetDef, Generation, IdeaItem, Photo, Project } from '../../shared/types';
-import { createMask } from '../engine/mask';
+import { createMask, encodeMaskRLE } from '../engine/mask';
 import {
+  INTERRUPTED,
+  StaleWriteError,
   base64ToBytes,
   bytesToBase64,
   deleteBlobs,
   deleteMasks,
   deleteProject,
   exportProjectBundle,
+  generationOwnedIds,
   getBlob,
   getMask,
   importProjectBundle,
   listProjects,
   loadLibrary,
   loadProject,
+  loadProjectRecord,
   migrateProject,
   projectMeta,
   putBlob,
@@ -24,6 +28,8 @@ import {
   referencedIds,
   saveLibrary,
   saveProject,
+  sweepUnreferenced,
+  sweepWhenIdle,
 } from './persistence';
 
 const raw = {
@@ -201,6 +207,42 @@ describe('referencedIds', () => {
     expect(() => referencedIds(p)).not.toThrow();
     expect(referencedIds(p).blobIds).toContain('idea-img');
   });
+
+  it('includes what a run owns: its frozen target masks, the hand-off target and staged change maps (backups and cleanup)', () => {
+    const p = project();
+    const g = generation('h', {
+      target: { zones: [{ id: 'z', label: 'Bed', kind: 'planting-bed', polygon: [], maskId: 'run-zone-copy' }], paths: [] },
+      handoffTarget: { maskId: 'run-handoff-mask', wholeImage: false },
+      planned: [
+        {
+          id: 'pv',
+          title: 'T',
+          brief: 'B',
+          status: 'staged',
+          staged: { imageId: 'st-img', thumbId: 'st-th', source: { kind: 'handoff', app: 'chatgpt' }, review: { changeMapId: 'st-map', blobs: [] } },
+        },
+      ],
+    });
+    p.spaces[0].photos[0].generations.push(g);
+    const { blobIds, maskIds } = referencedIds(p);
+    expect(blobIds).toEqual(expect.arrayContaining(['st-img', 'st-th', 'st-map']));
+    expect(maskIds).toEqual(expect.arrayContaining(['run-zone-copy', 'run-handoff-mask']));
+    // A run's own ids (deleting it) never include its brief's visuals, which the draft may share.
+    const own = generationOwnedIds(g);
+    expect(own.maskIds.sort()).toEqual(['run-handoff-mask', 'run-zone-copy']);
+    expect(own.blobIds).toEqual(expect.arrayContaining(['st-img', 'st-th', 'st-map']));
+    expect(own.blobIds).not.toContain('h-optimg');
+  });
+
+  it('a bundle round trip gives a run’s masks fresh ids with their pixels', async () => {
+    const p = project();
+    p.spaces[0].photos[0].generations.push(generation('h', { handoffTarget: { maskId: 'run-handoff-mask', wholeImage: false } }));
+    await seedPixels(p);
+    const { project: imported } = await importProjectBundle(await exportProjectBundle(p, []));
+    const id = imported.spaces[0].photos[0].generations.find((x) => x.id === 'h')!.handoffTarget!.maskId;
+    expect(id).not.toBe('run-handoff-mask');
+    expect(await getMask(id)).toBeDefined();
+  });
 });
 
 describe('projects', () => {
@@ -249,6 +291,47 @@ describe('projects', () => {
 });
 
 describe('migrateProject', () => {
+  it('cleans damaged hand-off entries so references can always be listed (and deleteProject cleans up)', async () => {
+    const withPlanned = (planned: unknown) => {
+      const doc = JSON.parse(JSON.stringify(project()));
+      doc.spaces[0].photos[0].generations[0].planned = planned;
+      return doc;
+    };
+    for (const planned of [[null, { id: 'x', handoff: 5 }], {}, [{ title: 'no id' }, 'str']]) {
+      expect(() => referencedIds(migrateProject(withPlanned(planned)))).not.toThrow();
+    }
+    expect(migrateProject(withPlanned([null, { id: 'x', handoff: 5, staged: null }])).spaces[0].photos[0].generations[0].planned).toEqual([
+      { id: 'x', status: 'pending' },
+    ]);
+    expect(migrateProject(withPlanned({})).spaces[0].photos[0].generations[0].planned).toEqual([]);
+    expect('planned' in migrateProject(project()).spaces[0].photos[0].generations[0]).toBe(false);
+
+    // Already stored that way: deleteProject still finds (and deletes) every blob.
+    const p = project();
+    await seedPixels(p);
+    await idbSet(p.id, withPlanned([null]), raw.projects);
+    await deleteProject(p.id);
+    expect(await getBlob('p1-img')).toBeUndefined();
+    expect(await getMask('zone-mask')).toBeUndefined();
+  });
+
+  it('drops idea scopes of deleted spaces; an idea left with none is turned off, not widened', () => {
+    const doc = project();
+    doc.ideaBoard = [
+      { ...idea, id: 'gone-only', spaceIds: ['s-deleted'] },
+      { ...idea, id: 'mixed', spaceIds: ['s-deleted', 's2'] },
+      { ...idea, id: 'house', spaceIds: [] },
+      { ...idea, id: 'off', spaceIds: ['s1'], active: false },
+    ];
+    const board = migrateProject(doc).ideaBoard;
+    expect(board.map((it) => [it.id, it.spaceIds, it.active])).toEqual([
+      ['gone-only', [], false],
+      ['mixed', ['s2'], true],
+      ['house', [], true],
+      ['off', ['s1'], false],
+    ]);
+  });
+
   it('fills Studio fields missing from older saves without mutating the input', () => {
     const old = JSON.parse(JSON.stringify(project())) as Record<string, unknown> & Project;
     delete (old as Partial<Project>).ideaBoard;
@@ -279,12 +362,28 @@ describe('migrateProject', () => {
 
   it('settles runs left running by a previous page session', () => {
     const p = project();
-    p.spaces[0].photos[0].generations = [generation('dead', { status: 'running' }), generation('empty', { status: 'running', variations: [] })];
+    p.spaces[0].photos[0].generations = [
+      generation('dead', { status: 'running' }),
+      generation('empty', { status: 'running', variations: [], planned: [{ id: 'pv', title: 'T', brief: 'B', status: 'pending' }] }),
+    ];
     const live = generation('live', { status: 'running', createdAt: Date.now() + 1000 });
     p.spaces[0].photos[0].generations.push(live);
     const gens = migrateProject(p).spaces[0].photos[0].generations;
     expect(gens.map((g) => g.status)).toEqual(['partial', 'failed', 'running']);
-    expect(gens[1].error).toMatch(/Interrupted/);
+    expect(gens[1].error).toBe(INTERRUPTED);
+  });
+
+  it('drops runs a previous session left in planning or the review (no plan recorded, nothing rendered)', () => {
+    const p = project();
+    p.spaces[0].photos[0].generations = [generation('review', { status: 'running', variations: [] }), generation('kept', { status: 'done' })];
+    const gens = migrateProject(p).spaces[0].photos[0].generations;
+    expect(gens.map((g) => g.id)).toEqual(['kept']);
+    // One that owns masks (frozen outline copies) is left for the Studio to remove together with them.
+    const q = project();
+    q.spaces[0].photos[0].generations = [
+      generation('owns', { status: 'running', variations: [], target: { zones: [{ id: 'z', label: 'Bed', kind: 'planting-bed', polygon: [], maskId: 'msk_copy' }], paths: [] } }),
+    ];
+    expect(migrateProject(q).spaces[0].photos[0].generations.map((g) => [g.id, g.status])).toEqual([['owns', 'running']]);
   });
 
   it('maps unknown space types by kind and drops null scenes / drafts', () => {
@@ -474,5 +573,143 @@ describe('bundles', () => {
       /damaged.*project\.spaces\[0\]\.photos\[0\]\.width/,
     );
     expect(await listProjects()).toEqual([]);
+  });
+
+  it('rejects a damaged hand-off entry with the "damaged" message (not a TypeError)', async () => {
+    const p = project();
+    p.spaces[0].photos[0].generations[0].planned = [{ id: 'pl1', title: 't', brief: 'b', status: 'done' }, null as never];
+    await expect(importProjectBundle(new Blob([JSON.stringify({ format: 'mode-project', version: 1, project: p })]))).rejects.toThrow(
+      /damaged.*planned\[1\]/,
+    );
+    expect(await listProjects()).toEqual([]);
+  });
+
+  /** Makes every put into one object store fail like a full disk. */
+  function failPuts(storeName: string): () => void {
+    const proto = IDBObjectStore.prototype;
+    const put = proto.put;
+    proto.put = function (this: IDBObjectStore, ...args: Parameters<IDBObjectStore['put']>) {
+      if (this.name === storeName) throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+      return put.apply(this, args);
+    };
+    return () => void (proto.put = put);
+  }
+
+  for (const storeName of ['projects', 'meta']) {
+    it(`rolls everything back when the ${storeName} write fails, so a retry starts clean`, async () => {
+      const { bundle } = await exportSample();
+      await Promise.all(Object.values(raw).map((s) => clear(s)));
+      const prior: AssetDef[] = [{ ...libAsset, id: 'lib-other', name: 'Bench', imageId: undefined }];
+      await saveLibrary(prior);
+      const restore = failPuts(storeName);
+      try {
+        await expect(importProjectBundle(bundle)).rejects.toThrow(/Not enough storage space/);
+      } finally {
+        restore();
+      }
+      expect(await loadLibrary()).toEqual(prior); // no entries pointing at deleted images
+      expect(await listProjects()).toEqual([]);
+      expect(await keys(raw.projects)).toEqual([]);
+      expect(await keys(raw.blobs)).toEqual([]);
+      expect(await keys(raw.masks)).toEqual([]);
+
+      const { project: imp, library } = await importProjectBundle(bundle);
+      expect((await listProjects()).map((m) => m.id)).toEqual([imp.id]);
+      const lib = await loadLibrary();
+      expect(lib.map((a) => a.id)).toEqual(['lib-other', 'lib-lantern']);
+      expect(await getBlob(library[0].imageId!)).toBeDefined();
+      expect(await getBlob(lib[1].imageId!)).toBeDefined();
+    });
+  }
+});
+
+describe('saving with a revision check (two tabs)', () => {
+  it('counts saves and refuses a write from a copy older than the stored one', async () => {
+    const p = project();
+    expect(await saveProject(p)).toBe(1);
+    const rec = await loadProjectRecord(p.id);
+    expect(rec?.rev).toBe(1);
+    expect(rec?.project).toEqual(p); // the counter is not part of the model
+    expect(await saveProject({ ...p, name: 'Tab A' }, { expectedRev: 1 })).toBe(2);
+    await expect(saveProject({ ...p, name: 'Tab B (stale)' }, { expectedRev: 1 })).rejects.toBeInstanceOf(StaleWriteError);
+    expect((await loadProject(p.id))?.name).toBe('Tab A');
+    expect((await listProjects())[0].name).toBe('Tab A');
+  });
+
+  it('refuses to bring back a project deleted elsewhere', async () => {
+    const p = project();
+    await saveProject(p);
+    await deleteProject(p.id);
+    await expect(saveProject(p, { expectedRev: 1 })).rejects.toBeInstanceOf(StaleWriteError);
+    expect(await loadProject(p.id)).toBeUndefined();
+    expect(await listProjects()).toEqual([]);
+  });
+});
+
+describe('sweepUnreferenced', () => {
+  const storedMask = () => ({ width: 8, height: 4, rle: encodeMaskRLE(createMask(8, 4)) });
+
+  /** Leftovers from an earlier page session: written straight to the stores, not through putBlob / putMask. */
+  async function seedEarlierSession(p: Project, extra: { blobs?: string[]; masks?: string[] } = {}) {
+    const refs = referencedIds(p);
+    for (const id of [...refs.blobIds, ...(extra.blobs ?? [])]) await idbSet(id, blob(id), raw.blobs);
+    for (const id of [...refs.maskIds, ...(extra.masks ?? [])]) await idbSet(id, storedMask(), raw.masks);
+  }
+
+  it('deletes only blobs and masks that no project, the library or `keep` references', async () => {
+    const p = project();
+    await saveProject(p);
+    await seedEarlierSession(p, { blobs: ['orphan-blob', 'lib-img', 'kept'], masks: ['orphan-mask'] });
+    await saveLibrary([{ id: 'lib1', name: 'Lantern', category: 'lighting', source: 'user', aspect: 1, realHeightFt: 1, tags: [], imageId: 'lib-img' }]);
+    await putBlob('written-now', blob('fresh')); // this session's put-then-save flows are never swept
+
+    expect(await sweepUnreferenced(new Set(['kept']))).toEqual({ blobs: 1, masks: 1 });
+    const blobs = (await keys(raw.blobs)).map(String);
+    expect(blobs).not.toContain('orphan-blob');
+    expect(blobs).toEqual(expect.arrayContaining([...referencedIds(p).blobIds, 'lib-img', 'kept', 'written-now']));
+    const masks = (await keys(raw.masks)).map(String);
+    expect(masks.sort()).toEqual([...referencedIds(p).maskIds].sort());
+  });
+
+  it('deletes nothing when a project document is unreadable', async () => {
+    const p = project();
+    await saveProject(p);
+    await seedEarlierSession(p, { blobs: ['orphan-blob'] });
+    await idbSet('broken', { id: 'broken', spaces: 'not a list' }, raw.projects);
+    await expect(sweepUnreferenced()).rejects.toThrow(/Not a Mode project/);
+    expect((await keys(raw.blobs)).map(String)).toContain('orphan-blob');
+  });
+
+  describe('sweepWhenIdle', () => {
+    const nav = globalThis.navigator as Navigator & { locks?: unknown };
+    afterEach(() => void Reflect.deleteProperty(nav, 'locks'));
+
+    function fakeLocks(opts: { gcFree: boolean; held: string[] }) {
+      Object.defineProperty(nav, 'locks', {
+        configurable: true,
+        value: {
+          request: (_name: string, _o: unknown, cb: (lock: unknown) => unknown) => Promise.resolve(cb(opts.gcFree ? { name: 'mode-gc' } : null)),
+          query: async () => ({ held: opts.held.map((name) => ({ name, mode: 'exclusive' })), pending: [] }),
+        },
+      });
+    }
+
+    it('skips without Web Locks (other tabs cannot be ruled out)', async () => {
+      await idbSet('orphan-blob', blob('x'), raw.blobs);
+      expect(await sweepWhenIdle()).toBeNull();
+      expect((await keys(raw.blobs)).map(String)).toContain('orphan-blob');
+    });
+
+    it('skips while a tab has a project open, sweeps when idle', async () => {
+      await idbSet('orphan-blob', blob('x'), raw.blobs);
+      fakeLocks({ gcFree: false, held: [] });
+      expect(await sweepWhenIdle()).toBeNull();
+      fakeLocks({ gcFree: true, held: ['mode-project:prj_x'] });
+      expect(await sweepWhenIdle()).toBeNull();
+      expect((await keys(raw.blobs)).map(String)).toContain('orphan-blob');
+      fakeLocks({ gcFree: true, held: [] });
+      expect(await sweepWhenIdle()).toEqual({ blobs: 1, masks: 0 });
+      expect(await keys(raw.blobs)).toEqual([]);
+    });
   });
 });

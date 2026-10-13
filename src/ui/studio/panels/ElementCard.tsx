@@ -5,13 +5,15 @@
  * question, a note, and "Tailor to my photo" (AI options for this house).
  */
 import { memo, useId, useMemo, useState } from 'react';
-import { ArrowDown, ArrowUp, Check, ChevronDown, GitCompare, Lightbulb, Route, ScanSearch, Sparkles, Trash2, X } from 'lucide-react';
+import { ArrowDown, ArrowUp, Check, ChevronDown, GitCompare, Lightbulb, MoveHorizontal, Route, ScanSearch, Sparkles, TriangleAlert, Trash2, X } from 'lucide-react';
 import type { DesignBrief, ElementDimension, ElementOption, ElementSpec, ProjectLocation, SceneMap, ZoneKind } from '../../../../shared/types';
 import { feasibilityContext, getElementDef, guidanceFor, swatchSpanIn, withPlantFeasibility } from '../../../assets/design';
-import { useStore } from '../../../state/store';
+import { useInvasivesReady } from '../../../site/hooks';
+import { findPhoto, useStore } from '../../../state/store';
 import { useSceneJob } from '../../shell/sceneJobs';
 import { Button, IconButton, TextInput, cn } from '../../common';
 import { generationBlocker } from '../generate';
+import { footprintRoom, growChoice, ROOM_GROUND_KINDS } from '../maskFromZones';
 import { elementFeasibilityContext } from '../planRequest';
 import { compareOptions, editBrief, mapScene, tailorElement, tailorJobKey, typeBrief } from './actions';
 import { clearAiJob, useAiJob } from './aiJobs';
@@ -20,7 +22,7 @@ import { FeasibilityHeader } from './FeasibilityHeader';
 import { growthExamples } from './growth';
 import { GrowthSlider } from './GrowthSlider';
 import { elementIcon } from './icons';
-import { isPlantingElement, siteHeader, spotZones, withSiteDeer } from './siteHeader';
+import { isPlantingElement, siteHeader, spotZones } from './siteHeader';
 import { AiJobStatus, AiProgress, Callout, Chip, FEASIBILITY_META, FeasibilityBadge, InlineText, OptionVisualView, useAiReady } from './ui';
 import { zonesForElement } from './zones';
 
@@ -46,11 +48,12 @@ export const ElementCard = memo(function ElementCard({ el, photoId, scene, locat
   const def = getElementDef(el.type);
   const Icon = elementIcon(def.icon);
   const ctx = useMemo(
-    // The deer pressure set in Settings wins over what the AI climate notes imply (same as the header).
-    () => withSiteDeer(elementFeasibilityContext(el, scene, location, setting, { feasibilityContext }, targetZoneIds), location),
+    () => elementFeasibilityContext(el, scene, location, setting, { feasibilityContext }, targetZoneIds),
     [el, scene, location, setting, targetZoneIds],
   );
-  const dims = useMemo(() => withPlantFeasibility(el.type, el.dimensions, ctx), [el.type, el.dimensions, ctx]);
+  // US-RIIS loads in the background; re-rate once it arrives so invasive flags show.
+  const invasivesReady = useInvasivesReady();
+  const dims = useMemo(() => withPlantFeasibility(el.type, el.dimensions, ctx), [el.type, el.dimensions, ctx, invasivesReady]);
   const planting = isPlantingElement(el, dims, setting);
   const header = useMemo(
     () => (planting ? siteHeader(location, spotZones(el, scene, targetZoneIds), ctx) : null),
@@ -133,6 +136,8 @@ export const ElementCard = memo(function ElementCard({ el, photoId, scene, locat
           {dims.map((dim) => (
             <DimensionBlock key={dim.id} el={el} dim={dim} photoId={photoId} />
           ))}
+
+          <FootprintNote el={el} photoId={photoId} scene={scene} />
 
           {planting && (
             <GrowthSlider
@@ -218,6 +223,75 @@ function Guidance({ type }: { type: ElementSpec['type'] }) {
 }
 
 // ---------------------------------------------------------------------------
+
+const FOOTPRINT_NOUN: Partial<Record<ElementSpec['type'], string>> = { pathway: 'walk', driveway: 'drive', patio: 'patio' };
+
+/**
+ * A wider, curvier or larger choice under "Only selected areas": the ground
+ * beside the element may change too (footprintRoom) — or, with no ground
+ * beside it, the new shape would be cut back to the old outline: say so,
+ * with one-click ways out.
+ */
+function FootprintNote({ el, photoId, scene }: { el: ElementSpec; photoId: string; scene: SceneMap | undefined }) {
+  const photo = useStore((s) => findPhoto(s.project, photoId)?.photo);
+  const draft = photo?.draft;
+  const scope = draft?.scope;
+  const targets = draft?.targetZoneIds;
+  const info = useMemo(() => {
+    if (!scene || !photo || scope === 'whole' || !growChoice(el)) return null;
+    return footprintRoom(scene, { prompt: '', plantMaturity: 'established', ideaItemIds: [], scope: 'zones', targetZoneIds: targets ?? [], elements: [el] }, photo);
+  }, [el, scene, scope, targets, photo?.width, photo?.height]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (!info || !scene) return null;
+  const noun = FOOTPRINT_NOUN[el.type] ?? 'area';
+  if (!info.empty && info.room) {
+    const lawn = info.room.zones.some((z) => z.kind === 'lawn');
+    const names = lawn ? 'the lawn' : info.room.zones.map((z) => z.label.toLowerCase()).slice(0, 2).join(' and ') || 'the ground';
+    return (
+      <p className="flex items-start gap-1.5 text-xs leading-relaxed text-muted" role="note">
+        <MoveHorizontal className="mt-px size-3.5 shrink-0 text-accent" aria-hidden />
+        <span>
+          Room to curve and widen: {names} alongside the {noun} may change too.
+        </span>
+      </p>
+    );
+  }
+  // Nothing beside it to grow into: the ground zones nearest to the element, to let them change.
+  const own = scene.zones.filter((z) => el.zoneIds.includes(z.id));
+  const center = (pts: { x: number; y: number }[]) => pts.reduce((a, p) => ({ x: a.x + p.x / pts.length, y: a.y + p.y / pts.length }), { x: 0, y: 0 });
+  const anchors = [...own.map((z) => center(z.polygon)), ...scene.paths.filter((p) => el.pathIds.includes(p.id)).map((p) => center(p.points))];
+  const dist = (pts: { x: number; y: number }[]) => {
+    const c = center(pts);
+    return Math.min(...anchors.map((a) => Math.hypot(a.x - c.x, a.y - c.y)));
+  };
+  const nearby = scene.zones
+    .filter((z) => ROOM_GROUND_KINDS.includes(z.kind) && z.editable && !el.zoneIds.includes(z.id) && z.polygon.length >= 3)
+    .sort((a, b) => dist(a.polygon) - dist(b.polygon))
+    .slice(0, 2);
+  return (
+    <Callout tone="warning" icon={<TriangleAlert className="size-4" />}>
+      <span className="block">The new {noun} is wider or curvier than the area that may change. Anything outside it will be put back from your photo.</span>
+      <span className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1">
+        {nearby.length > 0 && (
+          <button
+            type="button"
+            className="font-semibold text-accent hover:underline"
+            onClick={() =>
+              editBrief(photoId, (b) => {
+                const t = b.elements.find((e) => e.id === el.id);
+                if (t) for (const z of nearby) if (!t.zoneIds.includes(z.id)) toggleElementZone(t, z.id);
+              })
+            }
+          >
+            Let the {nearby.some((z) => z.kind === 'lawn') ? 'lawn' : nearby[0].label.toLowerCase()} beside it change
+          </button>
+        )}
+        <button type="button" className="font-semibold text-accent hover:underline" onClick={() => editBrief(photoId, (b) => void (b.scope = 'whole'))}>
+          Whole image
+        </button>
+      </span>
+    </Callout>
+  );
+}
 
 function WherePicker({ el, photoId, scene, relevantKinds }: { el: ElementSpec; photoId: string; scene: SceneMap | undefined; relevantKinds: readonly ZoneKind[] }) {
   const [showAll, setShowAll] = useState(false);

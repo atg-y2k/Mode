@@ -16,7 +16,7 @@ import { API_TOKEN_HEADER, API_TOKEN_STORAGE_KEY, ApiError } from '../lib/api';
 export const SITE_PROFILE_TIMEOUT_MS = 45_000;
 
 const MonthDay = z.string().regex(/^\d{2}-\d{2}$/);
-const FrostSchema = z.object({
+const FrostDatesSchema = z.object({
   station: z.string().min(1),
   distanceKm: z.number().nonnegative(),
   lastSpring50: MonthDay,
@@ -25,6 +25,13 @@ const FrostSchema = z.object({
   firstFall10: MonthDay.optional(),
   freeDays: z.number().nonnegative().optional(),
 });
+/** The nearest station records no 32 °F freeze in a typical year: no dates to plan around. */
+const FrostFreeSchema = z.object({
+  station: z.string().min(1),
+  distanceKm: z.number().nonnegative(),
+  frostFree: z.literal(true),
+});
+const FrostSchema = z.union([FrostDatesSchema, FrostFreeSchema]);
 const SoilSchema = z.object({
   mapUnit: z.string().min(1),
   drainage: z.string().optional(),
@@ -83,14 +90,19 @@ function messageFor(status: number, body: unknown): ApiError {
 /**
  * Fetches (via the Mode server) and caches the NOAA frost dates + USDA soil profile for coordinates.
  * `opts.coordsSource` labels where the coordinates came from (default 'zip'); `opts.force` skips the cache.
+ * Coordinates may be missing — a zone-only ZIP (ZipInfo without a centroid) has none — and are then
+ * rejected like invalid ones, before any request.
  * Throws ApiError (aborted: true when the caller cancelled).
  */
 export async function fetchSiteProfile(
-  lat: number,
-  lon: number,
+  lat: number | undefined,
+  lon: number | undefined,
   signal?: AbortSignal,
   opts: { coordsSource?: SiteProfile['coordsSource']; force?: boolean } = {},
 ): Promise<SiteProfile> {
+  if (lat === undefined || lon === undefined) {
+    throw new ApiError('bad_request', 'No coordinates for this spot yet — add them in Settings or use a photo’s location.', 0);
+  }
   if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
     throw new ApiError('bad_request', 'Those coordinates are not valid.', 0);
   }

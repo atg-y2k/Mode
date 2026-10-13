@@ -1,6 +1,7 @@
 /** React bindings for the vision client: live status and which models are already downloaded. */
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import { cachedModels, getVisionStatus, onVisionStatus, visionUnsupportedReason, type ModelKey, type VisionStatus } from '../index';
+import { onSegformerChoice, segformerChoice, type SegformerChoice } from '../license';
 
 export function useVisionStatus(): VisionStatus {
   return useSyncExternalStore(onVisionStatus, getVisionStatus, getVisionStatus);
@@ -41,4 +42,9 @@ export function useCachedModels(enabled = true): Partial<Record<ModelKey, boolea
     };
   }, [enabled]);
   return value;
+}
+
+/** The remembered SegFormer licence decision (null = not decided yet). */
+export function useSegformerChoice(): SegformerChoice | null {
+  return useSyncExternalStore(onSegformerChoice, segformerChoice, segformerChoice);
 }

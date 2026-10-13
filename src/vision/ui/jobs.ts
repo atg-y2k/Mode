@@ -3,14 +3,20 @@
  * - sharpenOutlines: refine a photo's zones into exact masks and write them
  *   to the scene (runtime.setMask + zone.maskId / polygon, one undo step);
  * - mapSceneOffline: build a scene map without Claude, then sharpen it;
- * - a tiny job store so progress and per-zone agreement survive panel switches.
+ * - a tiny job store so progress and per-zone agreement survive panel switches;
+ * - the SegFormer licence gate: before the first task that would use
+ *   SegFormer (non-commercial weights), the action waits in `consent` until
+ *   the user accepts or declines in the Scene panel (resolveSegformerConsent).
  */
 import { create } from 'zustand';
 import { newId } from '../../../shared/ids';
 import type { Photo, Pt, SceneMap, SceneZone, Space } from '../../../shared/types';
 import * as runtime from '../../state/runtime';
 import { findPhoto, isSketchZone, useStore } from '../../state/store';
+import { isDesktopViewport } from '../../ui/shell/hooks';
 import { offlineSceneMap, refineZonesDetailed, VisionError, type RefineDetail } from '../index';
+import { segformerAllowed, segformerChoice, setSegformerChoice, type SegformerChoice } from '../license';
+import { offlineSceneCategory } from '../sceneFromClasses';
 
 export interface ZoneOutcome {
   zoneId: string;
@@ -27,17 +33,56 @@ export interface VisionJob {
   total: number;
 }
 
+/** An action waiting for the SegFormer licence decision. */
+export interface PendingConsent {
+  photoId: string;
+  action: 'sharpen' | 'sharpen-again' | 'map';
+}
+
 interface VisionUIState {
   job: VisionJob | null;
+  /** Set while an action waits for the SegFormer licence decision (shown in the Scene panel). */
+  consent?: PendingConsent | null;
   /** Latest sharpen results per photo (this session). */
   outcomes: Record<string, { at: number; items: ZoneOutcome[] }>;
   /** Last error per photo (cleared on the next run). */
   errors: Record<string, string | undefined>;
 }
 
-export const useVisionJobs = create<VisionUIState>(() => ({ job: null, outcomes: {}, errors: {} }));
+export const useVisionJobs = create<VisionUIState>(() => ({ job: null, consent: null, outcomes: {}, errors: {} }));
 
 const setJob = (job: VisionJob | null) => useVisionJobs.setState({ job });
+
+/**
+ * True (and the action parked in `consent`) when the SegFormer licence hasn't
+ * been decided yet: the Scene panel shows the summary with Use / Continue
+ * without. The panel is brought forward when the action came from elsewhere
+ * (the photo's "Map on this device").
+ */
+function awaitingConsent(photoId: string, action: PendingConsent['action']): boolean {
+  if (segformerChoice() !== null) return false;
+  useVisionJobs.setState({ consent: { photoId, action } });
+  const s = useStore.getState();
+  if (s.studio.panel !== 'scene') s.setStudio({ panel: 'scene' });
+  // Phones show one pane at a time: bring the panel with the question forward.
+  if (!isDesktopViewport() && s.view.mobilePane !== 'panel') s.setView({ mobilePane: 'panel' });
+  return true;
+}
+
+/** Records the SegFormer decision (remembered on this device) and runs the parked action. */
+export function resolveSegformerConsent(choice: SegformerChoice): void {
+  const pending = useVisionJobs.getState().consent;
+  setSegformerChoice(choice);
+  useVisionJobs.setState({ consent: null });
+  if (!pending) return;
+  if (pending.action === 'map') void mapSceneOffline(pending.photoId);
+  else void sharpenOutlines(pending.photoId, pending.action === 'sharpen-again');
+}
+
+/** Drops a parked action without deciding. */
+export function dismissSegformerConsent(): void {
+  useVisionJobs.setState({ consent: null });
+}
 const setError = (photoId: string, message: string | undefined) =>
   useVisionJobs.setState((s) => ({ errors: { ...s.errors, [photoId]: message } }));
 
@@ -108,6 +153,7 @@ async function runSharpen(photo: Photo, zones: SceneZone[], kind: VisionJob['kin
   const image = await runtime.loadPhotoImage(photo);
   const results = await refineZonesDetailed(photo.id, image, zones, {
     context: scene.zones,
+    semantic: segformerAllowed(),
     onProgress: (done, total) => setJob({ photoId: photo.id, kind, phase: 'sharpening', done, total }),
   });
   const sharpened = applyRefinement(photo.id, results, started);
@@ -124,6 +170,7 @@ export async function sharpenOutlines(photoId: string, again = false): Promise<v
   if (useVisionJobs.getState().job) return;
   const photo = findPhoto(useStore.getState().project, photoId)?.photo;
   if (!photo?.scene) return;
+  if (awaitingConsent(photoId, again ? 'sharpen-again' : 'sharpen')) return;
   setError(photoId, undefined);
   try {
     const { sharpened, total } = await runSharpen(photo, sharpenableZones(photo, again), 'sharpen');
@@ -175,15 +222,19 @@ export async function mapSceneOffline(photoId: string): Promise<void> {
   if (useVisionJobs.getState().job) return;
   const found = findPhoto(useStore.getState().project, photoId);
   if (!found) return;
+  if (awaitingConsent(photoId, 'map')) return;
   const { photo, space } = found;
   setError(photoId, undefined);
   setJob({ photoId, kind: 'map', phase: 'preparing', done: 0, total: 0 });
   try {
     const image = await runtime.loadPhotoImage(photo);
     setJob({ photoId, kind: 'map', phase: 'mapping', done: 0, total: 0 });
-    const scene = await offlineSceneMap(photoId, image, space.kind === 'interior');
-    const current = findPhoto(useStore.getState().project, photoId)?.photo;
-    if (!current) return;
+    const mappedScene = await offlineSceneMap(photoId, image, space.kind === 'interior', segformerAllowed());
+    const now = findPhoto(useStore.getState().project, photoId);
+    const current = now?.photo;
+    if (!now || !current) return;
+    // The user's space type (as it is now) stays the category; the class-mix guess only fills in a generic one.
+    const scene: SceneMap = { ...mappedScene, category: offlineSceneCategory(mappedScene.category, now.space.type) };
     if (current.scene && current.scene.zones.some((z) => !isSketchZone(z))) {
       useStore.getState().notify('This photo was mapped meanwhile — kept that map.', 'info');
       return;

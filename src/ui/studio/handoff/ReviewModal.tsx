@@ -3,9 +3,9 @@
  * variation's exact instruction (editable, can be left out), the marked
  * preview (what may change / what you'll paste), what stays protected, and
  * for hand-offs how many pastes this costs. Send continues the run; Edit
- * brief or closing cancels it. Mounted once by StudioView.
+ * brief or closing cancels it. Mounted once by the Workspace (every pane).
  */
-import { Loader2, Pencil, Send, ShieldCheck, Sparkles, Undo2, X } from 'lucide-react';
+import { Loader2, Pencil, Send, ShieldCheck, Sparkles, TriangleAlert, Undo2, X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { CONTEXT_ZONE_KINDS, type Generation, type HandoffApp, type Photo } from '../../../../shared/types';
 import type { PreparedHandoff } from '../../../handoff';
@@ -13,10 +13,11 @@ import { findPhoto, useStore } from '../../../state/store';
 import { Button, Modal, cn } from '../../common';
 import { PlantNoteChips } from '../Feasibility';
 import { cancelRun } from '../generate';
-import { briefTargetIds } from '../maskFromZones';
+import { briefTargetIds, footprintRoom, growChoice, sceneForRun } from '../maskFromZones';
 import { AppIcon, TargetPreview } from './bits';
 import { countToday, useHandoffLog, usageHint } from './log';
-import { packPrompt, preparedExport } from './pack';
+import { currentReferences, packPrompt, preparedExport } from './pack';
+import { pasteImage } from './prefs';
 import { appLabel } from './planned';
 import { declineReview, registerReviewHost, submitReview, useReview, type ReviewItem, type ReviewRequest } from './review';
 
@@ -52,13 +53,25 @@ function useMarkedExport(photo: Photo | undefined, g: Generation | undefined, ap
   return state;
 }
 
-function protectedLabels(photo: Photo, g: Generation): { zones: string[]; keep: string[]; whole: boolean } {
-  const scene = photo.scene;
+/**
+ * What the run may change and what stays, in words — from the run's own
+ * target (frozen when it started), so a re-mapped scene can't relabel it.
+ * `room`: ground beside a wider / curvier element that may change too;
+ * `clipped`: such a choice found no ground beside it (it will be cut back).
+ */
+function protectedLabels(photo: Photo, g: Generation): { zones: string[]; keep: string[]; whole: boolean; room: string[]; clipped: boolean } {
+  const scene = sceneForRun(photo.scene, g);
   const { zoneIds, pathIds } = briefTargetIds(g.brief, scene);
   const whole = g.brief.scope === 'whole' || zoneIds.length + pathIds.length === 0;
   const targeted = new Set(zoneIds);
-  const zones = (scene?.zones ?? []).filter((z) => !targeted.has(z.id) && !CONTEXT_ZONE_KINDS.includes(z.kind)).map((z) => z.label);
-  return { zones: [...new Set(zones)], keep: scene?.keep ?? [], whole };
+  const roomZones = g.target ? (g.target.room?.zones ?? []) : (footprintRoom(scene, g.brief, photo)?.room?.zones ?? []);
+  const roomIds = new Set(roomZones.map((z) => z.id));
+  const zones = (scene?.zones ?? []).filter((z) => !targeted.has(z.id) && !roomIds.has(z.id) && !CONTEXT_ZONE_KINDS.includes(z.kind)).map((z) => z.label);
+  const growing = g.brief.elements.filter((e) => growChoice(e) && (e.zoneIds.length > 0 || e.pathIds.length > 0));
+  const noun = ({ pathway: 'walk', driveway: 'drive', patio: 'patio' } as Record<string, string>)[growing[0]?.type ?? ''] ?? 'area';
+  const room = [...new Set(roomZones.map((z) => `${z.kind === 'lawn' ? 'Lawn' : z.label || 'Ground'} beside the ${noun}`))];
+  const grows = !whole && growing.length > 0;
+  return { zones: [...new Set(zones)], keep: scene?.keep ?? [], whole, room, clipped: grows && roomZones.length === 0 };
 }
 
 export function ReviewModal() {
@@ -177,7 +190,7 @@ function ReviewDialog({ review }: { review: ReviewRequest }) {
             </div>
           ) : hand && tab === 'paste' ? (
             // While the exact export is prepared, show what may change (same outline, full photo).
-            <TargetPreview photo={photo} brief={g.brief} baseVariationId={g.baseVariationId} className="w-full">
+            <TargetPreview photo={photo} generation={g} baseVariationId={g.baseVariationId} className="w-full">
               {!marked.error && (
                 <span className="absolute bottom-2 left-2 inline-flex items-center gap-1.5 rounded-full bg-black/60 px-2 py-0.5 text-[10px] font-medium text-white">
                   <Loader2 className="size-3 animate-spin" /> Preparing the exact image you’ll paste…
@@ -185,7 +198,7 @@ function ReviewDialog({ review }: { review: ReviewRequest }) {
               )}
             </TargetPreview>
           ) : (
-            <TargetPreview photo={photo} brief={g.brief} baseVariationId={g.baseVariationId} className="w-full" />
+            <TargetPreview photo={photo} generation={g} baseVariationId={g.baseVariationId} className="w-full" />
           )}
           {prot && (
             <div className="flex flex-col gap-1.5 rounded-xl border border-line bg-surface-2/60 p-3">
@@ -200,6 +213,22 @@ function ReviewDialog({ review }: { review: ReviewRequest }) {
                     ? `Only the outlined area changes. When the image comes back, Mode lines it up and puts back every pixel outside the outline from your photo — even if ${appLabel(app)} changed it.`
                     : 'Only the outlined area changes; every pixel outside it is kept from your photo.'}
               </p>
+              {!prot.whole && prot.room.length > 0 && (
+                <p className="text-xs leading-relaxed text-text">
+                  <span className="font-semibold">May also change:</span> {prot.room.join(', ').toLowerCase()} — room for the wider or curvier shape you chose.
+                </p>
+              )}
+              {!prot.whole && prot.clipped && (
+                <p className="flex items-start gap-1.5 rounded-lg bg-warning/10 px-2.5 py-2 text-xs leading-relaxed text-text" role="note">
+                  <TriangleAlert className="mt-px size-3.5 shrink-0 text-warning" />
+                  <span>
+                    The new shape is wider or curvier than the area that may change. Anything outside it will be put back from your photo.{' '}
+                    <button type="button" onClick={editBrief} className="font-semibold text-accent hover:underline">
+                      Edit brief
+                    </button>
+                  </span>
+                </p>
+              )}
               {!prot.whole && (prot.zones.length > 0 || prot.keep.length > 0) && (
                 <div className="flex flex-wrap gap-1">
                   {[...prot.zones, ...prot.keep].slice(0, 14).map((label) => (
@@ -302,7 +331,10 @@ function ReviewDialog({ review }: { review: ReviewRequest }) {
                         <details className="group mt-1.5 text-[11px] text-muted">
                           <summary className="cursor-pointer select-none hover:text-text">Exact prompt for {appLabel(app)}</summary>
                           <p className="mt-1 max-h-48 overflow-y-auto rounded-lg bg-surface-2 p-2 leading-relaxed whitespace-pre-wrap text-text">
-                            {packPrompt(photo, g, { brief: item.brief }, app, marked.prepared)}
+                            {packPrompt(photo, g, { brief: item.brief }, app, marked.prepared, {
+                              references: currentReferences(g, app).map((r) => r.role),
+                              unmarked: pasteImage() === 'clean',
+                            })}
                           </p>
                         </details>
                       )}

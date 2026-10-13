@@ -1,10 +1,13 @@
 /**
  * AI availability, derived from /api/health: a compact pill for headers and a
  * one-line explanation for empty states. Clicking the pill opens Settings →
- * AI & server.
+ * AI & server. Only the thinking (plans, suggestions, climate, architecture
+ * notes) needs Claude: photoreal variations work by hand-off to the user's
+ * ChatGPT or Gemini app (SPEC 5) and scenes can be mapped on this device.
  */
 import type { HealthResponse } from '../../../shared/api';
 import { useStore } from '../../state/store';
+import { visionUnsupportedReason } from '../../vision';
 import { cn } from '../common';
 import { openSettings } from './shellUI';
 
@@ -37,21 +40,24 @@ export function imageProvidersOf(health: HealthResponse | null): { id: string; n
 const LABELS: Record<AiLevel, string> = {
   checking: 'Checking AI…',
   offline: 'Server offline',
-  off: 'AI off',
-  'planning-only': 'AI on · no image provider',
+  off: 'Claude off',
+  'planning-only': 'AI ready · hand-off',
   ready: 'AI ready',
 };
 
-export function aiSummary(level: AiLevel): string {
+/** `onDeviceVision`: this browser can map scenes itself (default: detected). */
+export function aiSummary(level: AiLevel, onDeviceVision = visionUnsupportedReason() === null): string {
   switch (level) {
     case 'checking':
       return 'Checking which AI features this server offers…';
     case 'offline':
       return "Can't reach the Mode server. Projects and hand tools still work; AI features need the server.";
     case 'off':
-      return 'AI is off on this server: scene mapping and photoreal variations are unavailable. Fine-tune hand tools work fully.';
+      return `Claude is off on this server: variations follow a simple template of your brief, and suggestions, climate profiles and architecture notes need a key. Photoreal variations still work by hand-off to your ChatGPT or Gemini app, and ${
+        onDeviceVision ? 'scenes can be mapped on this device' : 'you can outline areas with the lasso'
+      }.`;
     case 'planning-only':
-      return 'Scene mapping and suggestions work. Add an OpenAI or Gemini key to render photoreal variations.';
+      return 'Claude plans and maps scenes. Photoreal variations work by hand-off to your ChatGPT or Gemini app; add an OpenAI or Gemini key to render them in Mode instead.';
     case 'ready':
       return 'Scene mapping, suggestions and photoreal variations are available.';
   }
@@ -60,8 +66,8 @@ export function aiSummary(level: AiLevel): string {
 export function AiStatusPill({ className }: { className?: string }) {
   const health = useStore((s) => s.health);
   const level = aiLevel(health);
-  const dot =
-    level === 'ready' ? 'bg-success' : level === 'planning-only' ? 'bg-warning' : level === 'checking' ? 'bg-line-strong animate-pulse' : 'bg-subtle';
+  // Hand-off rendering (planning-only) is the default setup, not a degraded one.
+  const dot = level === 'ready' || level === 'planning-only' ? 'bg-success' : level === 'checking' ? 'bg-line-strong animate-pulse' : 'bg-subtle';
   return (
     <button
       type="button"

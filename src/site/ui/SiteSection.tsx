@@ -16,8 +16,10 @@ import {
   MapPin,
   Pencil,
   RefreshCw,
+  ShieldAlert,
   Snowflake,
   Sprout,
+  Sun,
   TriangleAlert,
   type LucideIcon,
 } from 'lucide-react';
@@ -29,8 +31,10 @@ import { relativeTime } from '../../ui/shell/format';
 import { COORDS_SOURCE_LABELS, DEER_PRESSURE_OPTIONS, formatCoords, frostSummary, soilFacts } from '../format';
 import { plantLinks } from '../links';
 import { coordsOf, coordsSourceOf, photosWithGps, withCoords } from '../location';
+import { useInvasivesReady } from '../hooks';
+import { invasiveCoverageNote, invasivesCount } from '../invasives';
 import { fetchSiteProfile } from '../profile';
-import type { ZipInfo } from '../zip';
+import { hasZipCoords, localityForZip, type ZipInfo } from '../zip';
 
 type DeerChoice = NonNullable<ProjectLocation['deerPressure']> | 'unset';
 
@@ -71,6 +75,25 @@ export function SiteSection({ project, setLocation, zipInfo }: SiteSectionProps)
       />
       <LinkOuts zip={location.zip} />
     </div>
+  );
+}
+
+/**
+ * What the invasive flags on plant cards cover (C11): US-RIIS for the ZIP's
+ * region and no state list — so an unflagged plant reads as "not flagged",
+ * never as "not invasive".
+ */
+function InvasiveCoverage({ zip }: { zip: string | undefined }) {
+  const ready = useInvasivesReady();
+  const locality = localityForZip(zip) ?? 'L48';
+  return (
+    <p className="flex items-start gap-2 text-[11px] leading-relaxed text-subtle">
+      <ShieldAlert className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+      <span>
+        {invasiveCoverageNote(locality)}
+        {ready ? ` (${invasivesCount().toLocaleString()} plant names)` : ''}
+      </span>
+    </p>
   );
 }
 
@@ -122,6 +145,8 @@ function CoordinatesRow({
                 {formatCoords(coords.lat, coords.lon)}
                 {source && <Badge tone={source === 'zip' ? 'neutral' : 'accent'}>{COORDS_SOURCE_LABELS[source]}</Badge>}
               </p>
+            ) : zipInfo && !hasZipCoords(zipInfo) ? (
+              <p className="text-sm text-muted">ZIP {zipInfo.zip} has no map centre (PO-box or single-organisation ZIP) — use a photo’s location or enter coordinates</p>
             ) : (
               <p className="text-sm text-muted">Not set — add your ZIP code above</p>
             )}
@@ -139,7 +164,7 @@ function CoordinatesRow({
               Use photo location
             </Button>
           )}
-          {zipInfo && coords && source !== 'zip' && (
+          {hasZipCoords(zipInfo) && coords && source !== 'zip' && (
             <Button size="sm" variant="ghost" icon={<MapPin className="size-3.5" />} onClick={() => setLocation(withCoords(location, zipInfo))}>
               Use ZIP centre
             </Button>
@@ -290,7 +315,19 @@ function SiteProfileCard({
           {error}
         </p>
       )}
-      {frost && (
+      {frost?.frostFree && (
+        <div className="flex flex-col gap-2">
+          <div className="flex items-start gap-2 rounded-lg bg-surface px-2.5 py-2 text-xs">
+            <Sun className="mt-0.5 size-3.5 shrink-0 text-accent" aria-hidden />
+            <div className="min-w-0">
+              <p className="font-medium text-text">{frost.headline}</p>
+              <p className="text-[11px] text-muted">No 32 °F freeze in a typical year — plant by heat and rainfall, not frost dates.</p>
+            </div>
+          </div>
+          <p className="text-[11px] text-subtle">{frost.sourceLine}</p>
+        </div>
+      )}
+      {frost && !frost.frostFree && (
         <div className="flex flex-col gap-2">
           <dl className="grid grid-cols-1 gap-2 text-xs min-[420px]:grid-cols-3">
             <Fact icon={Snowflake} label="Last spring frost" value={`~${frost.lastFrost}`} sub={frost.lastFrostLate} />
@@ -381,6 +418,7 @@ function LinkOuts({ zip }: { zip: string | undefined }) {
         ))}
       </ul>
       <p className="text-[11px] text-subtle">Opens in a new tab. Native-plant finders use your ZIP; Rutgers ratings reflect the Northeast.</p>
+      <InvasiveCoverage zip={zip} />
     </div>
   );
 }

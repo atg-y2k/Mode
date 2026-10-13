@@ -1,23 +1,27 @@
 /**
  * Manual hand-off helper routes (shared/api.ts §Manual hand-off helpers):
  *
- *   GET  /api/handoff/watch       → { available, dir, on }
- *   POST /api/handoff/watch       { on: boolean } → { available, dir, on }
+ *   GET  /api/handoff/watch       → { available, dir, on, reason? }  (reason: why not available —
+ *                                 no folder, or no permission: on macOS the Files & Folders setting)
+ *   POST /api/handoff/watch       { on: boolean } → { available, dir, on }  (409 + reason when it can't)
  *   GET  /api/handoff/events      Server-Sent Events while watching:
  *                                   `ready`   { available, dir, on }  (first event)
  *                                   `file`    { id, name, size, mtime } (id: = sequence number)
  *                                   `stopped` { reason, message }     (stream ends)
  *                                 Reconnects replay missed `file` events (Last-Event-ID or ?since=).
- *                                 EventSource can't send headers, so ?token= carries the access
- *                                 token for this endpoint only (see eventStreamToken.ts).
+ *                                 EventSource can't send headers, so with MODE_ACCESS_TOKEN set the
+ *                                 browser first POSTs /api/handoff/events-ticket (with the header)
+ *                                 and opens the stream with ?ticket= — single use, 60 s, checked
+ *                                 by server/app.ts. The long-lived token never goes in a URL.
  *   GET  /api/handoff/file?id=    bytes of an announced image (correct Content-Type)
  *   POST /api/handoff/fetch-url   { url } → image bytes (https only, SSRF-guarded, ≤ 15 MB)
  *
  * The Downloads watcher exposes new files from the user's own folder, so
  * unless the server has an access token (MODE_ACCESS_TOKEN) it only answers
  * requests from this computer: a phone or another device on the network gets
- * `available: false` / 403. Register after the host's auth / body-limit
- * middleware and before any `/api/*` catch-all.
+ * `available: false` / 403 (and so does everyone behind a TRUST_PROXY reverse
+ * proxy). Register after the host's auth / body-limit middleware and before
+ * any `/api/*` catch-all.
  */
 import { lstat, open } from 'node:fs/promises';
 import { Readable } from 'node:stream';
@@ -27,8 +31,8 @@ import { z } from 'zod';
 import { API_PATHS } from '../../shared/api';
 import { ApiHttpError } from '../errors';
 import { fetchImageFromUrl, type FetchUrlDeps } from './fetchUrl';
-import { clientAddress, guarded, isLoopbackAddress, methodNotAllowed, readJson } from './http';
-import { DownloadsWatcher, resolveWatchDir, type WatchEvent, type WatchStatus } from './watcher';
+import { guarded, isLocalClient, methodNotAllowed, readJson } from './http';
+import { DownloadsWatcher, WatchUnavailableError, resolveWatchDir, type WatchEvent, type WatchStatus } from './watcher';
 
 /** SSE comment sent this often so proxies keep the stream open. */
 export const SSE_KEEPALIVE_MS = 25_000;
@@ -43,7 +47,10 @@ export interface HandoffDeps {
    * token-holding devices on the network may use the watcher too.
    */
   accessTokenRequired: boolean;
-  /** Use X-Forwarded-For / X-Real-IP for the client address (TRUST_PROXY). */
+  /**
+   * Behind a trusted reverse proxy (TRUST_PROXY): the client address can't be
+   * verified, so without an access token the watcher refuses every request.
+   */
   trustProxy?: boolean;
   /** Overrides the "is this request from this computer?" check (tests). */
   isLocalRequest?: (c: Context) => boolean;
@@ -58,7 +65,7 @@ const FetchUrlRequestSchema = z.object({ url: z.string().trim().min(1).max(8_000
 const FileQuerySchema = z.string().regex(/^[A-Za-z0-9_-]{16,64}$/);
 
 const REMOTE_REFUSED =
-  'The Downloads watcher only works in a browser on the computer running Mode (or set MODE_ACCESS_TOKEN on the server to allow your other devices).';
+  'The Downloads watcher only works in a browser on the computer running Mode (or set MODE_ACCESS_TOKEN on the server to allow your other devices; behind a reverse proxy with TRUST_PROXY on, the watcher always needs MODE_ACCESS_TOKEN).';
 
 export function registerHandoffRoutes<E extends Env>(app: Hono<E>, deps: HandoffDeps): void {
   const log = deps.log ?? ((line: string) => console.log(line));
@@ -66,16 +73,23 @@ export function registerHandoffRoutes<E extends Env>(app: Hono<E>, deps: Handoff
   const keepaliveMs = deps.keepaliveMs ?? SSE_KEEPALIVE_MS;
   const route = <T extends (c: Context<E>) => Response | Promise<Response>>(handler: T) => guarded<E>(log, 'handoff', handler);
 
-  /** Requests the watcher may serve: from this computer, or any device when an access token guards the server. */
+  /**
+   * Requests the watcher may serve: any device when an access token guards the
+   * server, else only a browser on this computer. Behind a reverse proxy
+   * (TRUST_PROXY) a forwarded address is never proof of "this computer" (a
+   * proxy may pass a forged X-Forwarded-For through), so there the watcher
+   * needs MODE_ACCESS_TOKEN.
+   */
   const mayWatch = (c: Context): boolean => {
     if (deps.accessTokenRequired) return true;
     if (deps.isLocalRequest) return deps.isLocalRequest(c);
-    return isLoopbackAddress(clientAddress(c, deps.trustProxy ?? false));
+    if (deps.trustProxy) return false;
+    return isLocalClient(c);
   };
   const requireWatchAccess = (c: Context): void => {
     if (!mayWatch(c)) throw new ApiHttpError('unauthorized', REMOTE_REFUSED, 403);
   };
-  const statusFor = (c: Context): WatchStatus => (mayWatch(c) ? watcher.status() : { available: false, dir: null, on: false });
+  const statusFor = (c: Context): WatchStatus => (mayWatch(c) ? watcher.status() : { available: false, dir: null, on: false, reason: REMOTE_REFUSED });
 
   // ---- watch status / on-off ---------------------------------------------
 
@@ -93,16 +107,13 @@ export function registerHandoffRoutes<E extends Env>(app: Hono<E>, deps: Handoff
         await watcher.release();
         return c.json(watcher.status());
       }
-      if (!watcher.available()) {
-        throw new ApiHttpError(
-          'bad_request',
-          'This computer has no Downloads folder to watch. Set HANDOFF_WATCH_DIR in .env to the folder your browser saves to, then restart the server.',
-          409,
-        );
-      }
+      // No folder, or no permission to read it (macOS privacy settings): 409 with the fix.
+      const unavailable = watcher.unavailableReason();
+      if (unavailable) throw new ApiHttpError('bad_request', unavailable, 409);
       try {
         await watcher.start();
       } catch (err) {
+        if (err instanceof WatchUnavailableError) throw new ApiHttpError('bad_request', err.message, 409);
         log(`[handoff] could not start watching: ${err instanceof Error ? err.message : String(err)}`);
         throw new ApiHttpError('internal', "The Downloads folder couldn't be watched. Check that the server can read it, then try again.", 500);
       }
@@ -237,7 +248,10 @@ export function createHandoffDepsFromEnv(env: Record<string, string | undefined>
   const { dir, warning } = resolveWatchDir(env);
   const trust = env.TRUST_PROXY?.trim().toLowerCase();
   return {
-    watcher: new DownloadsWatcher({ dir }),
+    watcher: new DownloadsWatcher({
+      dir,
+      missingReason: warning ? `${warning} Set it to the folder your browser saves to, then restart the server.` : null,
+    }),
     accessTokenRequired: Boolean(env.MODE_ACCESS_TOKEN?.trim()),
     trustProxy: trust === 'true' || trust === '1' || trust === 'yes' || trust === 'on',
     warnings: warning ? [warning] : [],

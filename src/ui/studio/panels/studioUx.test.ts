@@ -15,7 +15,7 @@ import {
   provenanceOf,
   requestOpenHandoff,
 } from './historyTree';
-import { deerOf, formatHours, isPlantingElement, siteHeader, spotZones, withSiteDeer } from './siteHeader';
+import { deerOf, formatHours, isPlantingElement, siteHeader, spotZones } from './siteHeader';
 import { inferElementType, isInBrief, shortLabel, suggestedEdits, zonesMentioned } from './suggestedEdits';
 import {
   azimuthFromText,
@@ -248,11 +248,9 @@ describe('site header', () => {
     expect(spotZones({ zoneIds: ['c'] }, sc, ['b']).map((z) => z.id)).toEqual(['b']);
   });
 
-  it('applies the Settings deer pressure to the feasibility context', () => {
-    expect(withSiteDeer({ zone: 7, deerPressure: true }, { deerPressure: 'low' })).toEqual({ zone: 7, deerPressure: 'low' });
-    const ctx = { zone: 7 };
-    expect(withSiteDeer(ctx, {})).toBe(ctx);
+  it('shows the Settings deer pressure in the header, else the context', () => {
     expect(deerOf({ deerPressure: 'high' }, { deerPressure: false })).toBe('high');
+    expect(deerOf({}, { deerPressure: true })).toBe('medium');
     expect(deerOf({}, {})).toBeNull();
   });
 });
@@ -466,7 +464,8 @@ describe('history tree', () => {
     });
     const c = handoffCounts(g);
     expect(c).toEqual({ waiting: 2, staged: 1 });
-    expect(handoffText(c)).toBe('2 waiting for hand-off · 1 to review');
+    expect(handoffText(c)).toBe('Waiting for hand-off · 2 · 1 back to review');
+    expect(handoffText({ waiting: 0, staged: 1 })).toBe('1 back to review');
     expect(handoffText({ waiting: 0, staged: 0 })).toBe('');
     const seen = vi.fn();
     const target = new EventTarget();

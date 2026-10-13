@@ -55,6 +55,13 @@ export interface ServerConfig {
   rateLimitPer10Min: number;
   /** Use X-Forwarded-For / X-Real-IP for the client IP (only behind a trusted reverse proxy). */
   trustProxy: boolean;
+  /**
+   * Extra host names the server answers to (MODE_ALLOWED_HOSTS), besides IP
+   * addresses, localhost, this computer's name and HOST. Vite semantics: a
+   * leading '.' allows the domain and all its subdomains. `true` turns the
+   * Host check (the DNS-rebinding guard) off.
+   */
+  allowedHosts: string[] | true;
 
   port: number;
   /** Interface to listen on; null = all interfaces (reachable from phones on the LAN). */
@@ -91,6 +98,40 @@ function int(env: Env, key: string, fallback: number, warnings: string[], min = 
     return fallback;
   }
   return n;
+}
+
+/**
+ * One MODE_ALLOWED_HOSTS entry as a bare lower-case host name: no scheme, port,
+ * IPv6 brackets or trailing dot (a leading '.' — "this domain and its
+ * subdomains" — is kept). '' when nothing usable is left.
+ */
+export function normalizeHostEntry(raw: string): string {
+  let v = raw.trim().toLowerCase();
+  if (v.includes('://')) {
+    try {
+      v = new URL(v).hostname;
+    } catch {
+      return '';
+    }
+  }
+  v = v.replace(/\/.*$/, '');
+  if (v.startsWith('[')) v = v.slice(1, v.indexOf(']') > 0 ? v.indexOf(']') : undefined);
+  else if ((v.match(/:/g) ?? []).length === 1) v = v.slice(0, v.indexOf(':'));
+  return v.replace(/\.+$/, '');
+}
+
+function allowedHostsFrom(env: Env, warnings: string[]): string[] | true {
+  const raw = str(env, 'MODE_ALLOWED_HOSTS');
+  if (raw == null) return [];
+  const entries = raw.split(',').map((e) => e.trim()).filter(Boolean);
+  if (entries.some((e) => e === '*' || e.toLowerCase() === 'true')) {
+    warnings.push(
+      'MODE_ALLOWED_HOSTS turns the host-name check off: a web page you visit can then reach this server through DNS rebinding and use your API keys. Use it only behind a reverse proxy that checks the host name itself, or list the names instead.',
+    );
+    return true;
+  }
+  const hosts = entries.map(normalizeHostEntry).filter((h) => h && h !== '.');
+  return [...new Set(hosts)];
 }
 
 export function loadConfig(env: Env = process.env, cwd: string = process.cwd()): ServerConfig {
@@ -150,6 +191,7 @@ export function loadConfig(env: Env = process.env, cwd: string = process.cwd()):
     accessToken: str(env, 'MODE_ACCESS_TOKEN'),
     rateLimitPer10Min: int(env, 'RATE_LIMIT_PER_10MIN', DEFAULT_RATE_LIMIT_PER_10MIN, warnings),
     trustProxy: bool(env, 'TRUST_PROXY') === true,
+    allowedHosts: allowedHostsFrom(env, warnings),
     port,
     host: str(env, 'HOST'),
     production,
@@ -174,6 +216,7 @@ export function testConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     accessToken: null,
     rateLimitPer10Min: DEFAULT_RATE_LIMIT_PER_10MIN,
     trustProxy: false,
+    allowedHosts: [],
     port: DEFAULT_PORT,
     host: null,
     production: false,

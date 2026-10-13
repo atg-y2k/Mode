@@ -2,9 +2,9 @@
  * Studio center pane (SPEC §3.14, §5.2): the viewer — or the side-by-side
  * grid of a run, or the staging view of a returned hand-off — above the
  * variations strip and the prompt dock. Also hosts the hand-off companion
- * (inline card / Picture-in-Picture), the review step before every run, and
- * the ways a returned image comes back (paste, drop, clipboard offer,
- * Downloads watcher).
+ * (inline card / Picture-in-Picture) and the ways a returned image comes
+ * back (paste, drop, clipboard offer, Downloads watcher). The review step
+ * before every run is hosted by the Workspace (it must exist on every pane).
  *
  * Keyboard: ←/→ step through the variations of the current run, F favorite,
  * Esc back to the original (closes the grid first), [ or ] toggle the areas
@@ -17,12 +17,10 @@ import { ConfirmModal } from '../common';
 import { deleteRun, stepVariation, viewVariation } from './actions';
 import { CompareGrid } from './CompareGrid';
 import { recoverInterruptedRuns } from './generate';
-import { installHandoffCleanup } from './handoff/actions';
 import { CompanionDock } from './handoff/Companion';
 import { ClipboardOfferBanner, HandoffImportEffects, useHandoffDrop } from './handoff/ImportLayer';
 import { installHandoffPrefs } from './handoff/prefs';
-import { ReviewModal } from './handoff/ReviewModal';
-import { useHandoffSession } from './handoff/session';
+import { syncHandoffProject, useHandoffSession } from './handoff/session';
 import { StagingView } from './handoff/StagingView';
 import { useActivePhoto } from './hooks';
 import { PromptDock } from './PromptDock';
@@ -111,8 +109,10 @@ export function StudioView() {
 
   useEffect(() => {
     installHandoffPrefs();
-    installHandoffCleanup();
   }, []);
+
+  // Hand-off items belong to one project: switching projects closes the companion and staging.
+  useEffect(() => syncHandoffProject(projectId ?? null), [projectId]);
 
   // Runs a previous session left 'running' were interrupted by the reload.
   useEffect(() => {
@@ -131,7 +131,6 @@ export function StudioView() {
           <ImageOff className="size-6" />
           Choose a photo to start designing.
         </div>
-        <ReviewModal />
       </div>
     );
   }
@@ -155,7 +154,6 @@ export function StudioView() {
       <VariationStrip photo={photo} />
       <PromptDock photo={photo} space={space} />
       <ConfirmDelete />
-      <ReviewModal />
       <HandoffImportEffects />
     </div>
   );

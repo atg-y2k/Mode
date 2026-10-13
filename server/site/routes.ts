@@ -6,8 +6,9 @@
  * Frost dates (NOAA NCEI 1991–2020 normals, nearest station with freeze
  * probabilities), soil (USDA Soil Data Access) and the EPA Level III
  * ecoregion, cached per coordinate rounded to 3 decimals in memory and under
- * `.cache/site/`. Upstream hiccups give a partial profile (200); only when
- * every service fails does the route answer 502 upstream_error.
+ * `.cache/site/`. Upstream hiccups (including SDA's HTML maintenance page) give
+ * a partial profile (200, failed sections named in X-Mode-Site-Unavailable);
+ * only when every service fails does the route answer 502 upstream_error.
  */
 import type { Env, Hono } from 'hono';
 import { z } from 'zod';
@@ -24,6 +25,13 @@ export const SiteProfileRequestSchema = z.object({
   coordsSource: z.enum(['zip', 'address', 'photo-gps']).optional(),
 });
 
+/**
+ * Response header listing the sections that failed temporarily
+ * ("frost,soil,ecoregion" subset): the profile is partial, try again in a few
+ * minutes before treating those sections as "no data".
+ */
+export const SITE_UNAVAILABLE_HEADER = 'X-Mode-Site-Unavailable';
+
 export interface SiteDeps extends SiteServiceOptions {
   /** A ready service (tests); otherwise one is created from the options. */
   service?: SiteProfileService;
@@ -38,8 +46,13 @@ export function registerSiteRoutes<E extends Env>(app: Hono<E>, deps: SiteDeps =
     guarded<E>(log, 'site', async (c) => {
       const req = await readJson(c, SiteProfileRequestSchema);
       try {
-        const profile = await service.profile(req.lat, req.lon, req.coordsSource ?? 'zip');
+        const source = req.coordsSource ?? 'zip';
+        const { profile, unavailable } = service.profileWithStatus
+          ? await service.profileWithStatus(req.lat, req.lon, source)
+          : { profile: await service.profile(req.lat, req.lon, source), unavailable: [] };
         c.header('Cache-Control', 'no-store');
+        // Sections missing because a service was down or in maintenance (e.g. "soil"): asking again later may fill them.
+        if (unavailable.length) c.header(SITE_UNAVAILABLE_HEADER, unavailable.join(','));
         return c.json(profile);
       } catch (err) {
         if (err instanceof SiteBusyError) {

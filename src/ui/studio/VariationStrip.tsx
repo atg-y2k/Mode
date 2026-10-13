@@ -179,9 +179,12 @@ function AwaitingTile({ photo, g, tile, width }: { photo: Photo; g: Generation; 
       className="border border-dashed border-line-strong bg-surface-2"
     >
       <div className="flex h-full flex-col items-center justify-center gap-1 px-1.5 text-center">
-        {job ? <Loader2 className="size-4 animate-spin text-accent" /> : <AppIcon app={app} className="size-4 text-accent" />}
-        <span className="line-clamp-2 text-[10px] leading-tight font-medium text-text">{tile.label || 'Waiting'}</span>
-        <span className="text-[9px] text-muted">{job?.kind === 'importing' ? 'Lining up…' : `Waiting · ${appLabel(app)}`}</span>
+        {/* Fixed tile height: the clamped title must not shrink (its 2nd line would be sliced) and the status stays on one line. */}
+        {job ? <Loader2 className="size-4 shrink-0 animate-spin text-accent" /> : <AppIcon app={app} className="size-4 shrink-0 text-accent" />}
+        <span className="line-clamp-2 shrink-0 text-[10px] leading-tight font-medium text-text">{tile.label || 'Waiting'}</span>
+        <span className="max-w-full shrink-0 truncate text-[9px] leading-tight text-muted">
+          {job?.kind === 'importing' ? 'Lining up…' : width < 80 ? 'Waiting' : `Waiting · ${appLabel(app)}`}
+        </span>
       </div>
     </TileFrame>
   );

@@ -144,9 +144,9 @@ export function handoffCounts(g: Pick<Generation, 'planned'>): HandoffCounts {
   return { waiting, staged };
 }
 
-/** "2 waiting for hand-off · 1 to review". Empty when nothing is pending. */
+/** "Waiting for hand-off · 2 · 1 back to review". Empty when nothing is pending. */
 export function handoffText(c: HandoffCounts): string {
-  return [c.waiting ? `${c.waiting} waiting for hand-off` : '', c.staged ? `${c.staged} to review` : ''].filter(Boolean).join(' · ');
+  return [c.waiting ? `Waiting for hand-off · ${c.waiting}` : '', c.staged ? `${c.staged} back to review` : ''].filter(Boolean).join(' · ');
 }
 
 /** Event the hand-off companion listens for: open it on a run's pending items. */

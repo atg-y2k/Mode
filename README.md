@@ -71,6 +71,16 @@ npm start              # one Node process serves the app and the API on $PORT (d
 If you expose the server beyond your own network, set `MODE_ACCESS_TOKEN` and
 enter the same token under **Settings → Server access token**.
 
+The server only answers to IP addresses, `localhost`, this computer's name
+(and `<name>.local`) and `HOST`; any other name in the `Host` header gets a
+403, which keeps web pages from reaching it through DNS rebinding. If you reach
+Mode under a domain name — a reverse proxy that passes the original `Host`
+header, a public domain, a Tailscale name — add it to `MODE_ALLOWED_HOSTS`
+(comma-separated; a leading dot allows all subdomains, e.g.
+`MODE_ALLOWED_HOSTS=mode.example.com,.home.example.net`). Behind a reverse
+proxy, also set `TRUST_PROXY=true` so the AI rate limit sees each client's
+address; the Downloads watcher then needs `MODE_ACCESS_TOKEN`.
+
 ## Development
 
 ```bash

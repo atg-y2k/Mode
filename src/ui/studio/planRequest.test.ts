@@ -14,6 +14,7 @@ import type { FeasibilityContext } from '../../assets/design';
 import {
   buildPlanRequest,
   climateText,
+  facingText,
   ideasForBrief,
   pathDescription,
   resolveCompare,
@@ -183,6 +184,26 @@ describe('sceneSummaryText', () => {
     expect(text).toContain('Keep: mature oak');
   });
 
+  it('adds the facing direction and estimated sun hours per zone', () => {
+    const sunny: SceneMap = {
+      ...scene,
+      facadeAzimuthDeg: 180,
+      facadeAzimuthSource: 'user',
+      zones: scene.zones.map((z) => (z.id === 'z-bed' ? { ...z, sun: 'part-sun' as const, sunHours: 4.8 } : z)),
+    };
+    const text = sceneSummaryText(sunny);
+    expect(text).toContain('Facing: front faces south (180°), set by the homeowner');
+    expect(text).toContain('Front bed (planting-bed, part sun, ~5 h direct sun)');
+    expect(sceneSummaryText(scene)).not.toContain('Facing:');
+  });
+
+  it('facingText: compass name + degrees, per view', () => {
+    expect(facingText({ category: 'front-exterior', facadeAzimuthDeg: 180 })).toBe('front faces south (180°)');
+    expect(facingText({ category: 'backyard', facadeAzimuthDeg: -45.4, facadeAzimuthSource: 'photo' })).toBe("back faces northwest (315°), from the photo's compass heading");
+    expect(facingText({ category: 'kitchen', facadeAzimuthDeg: 90, facadeAzimuthSource: 'ai' })).toBe('photographed wall faces east (90°), estimated from the photo');
+    expect(facingText({ category: 'front-yard' })).toBe('');
+  });
+
   it('stays within the request limit', () => {
     const big = { ...scene, opportunities: Array.from({ length: 2000 }, (_, i) => `opportunity ${i}`) };
     expect(sceneSummaryText(big).length).toBeLessThanOrEqual(8000);
@@ -210,6 +231,8 @@ describe('buildPlanRequest', () => {
     expect(req.count).toBe(6);
     expect(req.ideaImages).toHaveLength(3);
     expect(req.brief.prompt).toBe('Make the entry welcoming');
+    expect(req.brief.strictness).toBeUndefined();
+    expect(buildPlanRequest({ ...base, brief: { ...brief(), strictness: 'strict' } }, knowledge).brief.strictness).toBe('strict');
     expect(req.brief.targetZoneLabels).toEqual(['Front bed']);
     expect(req.zones.find((z) => z.id === 'z-bed')?.sun).toBe('shade');
     expect(req.zones.find((z) => z.id === 'z-walk')?.sun).toBeNull();

@@ -11,6 +11,7 @@
  */
 import type { PlanRequest } from '../../../shared/api';
 import {
+  INTERIOR_SPACE_TYPES,
   SPACE_TYPE_LABELS,
   type DesignBrief,
   type DesignTheme,
@@ -29,6 +30,7 @@ import {
 } from '../../../shared/types';
 import type { FeasibilityContext } from '../../assets/design';
 import { climateSummaryText, locationForApi } from '../../lib/studio';
+import { compassName } from '../../site/sun';
 
 const LIMITS = { sceneSummary: 8000, prompt: 4000, climate: 4000, idea: 600, note: 600 } as const;
 
@@ -49,11 +51,53 @@ const joinNonEmpty = (parts: (string | undefined | null | false)[], sep: string)
 // Scene
 // ---------------------------------------------------------------------------
 
+const FACING_SUBJECT: Partial<Record<SceneMap['category'], string>> = {
+  'front-exterior': 'front',
+  'front-yard': 'front',
+  'back-exterior': 'back',
+  backyard: 'back',
+  'side-exterior': 'side',
+  'side-yard': 'side',
+};
+
+const FACING_SOURCE: Record<NonNullable<SceneMap['facadeAzimuthSource']>, string> = {
+  photo: "from the photo's compass heading",
+  user: 'set by the homeowner',
+  ai: 'estimated from the photo',
+};
+
+/**
+ * "front faces south (180°), set by the homeowner" from scene.facadeAzimuthDeg
+ * (degrees from north the photographed facade / view faces); '' when unknown.
+ */
+export function facingText(scene: Pick<SceneMap, 'category' | 'facadeAzimuthDeg' | 'facadeAzimuthSource'>): string {
+  const raw = scene.facadeAzimuthDeg;
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return '';
+  const deg = ((Math.round(raw) % 360) + 360) % 360;
+  const interior = (INTERIOR_SPACE_TYPES as readonly string[]).includes(scene.category);
+  const subject = FACING_SUBJECT[scene.category] ?? (interior ? 'photographed wall' : 'photographed side of the house');
+  const source = scene.facadeAzimuthSource ? `, ${FACING_SOURCE[scene.facadeAzimuthSource]}` : '';
+  return `${subject} faces ${compassName(deg)} (${deg}°)${source}`;
+}
+
+/** "~5 h direct sun" (rounded to the half hour); '' when unknown. */
+function sunHoursText(hours: number | undefined): string {
+  if (typeof hours !== 'number' || !Number.isFinite(hours) || hours < 0) return '';
+  const h = Math.round(hours * 2) / 2;
+  return `~${h} h direct sun`;
+}
+
 /** Compact description of a scene for prompts (summary, architecture, zones with sun, paths, keep-list). */
 export function sceneSummaryText(scene: SceneMap): string {
   const a = scene.architecture;
   const category = SPACE_TYPE_LABELS[scene.category] ?? scene.category;
-  const zoneLine = scene.zones.map((z) => `${z.label} (${z.kind}${z.sun ? `, ${SUN_LABEL[z.sun]}` : ''}${z.editable ? '' : ', context'})`).join('; ');
+  const zoneLine = scene.zones
+    .map((z) => {
+      const hours = sunHoursText(z.sunHours);
+      return `${z.label} (${z.kind}${z.sun ? `, ${SUN_LABEL[z.sun]}` : ''}${hours ? `, ${hours}` : ''}${z.editable ? '' : ', context'})`;
+    })
+    .join('; ');
+  const facing = facingText(scene);
   const pathLine = scene.paths
     .map((p) => `${p.label}${p.kind === 'existing' ? '' : ` [${p.kind}]`}${p.description ? ` — ${clip(p.description, 160)}` : ''}`)
     .join('; ');
@@ -68,7 +112,7 @@ export function sceneSummaryText(scene: SceneMap): string {
     a.designLanguage.length > 0 && `Design language to respect: ${a.designLanguage.join('; ')}`,
     a.purpose.length > 0 && `How the space is used: ${a.purpose.join('; ')}`,
     scene.boundaries && `Boundaries: ${scene.boundaries}`,
-    joinNonEmpty([scene.lighting && `Light: ${scene.lighting}`, scene.orientation && `Orientation: ${scene.orientation}`], '. '),
+    joinNonEmpty([scene.lighting && `Light: ${scene.lighting}`, scene.orientation && `Orientation: ${scene.orientation}`, facing && `Facing: ${facing}`], '. '),
     zoneLine && `Zones: ${zoneLine}`,
     pathLine && `Paths: ${pathLine}`,
     scene.keep.length > 0 && `Keep: ${scene.keep.join('; ')}`,
@@ -355,6 +399,7 @@ export function buildPlanRequest(input: PlanInput, knowledge: PlanKnowledge): Pl
       prompt: brief.prompt.trim().slice(0, LIMITS.prompt),
       scope: brief.scope,
       plantMaturity: brief.plantMaturity,
+      ...(brief.strictness ? { strictness: brief.strictness } : {}),
       targetZoneLabels: brief.targetZoneIds.map((id) => zoneById.get(id)?.label).filter((l): l is string => !!l),
       elements,
     },

@@ -195,6 +195,12 @@ export interface AppState {
   /** Non-null while the Shop modal is open. */
   shop: ShopRequest | null;
   saveState: 'idle' | 'saving' | 'saved' | 'error';
+  /**
+   * Why this tab doesn't save the open project: it is open for editing in
+   * another tab, or another tab saved it after this copy was loaded. Edits
+   * here stay in memory until takeOver().
+   */
+  readOnly: null | 'other-tab' | 'stale';
   toasts: Toast[];
   past: HistoryEntry[];
   future: HistoryEntry[];
@@ -209,6 +215,8 @@ export interface AppState {
   updateProjectInfo(patch: Partial<Pick<Project, 'name' | 'location' | 'budget' | 'style'>>): void;
   exportProject(): Promise<void>;
   importProject(file: Blob): Promise<void>;
+  /** Make this tab the one that saves the open project: takes it over from another tab and reloads the stored copy. */
+  takeOver(): Promise<void>;
 
   // spaces & photos
   addSpace(type: SpaceType, name?: string): string;
@@ -263,7 +271,8 @@ export interface AppState {
   /** Stores nothing in the blob store — save the variation's image/thumb blobs first. */
   addVariation(photoId: string, generationId: string, variation: Variation): void;
   toggleFavorite(photoId: string, variationId: string): void;
-  deleteVariation(photoId: string, variationId: string): Promise<void>;
+  /** Deletes a variation (false, with a message, while a pending hand-off run starts from it). */
+  deleteVariation(photoId: string, variationId: string): Promise<boolean>;
   deleteGeneration(photoId: string, generationId: string): Promise<void>;
   setRecommendations(photoId: string, items: Recommendation[], baseVariationId?: string): void;
   setRunProgress(generationId: string, progress: RunProgress | null): void;
@@ -329,6 +338,15 @@ export function isSketchZone(z: { source?: string; kind: string; label: string }
 /** Every blob id and mask id owned by a photo (for cleanup on delete). */
 export function photoRefs(photo: Photo): { blobIds: string[]; maskIds: string[] } {
   return db.photoReferencedIds(photo);
+}
+
+/**
+ * Hand-off runs of a photo that start from `variationId` and still wait for
+ * a result (or its review): deleting that variation would strand them —
+ * their exports and imports need the starting image.
+ */
+export function pendingRunsFrom(photo: Photo, variationId: string): Generation[] {
+  return photo.generations.filter((g) => g.baseVariationId === variationId && (g.planned ?? []).some((p) => p.status === 'awaiting-handoff' || p.status === 'staged'));
 }
 
 /** Variation by id within a photo. */
@@ -403,6 +421,42 @@ const SAVE_DEBOUNCE_MS = 500;
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 
+/**
+ * The open project this tab must not save: another tab holds its write lock,
+ * or saved it after this copy was loaded (see AppState.readOnly).
+ */
+let readOnlyOf: string | null = null;
+/** Save counter of each project's stored document as this tab last loaded or wrote it (see db.saveProject). */
+const revs = new Map<string, number>();
+/** Saves run one at a time, in order: each one checks the counter the previous one wrote. */
+let saveChain: Promise<unknown> = Promise.resolve();
+/** Release functions of the project write locks this tab holds. */
+const heldLocks = new Map<string, () => void>();
+/** Releases the shared storage lock held while a project is open (keeps other tabs' startup sweep away). */
+let releaseStorageLock: (() => void) | null = null;
+
+/**
+ * Pixel data that may have lost its last reference (undo history thrown away,
+ * deleted photos / spaces / runs / ideas), per project. It is deleted after the
+ * next successful save, and only what neither the saved document, the open
+ * document, its undo history nor the library still references.
+ */
+const cleanupQueue = new Map<string, { blobIds: Set<string>; maskIds: Set<string> }>();
+
+/** referencedIds per immutable document snapshot (history entries share most of them). */
+const refCache = new WeakMap<Project, { blobIds: string[]; maskIds: string[] }>();
+function refsOf(p: Project): { blobIds: string[]; maskIds: string[] } {
+  let r = refCache.get(p);
+  if (!r) refCache.set(p, (r = db.referencedIds(p)));
+  return r;
+}
+
+function lockManager(): LockManager | undefined {
+  return typeof navigator !== 'undefined' ? navigator.locks : undefined;
+}
+
+type ChannelMessage = { type: 'saved'; id: string; meta: ProjectMeta } | { type: 'deleted'; id: string };
+
 /** Mutate the active design of the active photo. */
 function withActiveDesign(draft: Draft<Project>, photoId: string | null, fn: (d: Draft<Design>, ph: Draft<Photo>) => void) {
   if (!photoId) return;
@@ -441,6 +495,9 @@ const EMPTY_SELECTION: Selection = { spaceId: null, photoId: null, regionId: nul
 export const useStore = create<AppState>()((set, get) => {
   function scheduleSave() {
     if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = null;
+    const p = get().project;
+    if (!p || readOnlyOf === p.id) return; // read-only here: nothing is saved
     set({ saveState: 'saving' });
     saveTimer = setTimeout(() => {
       saveTimer = null;
@@ -448,19 +505,280 @@ export const useStore = create<AppState>()((set, get) => {
     }, SAVE_DEBOUNCE_MS);
   }
 
-  async function saveNow() {
-    const p = get().project;
-    if (!p) return;
+  /**
+   * Saves `p` (default: the open project, read right away — before any await)
+   * and then deletes the pixel data queued for cleanup. Resolves true once the
+   * document is written; false when this tab may not save it or the save failed.
+   */
+  function saveNow(p = get().project): Promise<boolean> {
+    if (!p || readOnlyOf === p.id) return Promise.resolve(false);
+    const run = saveChain.then(() => writeProject(p));
+    saveChain = run.catch(() => undefined);
+    return run;
+  }
+
+  /** Cancels the debounced save and saves now. */
+  function flushSave(): Promise<boolean> {
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    return saveNow();
+  }
+
+  async function writeProject(p: Project): Promise<boolean> {
     try {
-      await db.saveProject(p);
+      revs.set(p.id, await db.saveProject(p, { expectedRev: revs.get(p.id) }));
       const meta = db.projectMeta(p);
       set((s) => ({
         saveState: 'saved',
         projects: [meta, ...s.projects.filter((m) => m.id !== meta.id)].sort((a, b) => b.updatedAt - a.updatedAt),
       }));
+      announce({ type: 'saved', id: p.id, meta });
     } catch (err) {
-      set({ saveState: 'error' });
-      get().notify(`Could not save: ${(err as Error).message}`, 'error');
+      if ((err as Error)?.name === 'StaleWriteError') {
+        loseWriteAccess(p.id, 'stale');
+        if (get().project?.id !== p.id) get().notify(`“${p.name}” was not saved: ${(err as Error).message}`, 'error');
+      } else {
+        set({ saveState: 'error' });
+        get().notify(`Could not save: ${(err as Error).message}`, 'error');
+      }
+      return false;
+    }
+    await collectGarbage(p.id);
+    return true;
+  }
+
+  /** This tab stops saving `projectId` (another tab took it over, or saved it since this copy was loaded). */
+  function loseWriteAccess(projectId: string, reason: 'other-tab' | 'stale') {
+    cleanupQueue.delete(projectId);
+    if (get().project?.id !== projectId) return;
+    readOnlyOf = projectId;
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    set({ readOnly: reason, saveState: 'idle' });
+  }
+
+  // ------------------------------------------------------------ pixel cleanup
+
+  let cleanupWarned = false;
+
+  /** Queues pixel data of the open project whose last reference may be gone (see cleanupQueue). */
+  function queueCleanup(projectId: string, blobIds: Iterable<string>, maskIds: Iterable<string>) {
+    if (readOnlyOf === projectId) return; // a read-only tab never deletes anything
+    let q = cleanupQueue.get(projectId);
+    if (!q) cleanupQueue.set(projectId, (q = { blobIds: new Set(), maskIds: new Set() }));
+    for (const id of blobIds) q.blobIds.add(id);
+    for (const id of maskIds) q.maskIds.add(id);
+  }
+
+  /**
+   * Undo history being thrown away (trimmed, cleared by a new edit, closed):
+   * what only those snapshots referenced — an undone region's mask, a deleted
+   * design's renders, the masks a re-map or "Sharpen again" replaced — is
+   * queued for cleanup. `keep` and `remaining` stay referenced.
+   */
+  function discardHistory(dropped: HistoryEntry[], keep: Project, remaining: HistoryEntry[]) {
+    if (!dropped.length || readOnlyOf === keep.id) return;
+    try {
+      reclaimDropped(dropped, keep, remaining);
+    } catch (err) {
+      // Bookkeeping must never break an edit; leftovers go in the startup sweep.
+      if (!cleanupWarned) console.warn('[store] could not track unused images', err);
+      cleanupWarned = true;
+    }
+  }
+
+  function reclaimDropped(dropped: HistoryEntry[], keep: Project, remaining: HistoryEntry[]) {
+    const blobs = new Set<string>();
+    const masks = new Set<string>();
+    for (const e of dropped) {
+      if (e.kind === 'mask') {
+        masks.add(e.maskId);
+        continue;
+      }
+      for (const snap of [e.before, e.after]) {
+        const r = refsOf(snap);
+        for (const id of r.blobIds) blobs.add(id);
+        for (const id of r.maskIds) masks.add(id);
+      }
+    }
+    const unmark = (p: Project) => {
+      const r = refsOf(p);
+      for (const id of r.blobIds) blobs.delete(id);
+      for (const id of r.maskIds) masks.delete(id);
+    };
+    unmark(keep);
+    for (const e of remaining) {
+      if (!blobs.size && !masks.size) return;
+      if (e.kind === 'mask') masks.delete(e.maskId);
+      else {
+        unmark(e.before);
+        unmark(e.after);
+      }
+    }
+    if (!blobs.size && !masks.size) return;
+    runtime.forgetMasks([...masks]); // also cancels a pending write that would bring a mask back
+    queueCleanup(keep.id, blobs, masks);
+  }
+
+  /** Deletes the queued ids nothing references any more (runs after a successful save). */
+  async function collectGarbage(projectId: string): Promise<void> {
+    const q = cleanupQueue.get(projectId);
+    if (!q) return;
+    cleanupQueue.delete(projectId);
+    try {
+      const [stored, library] = await Promise.all([db.loadProject(projectId), db.loadLibrary()]);
+      const live = new Set<string>();
+      const mark = (p: Project | null | undefined) => {
+        if (!p) return;
+        const r = refsOf(p);
+        for (const id of r.blobIds) live.add(id);
+        for (const id of r.maskIds) live.add(id);
+      };
+      mark(stored);
+      const s = get();
+      if (s.project?.id === projectId) {
+        mark(s.project);
+        for (const e of [...s.past, ...s.future]) {
+          if (e.kind === 'mask') live.add(e.maskId);
+          else {
+            mark(e.before);
+            mark(e.after);
+          }
+        }
+      }
+      for (const a of [...library, ...s.library]) if (a.imageId) live.add(a.imageId);
+      const blobIds = [...q.blobIds].filter((id) => !live.has(id));
+      const maskIds = [...q.maskIds].filter((id) => !live.has(id));
+      runtime.forgetMasks(maskIds);
+      await Promise.all([db.deleteBlobs(blobIds), db.deleteMasks(maskIds)]);
+    } catch (err) {
+      // Left for the startup sweep (db.sweepWhenIdle).
+      console.warn('[store] could not clean up unused images', err);
+    }
+  }
+
+  // ------------------------------------------------------- tabs & write locks
+
+  /** Claims a project's write lock (`steal`: take it from another tab). Resolves true when this tab may save it. */
+  function claimWriteLock(id: string, steal = false): Promise<boolean> {
+    const locks = lockManager();
+    if (!locks) return Promise.resolve(true); // no Web Locks (tests, old browsers): behave as the only tab
+    if (heldLocks.has(id) && !steal) return Promise.resolve(true);
+    return new Promise<boolean>((resolve) => {
+      let release!: () => void;
+      const held = new Promise<void>((r) => (release = r));
+      locks
+        .request(`${db.PROJECT_LOCK_PREFIX}${id}`, steal ? { steal: true } : { ifAvailable: true }, (lock) => {
+          if (!lock) {
+            resolve(false);
+            return undefined;
+          }
+          heldLocks.set(id, release);
+          resolve(true);
+          return held;
+        })
+        .catch(() => {
+          // Another tab took this project over: stop saving it here.
+          if (heldLocks.get(id) === release) {
+            heldLocks.delete(id);
+            loseWriteAccess(id, 'other-tab');
+          }
+          resolve(false);
+        });
+    });
+  }
+
+  function releaseWriteLock(id: string) {
+    heldLocks.get(id)?.();
+    heldLocks.delete(id);
+  }
+
+  /** Shared storage lock for as long as a project is open: another tab's startup sweep waits for it. */
+  function holdStorageLock(): Promise<void> {
+    const locks = lockManager();
+    if (!locks || releaseStorageLock) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const held = new Promise<void>((r) => (releaseStorageLock = r));
+      locks.request(db.GC_LOCK, { mode: 'shared' }, () => (resolve(), held)).catch(() => resolve());
+    });
+  }
+
+  /**
+   * Leaves the open project `prev`: its history is thrown away (what only the
+   * history referenced is queued for cleanup) and the pending save is flushed.
+   * Synchronous up to the save, which captures `prev` before any await.
+   */
+  function leaveProject(prev: Project): Promise<boolean> {
+    const s = get();
+    discardHistory([...s.past, ...s.future], prev, []);
+    const pending = !!saveTimer || cleanupQueue.has(prev.id);
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    return pending ? saveNow(prev) : Promise.resolve(true);
+  }
+
+  /** Replaces the open project with its stored copy (another tab's save, or taking it over). */
+  function adoptStored(rec: { project: Project; rev: number }, writable: boolean) {
+    const p = rec.project;
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    cleanupQueue.delete(p.id);
+    readOnlyOf = writable ? null : p.id;
+    revs.set(p.id, rec.rev);
+    const { selection, readOnly } = get();
+    const valid = (!selection.spaceId || !!findSpace(p, selection.spaceId)) && (!selection.photoId || !!findPhoto(p, selection.photoId));
+    set({
+      project: p,
+      past: [],
+      future: [],
+      readOnly: writable ? null : (readOnly ?? 'other-tab'),
+      saveState: 'idle',
+      selection: valid ? selection : firstSelection(p),
+    });
+  }
+
+  let channel: BroadcastChannel | null = null;
+  function announce(msg: ChannelMessage) {
+    try {
+      channel?.postMessage(msg);
+    } catch {
+      // another tab just won't refresh its list
+    }
+  }
+
+  async function onChannelMessage(msg: ChannelMessage) {
+    if (!msg || typeof msg !== 'object' || typeof msg.id !== 'string') return;
+    if (msg.type === 'deleted') {
+      set((s) => ({ projects: s.projects.filter((m) => m.id !== msg.id) }));
+      return;
+    }
+    if (msg.type !== 'saved' || !msg.meta) return;
+    set((s) => ({ projects: [msg.meta, ...s.projects.filter((m) => m.id !== msg.id)].sort((a, b) => b.updatedAt - a.updatedAt) }));
+    // A read-only copy follows the tab that saves it.
+    if (get().project?.id !== msg.id || readOnlyOf !== msg.id) return;
+    const rec = await db.loadProjectRecord(msg.id).catch(() => undefined);
+    if (rec && get().project?.id === msg.id && readOnlyOf === msg.id) adoptStored(rec, false);
+  }
+
+  if (typeof window !== 'undefined' && typeof BroadcastChannel !== 'undefined') {
+    channel = new BroadcastChannel('mode-projects');
+    channel.onmessage = (e: MessageEvent<ChannelMessage>) => void onChannelMessage(e.data);
+  }
+
+  /** After undo / redo: a selected space or photo that no longer exists falls back to the first one. */
+  function repairSelection() {
+    const { project, selection } = get();
+    if (!project) return;
+    if ((selection.spaceId && !findSpace(project, selection.spaceId)) || (selection.photoId && !findPhoto(project, selection.photoId))) {
+      set({ selection: firstSelection(project) });
     }
   }
 
@@ -525,12 +843,17 @@ export const useStore = create<AppState>()((set, get) => {
     health: null,
     shop: null,
     saveState: 'idle',
+    readOnly: null,
     toasts: [],
     past: [],
     future: [],
 
     // ----------------------------------------------------------------- projects
     async init() {
+      // Pixel data no project references any more (leaked by older versions, or left by a
+      // crash between a write and the save that references it). Started before any project
+      // opens; skipped while another tab has a project open or an import running.
+      void db.sweepWhenIdle().catch((err) => console.warn('[store] storage sweep skipped', err));
       try {
         const [projects, library] = await Promise.all([db.listProjects(), db.loadLibrary()]);
         set({ projects, library, ready: true });
@@ -556,14 +879,34 @@ export const useStore = create<AppState>()((set, get) => {
     },
 
     async openProject(id) {
-      const p = await db.loadProject(id);
-      if (!p) {
-        get().notify('Project not found', 'error');
+      // Re-opening the open project: load what is saved, including its last edits.
+      if (get().project?.id === id) await flushSave();
+      await holdStorageLock();
+      // One tab saves a project; another tab opening it gets a read-only copy (see takeOver).
+      const writable = await claimWriteLock(id);
+      const rec = await db.loadProjectRecord(id).catch((err: unknown) => {
+        get().notify(`Could not open the project: ${(err as Error).message}`, 'error');
+        return null;
+      });
+      if (!rec) {
+        if (rec === undefined) get().notify('Project not found', 'error');
+        if (get().project?.id !== id) releaseWriteLock(id);
+        if (!get().project) {
+          releaseStorageLock?.();
+          releaseStorageLock = null;
+        }
         return;
       }
+      const p = rec.project;
       await runtime.clearRuntime();
+      // Flush the outgoing project's pending save now: saveNow captures it before the swap below.
+      const prev = get().project;
+      const left = prev ? leaveProject(prev) : undefined;
+      readOnlyOf = writable ? null : id;
+      revs.set(id, rec.rev);
       set({
         project: p,
+        readOnly: writable ? null : 'other-tab',
         selection: firstSelection(p),
         past: [],
         future: [],
@@ -575,22 +918,63 @@ export const useStore = create<AppState>()((set, get) => {
         studio: { ...get().studio, viewVariationId: null, gridGenerationId: null, focusZoneId: null, sketch: 'none', activeElementId: null },
         view: { ...get().view, mobilePane: 'editor', compare: 'off', showOriginal: false },
       });
+      if (prev) {
+        await left;
+        if (prev.id !== id) releaseWriteLock(prev.id);
+      }
     },
 
     async closeProject() {
-      if (saveTimer) {
-        clearTimeout(saveTimer);
-        saveTimer = null;
-        await saveNow();
-      }
       await runtime.clearRuntime();
-      set({ project: null, selection: EMPTY_SELECTION, past: [], future: [], placement: null });
+      // Flush the pending save (and the cleanup it runs) before the project goes.
+      const prev = get().project;
+      const left = prev ? leaveProject(prev) : undefined;
+      readOnlyOf = null;
+      set({ project: null, readOnly: null, selection: EMPTY_SELECTION, past: [], future: [], placement: null });
+      if (prev) {
+        await left;
+        releaseWriteLock(prev.id);
+      }
+      releaseStorageLock?.();
+      releaseStorageLock = null;
     },
 
     async deleteProject(id) {
       if (get().project?.id === id) await get().closeProject();
+      cleanupQueue.delete(id);
       await db.deleteProject(id);
+      revs.delete(id);
       set((s) => ({ projects: s.projects.filter((m) => m.id !== id) }));
+      announce({ type: 'deleted', id });
+    },
+
+    async takeOver() {
+      const p = get().project;
+      if (!p) return;
+      const writable = await claimWriteLock(p.id, !heldLocks.has(p.id));
+      const rec = await db.loadProjectRecord(p.id).catch(() => undefined);
+      if (get().project?.id !== p.id) return;
+      if (!rec) {
+        readOnlyOf = p.id; // nothing to save back: it was deleted elsewhere
+        get().notify('This project was deleted in another tab.', 'error');
+        await get().closeProject();
+        return;
+      }
+      if (writable) {
+        // Masks cached here may be older than the stored ones: refresh them in place before editing resumes.
+        await Promise.all(
+          refsOf(rec.project).maskIds.map(async (maskId) => {
+            const m = runtime.getMask(maskId);
+            const stored = m ? await db.getMask(maskId) : undefined;
+            if (m && stored && stored.width === m.width && stored.height === m.height) {
+              m.data.set(stored.data);
+              runtime.markMaskDirty(maskId);
+            }
+          }),
+        );
+      }
+      adoptStored(rec, writable);
+      if (!writable) get().notify('Mode could not take this project over from the other tab. Close it there and try again.', 'error');
     },
 
     updateProjectInfo(patch) {
@@ -674,27 +1058,54 @@ export const useStore = create<AppState>()((set, get) => {
       runtime.forgetMasks(maskIds);
       const next = produce(p, (d) => {
         d.spaces = d.spaces.filter((s) => s.id !== id);
+        for (const it of d.ideaBoard) {
+          if (!it.spaceIds.includes(id)) continue;
+          it.spaceIds = it.spaceIds.filter((s) => s !== id);
+          // Scoped only to this space: keep it on the board but off, rather than widen it to the whole house.
+          if (it.spaceIds.length === 0) it.active = false;
+        }
         d.updatedAt = Date.now();
       });
-      // Deleting pixel data cannot be undone: clear history.
+      // Deleting pixel data cannot be undone: clear history. The pixels go once the
+      // document without them is saved (a crash in between leaves orphans, not broken photos).
+      const { past, future } = get();
       set({ project: next, past: [], future: [], selection: firstSelection(next) });
-      scheduleSave();
-      await Promise.all([db.deleteBlobs(blobIds), db.deleteMasks(maskIds)]);
+      discardHistory([...past, ...future], next, []);
+      queueCleanup(p.id, blobIds, maskIds);
+      await flushSave();
     },
 
     async addPhotos(spaceId, files) {
+      // Bound to the project and space open when the import started: a slow import
+      // must not land in another project, or report photos added to a deleted space.
+      const pid = get().project?.id;
+      if (!pid) return [];
+      const targetExists = () => {
+        const cur = get().project;
+        return cur?.id === pid && !!findSpace(cur, spaceId);
+      };
       const ids: string[] = [];
+      let lost = false;
       // GPS / compass heading / capture time come from the ORIGINAL file: importing
       // re-encodes the photo, which strips EXIF. Loaded on demand; never blocks an import.
       const readCapture = (file: File) =>
         import('../site/capture').then((m) => m.readPhotoCapture(file)).catch(() => undefined);
       for (const file of files) {
+        if (!targetExists()) {
+          lost = true;
+          break;
+        }
         try {
           const [imported, capture] = await Promise.all([importImageFile(file), readCapture(file)]);
           const photoId = newId('pho');
           const imageId = newId('img');
           const thumbId = newId('img');
           await Promise.all([db.putBlob(imageId, imported.blob), db.putBlob(thumbId, imported.thumb)]);
+          if (!targetExists()) {
+            await db.deleteBlobs([imageId, thumbId]);
+            lost = true;
+            break;
+          }
           const design = newDesign('Option A');
           const photo: Photo = {
             id: photoId,
@@ -718,6 +1129,8 @@ export const useStore = create<AppState>()((set, get) => {
           get().notify(`${file.name}: ${(err as Error).message}`, 'error');
         }
       }
+      if (lost) get().notify('The project or space closed before the photos finished importing.', 'error');
+      if (!targetExists()) return [];
       if (ids.length) {
         set((s) => ({
           selection: { ...EMPTY_SELECTION, spaceId, photoId: ids[ids.length - 1] },
@@ -747,14 +1160,17 @@ export const useStore = create<AppState>()((set, get) => {
         d.updatedAt = Date.now();
       });
       const remaining = findSpace(next, space.id)?.photos ?? [];
+      const { past, future } = get();
       set({
         project: next,
         past: [],
         future: [],
         selection: { ...EMPTY_SELECTION, spaceId: space.id, photoId: remaining[0]?.id ?? null },
       });
-      scheduleSave();
-      await Promise.all([db.deleteBlobs(blobIds), db.deleteMasks(maskIds)]);
+      // The pixels go once the document without the photo is saved.
+      discardHistory([...past, ...future], next, []);
+      queueCleanup(p.id, blobIds, maskIds);
+      await flushSave();
     },
 
     setCalibration(photoId, calibration) {
@@ -983,24 +1399,34 @@ export const useStore = create<AppState>()((set, get) => {
 
     async addAIRender(blob, prompt, provider) {
       if (!selectActiveDesign(get())) return null;
+      // Bound to the photo (and project) selected when the render started.
+      const pid = get().project?.id;
+      const photoId = get().selection.photoId;
       const id = newId('ren');
       const imageId = newId('img');
       await db.putBlob(imageId, blob);
+      const cur = get().project;
+      if (cur?.id !== pid || !findPhoto(cur, photoId)) {
+        await db.deleteBlobs([imageId]);
+        return null;
+      }
       const render: AIRender = { id, imageId, prompt, provider, createdAt: Date.now() };
       get().mutateProject('AI render', (d) =>
-        withActiveDesign(d, get().selection.photoId, (des) => void des.aiRenders.unshift(render)), { history: false });
+        withActiveDesign(d, photoId, (des) => void des.aiRenders.unshift(render)), { history: false });
       return id;
     },
 
     deleteAIRender(renderId) {
       const design = selectActiveDesign(get());
       const r = design?.aiRenders.find((x) => x.id === renderId);
-      if (!r) return;
+      const pid = get().project?.id;
+      if (!r || !pid) return;
       get().mutateProject('Delete AI render', (d) =>
         withActiveDesign(d, get().selection.photoId, (des) => {
           des.aiRenders = des.aiRenders.filter((x) => x.id !== renderId);
         }), { history: false });
-      void db.deleteBlobs([r.imageId]);
+      queueCleanup(pid, [r.imageId], []);
+      void flushSave();
     },
 
     updateDesignNotes(notes) {
@@ -1055,7 +1481,9 @@ export const useStore = create<AppState>()((set, get) => {
     },
 
     async addIdeaItem(item, blobs) {
-      if (!get().project) return null;
+      // Bound to the project open when the add started (blob writes, product image fetches are slow).
+      const pid = get().project?.id;
+      if (!pid) return null;
       const id = newId('idea');
       const full: IdeaItem = { ...item, id, createdAt: Date.now() };
       if (blobs?.image) {
@@ -1065,6 +1493,10 @@ export const useStore = create<AppState>()((set, get) => {
       if (blobs?.thumb) {
         full.thumbId = newId('img');
         await db.putBlob(full.thumbId, blobs.thumb);
+      }
+      if (get().project?.id !== pid) {
+        await db.deleteBlobs([full.imageId, full.thumbId].filter((x): x is string => !!x));
+        return null;
       }
       get().mutateProject('Add idea', (d) => void d.ideaBoard.push(full));
       return id;
@@ -1087,10 +1519,12 @@ export const useStore = create<AppState>()((set, get) => {
         }
         d.updatedAt = Date.now();
       });
-      // Blob deletion cannot be undone: clear history.
+      // Blob deletion cannot be undone: clear history. The blobs go once the document without the idea is saved.
+      const { past, future } = get();
       set({ project: next, past: [], future: [] });
-      scheduleSave();
-      await db.deleteBlobs([item.imageId, item.thumbId].filter((x): x is string => !!x));
+      discardHistory([...past, ...future], next, []);
+      queueCleanup(next.id, [item.imageId, item.thumbId].filter((x): x is string => !!x), []);
+      await flushSave();
     },
 
     addGeneration(photoId, generation) {
@@ -1124,6 +1558,12 @@ export const useStore = create<AppState>()((set, get) => {
     },
 
     async deleteVariation(photoId, variationId) {
+      const ph = findPhoto(get().project, photoId)?.photo;
+      if (ph && pendingRunsFrom(ph, variationId).length > 0) {
+        const title = findVariation(ph, variationId)?.title ?? 'This variation';
+        get().notify(`“${title}” is the starting image of a hand-off still waiting for its result — finish or skip it first.`, 'error');
+        return false;
+      }
       let removed: Variation | undefined;
       get().mutateProject('Delete variation', (d) =>
         withPhoto(d, photoId, (ph) => {
@@ -1138,7 +1578,13 @@ export const useStore = create<AppState>()((set, get) => {
       set((s) => ({
         studio: s.studio.viewVariationId === variationId ? { ...s.studio, viewVariationId: null } : s.studio,
       }));
-      if (removed) await db.deleteBlobs([removed.imageId, removed.thumbId]);
+      const pid = get().project?.id;
+      if (removed && pid) {
+        // Deleted once the document without it is saved (and nothing else references it).
+        queueCleanup(pid, [removed.imageId, removed.thumbId], []);
+        await flushSave();
+      }
+      return true;
     },
 
     async deleteGeneration(photoId, generationId) {
@@ -1157,13 +1603,14 @@ export const useStore = create<AppState>()((set, get) => {
           gridGenerationId: s.studio.gridGenerationId === generationId ? null : s.studio.gridGenerationId,
         },
       }));
-      await db.deleteBlobs([
-        ...g.variations.flatMap((v) => [v.imageId, v.thumbId]),
-        ...(g.planned ?? []).flatMap((pl) => [
-          ...(pl.handoff ? [pl.handoff.cleanImageId, pl.handoff.markedImageId] : []),
-          ...(pl.staged ? [pl.staged.imageId, pl.staged.thumbId] : []),
-        ]),
-      ]);
+      // Variations, hand-off packs, staged results (+ change maps) and the run's frozen target
+      // masks — deleted once the document without the run is saved.
+      const owned = db.generationOwnedIds(g);
+      runtime.forgetMasks(owned.maskIds);
+      const pid = get().project?.id;
+      if (!pid) return;
+      queueCleanup(pid, owned.blobIds, owned.maskIds);
+      await flushSave();
     },
 
     setRecommendations(photoId, items, baseVariationId) {
@@ -1280,46 +1727,92 @@ export const useStore = create<AppState>()((set, get) => {
 
     // ------------------------------------------------------------------ history
     mutateProject(label, recipe, opts = {}) {
-      const before = get().project;
+      const s = get();
+      const before = s.project;
       if (!before) return;
       const after = produce(before, (d) => {
         recipe(d);
         d.updatedAt = Date.now();
       });
       if (after === before) return;
-      const record = opts.history !== false;
-      set((s) => {
-        if (!record) {
-          // Not undoable, so it must also survive undo/redo: replay the same
-          // change onto every snapshot in the history (no-op where it doesn't apply).
-          // Without this, undoing an older edit would silently drop e.g. a
-          // finished generation or a newly uploaded photo.
-          const rebase = (p: Project) => {
-            try {
-              return produce(p, (d) => void recipe(d));
-            } catch {
-              return p; // the change doesn't apply to this older snapshot
-            }
-          };
-          const rebaseEntry = (e: HistoryEntry): HistoryEntry =>
-            e.kind === 'project' ? { ...e, before: rebase(e.before), after: rebase(e.after) } : e;
-          return { project: after, past: s.past.map(rebaseEntry), future: s.future.map(rebaseEntry) };
+      let past: HistoryEntry[];
+      let future: HistoryEntry[];
+      /** History thrown away by this change (its pixels may be reclaimed). */
+      const dropped: HistoryEntry[] = [];
+      if (opts.history === false) {
+        // Not undoable, so it must also survive undo/redo: replay the same
+        // change onto every snapshot in the history (no-op where it doesn't apply).
+        // Without this, undoing an older edit would silently drop e.g. a
+        // finished generation or a newly uploaded photo.
+        const rebase = (p: Project) => {
+          try {
+            return produce(p, (d) => void recipe(d));
+          } catch {
+            return p; // the change doesn't apply to this older snapshot
+          }
+        };
+        // past is oldest → newest; its last entry's `after` is the current project.
+        past = [];
+        for (let i = s.past.length - 1; i >= 0; i--) {
+          const e = s.past[i];
+          if (e.kind !== 'project') {
+            past.push(e);
+            continue;
+          }
+          const b = rebase(e.before);
+          const a = rebase(e.after);
+          // The change landed on `after` but has nowhere to go on `before` (e.g. a photo
+          // uploaded into a space that "Add space" created): undoing past this entry would
+          // silently drop it, so the entry and everything older stop being undoable.
+          if (a !== e.after && b === e.before) {
+            dropped.push(...s.past.slice(0, i + 1));
+            break;
+          }
+          past.push({ ...e, before: b, after: a });
         }
+        past.reverse();
+        // future is nearest → farthest; its first entry's `before` is the current project.
+        future = [];
+        for (let i = 0; i < s.future.length; i++) {
+          const e = s.future[i];
+          if (e.kind !== 'project') {
+            future.push(e);
+            continue;
+          }
+          const b = rebase(e.before);
+          const a = rebase(e.after);
+          // Redoing this entry would drop the change (e.g. it re-applies an undone delete).
+          if (b !== e.before && a === e.after) {
+            dropped.push(...s.future.slice(i));
+            break;
+          }
+          future.push({ ...e, before: b, after: a });
+        }
+      } else {
         const now = Date.now();
         const last = s.past[s.past.length - 1];
         if (opts.coalesce && last?.kind === 'project' && last.key === opts.coalesce && now - last.at < COALESCE_MS) {
-          const merged: HistoryEntry = { ...last, after, at: now };
-          return { project: after, past: [...s.past.slice(0, -1), merged], future: [] };
+          past = [...s.past.slice(0, -1), { ...last, after, at: now }];
+          dropped.push(last); // its intermediate `after` is replaced
+        } else {
+          const all = [...s.past, { kind: 'project', label, before, after, key: opts.coalesce, at: now } as HistoryEntry];
+          past = all.slice(-HISTORY_LIMIT);
+          dropped.push(...all.slice(0, all.length - past.length));
         }
-        const entry: HistoryEntry = { kind: 'project', label, before, after, key: opts.coalesce, at: now };
-        return { project: after, past: [...s.past, entry].slice(-HISTORY_LIMIT), future: [] };
-      });
+        future = [];
+        dropped.push(...s.future);
+      }
+      set({ project: after, past, future });
+      discardHistory(dropped, after, [...past, ...future]);
       scheduleSave();
     },
 
     recordMaskEdit(maskId, before, after, label = 'Edit mask') {
-      const entry: HistoryEntry = { kind: 'mask', label, maskId, before, after, at: Date.now() };
-      set((s) => ({ past: [...s.past, entry].slice(-HISTORY_LIMIT), future: [] }));
+      const s = get();
+      const all = [...s.past, { kind: 'mask', label, maskId, before, after, at: Date.now() } as HistoryEntry];
+      const past = all.slice(-HISTORY_LIMIT);
+      set({ past, future: [] });
+      if (s.project) discardHistory([...all.slice(0, all.length - past.length), ...s.future], s.project, past);
     },
 
     undo() {
@@ -1329,6 +1822,7 @@ export const useStore = create<AppState>()((set, get) => {
       if (entry.kind === 'project') {
         if (!project) return;
         set({ project: entry.before, past: past.slice(0, -1), future: [entry, ...future] });
+        repairSelection();
         scheduleSave();
       } else {
         applyMaskBytes(entry.maskId, entry.before);
@@ -1343,6 +1837,7 @@ export const useStore = create<AppState>()((set, get) => {
       if (entry.kind === 'project') {
         if (!project) return;
         set({ project: entry.after, past: [...past, entry], future: future.slice(1) });
+        repairSelection();
         scheduleSave();
       } else {
         applyMaskBytes(entry.maskId, entry.after);

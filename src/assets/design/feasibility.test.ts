@@ -183,6 +183,14 @@ describe('US-RIIS invasive reasons', () => {
     expect(plantFeasibility(plant({ botanical: "Lavandula angustifolia 'Hidcote'" }), { zone: 6 }).reasons.join(' ')).not.toMatch(/invasive|US-RIIS/i);
   });
 
+  it('never says "not invasive" for a plant without a US-RIIS entry (C11)', () => {
+    setInvasivesData(RIIS);
+    for (const locality of ['L48', 'AK', 'HI'] as const) {
+      const f = plantFeasibility(plant({ botanical: 'Echinacea purpurea' }, 'Purple coneflower'), { zone: 6, deerPressure: 'high', locality });
+      expect(f.reasons.join(' ')).not.toMatch(/not invasive|non-invasive|isn't invasive/i);
+    }
+  });
+
   it('treats spreading lawn grasses as a note, checking every species of a mix', () => {
     setInvasivesData(RIIS);
     const lawn = plant({ type: 'grass', botanical: 'Zoysia japonica / Cynodon dactylon', matureWidthFt: 0, matureHeightFt: 0.2 }, 'Zoysia / Bermuda grass');
@@ -206,6 +214,18 @@ describe('US-RIIS invasive reasons', () => {
     const f = plantFeasibility(plant({ botanical: "Euonymus fortunei 'Emerald Gaiety'" }), { zone: 6 });
     expect(f.rating).toBe('good');
     expect(f.reasons.join(' ')).toMatch(/Euonymus fortunei var\. radicans \(a form of this species\)/);
+  });
+
+  it('lists every problem of a single-plant option, the invasive flag before deer advice', () => {
+    setInvasivesData({ rows: [...RIIS.rows, ['Acer palmatum', 'Japanese maple', '300']] });
+    const f = paletteFeasibility([PLANT_PROFILES['japanese-maple']], 'any', { zone: 7, sun: 'part-sun', deerPressure: 'high' });
+    expect(f?.rating).toBe('caution');
+    expect(f?.reasons[0]).toMatch(/^Invasive risk: Japanese maple \(Acer palmatum\) is listed as a widespread invasive/);
+    expect(f?.reasons[1]).toMatch(/^Deer favorite and deer pressure is high/);
+    expect(f?.reasons.some((r) => /Hardy in zones/.test(r))).toBe(true);
+    // In a palette, each problem plant contributes all its problems.
+    const pal = paletteFeasibility([PLANT_PROFILES['japanese-maple'], PLANT_PROFILES.coneflower], 'all', { zone: 7, sun: 'part-sun', deerPressure: 'high' });
+    expect(pal?.reasons.filter((r) => r.startsWith('Japanese maple:'))).toHaveLength(2);
   });
 
   it('flags palettes that include a listed plant, naming it', () => {
@@ -293,7 +313,21 @@ describe('feasibility context', () => {
       },
       [{ sun: 'part-sun' }],
     );
-    expect(ctx).toEqual({ setting: 'exterior', zone: 7, zoneLabel: '7a', sun: 'part-sun', annualRainfallIn: 46, deerPressure: true });
+    expect(ctx).toEqual({ setting: 'exterior', zone: 7, zoneLabel: '7a', sun: 'part-sun', annualRainfallIn: 46, deerPressure: true, locality: 'L48' });
     expect(feasibilityContext(undefined)).toEqual({ setting: 'exterior' });
+  });
+
+  it('prefers the deer pressure set in Settings over the climate notes', () => {
+    const notes = { hardinessZone: '7a', summary: '', notes: ['Deer are common'], source: 'ai' as const, updatedAt: 0 };
+    expect(feasibilityContext({ deerPressure: 'low', climate: notes }).deerPressure).toBe('low');
+    expect(feasibilityContext({ deerPressure: 'high' }).deerPressure).toBe('high');
+    expect(feasibilityContext({ climate: notes }).deerPressure).toBe(true);
+  });
+
+  it('reads the US-RIIS locality from the ZIP (Hawaii / Alaska lists apply there)', () => {
+    expect(feasibilityContext({ zip: '96813' }).locality).toBe('HI');
+    expect(feasibilityContext({ zip: '99501' }).locality).toBe('AK');
+    expect(feasibilityContext({ zip: '20817' }).locality).toBe('L48');
+    expect(feasibilityContext({ zip: 'n/a' }).locality).toBeUndefined();
   });
 });

@@ -2,7 +2,21 @@ import { describe, expect, it } from 'vitest';
 import type { Pt } from '../../shared/types';
 import { ADE } from './ade20k';
 import { pointInPolygon } from './prompts';
-import { buildOfflineScene, componentLabels, kindGrid, offlineCategory, offlineSummary, zonesFromClasses, type ClipMaps } from './sceneFromClasses';
+import { taskModels, taskUsesSegformer } from './models';
+import {
+  buildOfflineScene,
+  CLIP_ONLY_CLASSES,
+  CLIP_PROMPTS,
+  classMapFromClip,
+  componentLabels,
+  kindGrid,
+  offlineCategory,
+  offlineSceneCategory,
+  offlineSummary,
+  UNLABELED,
+  zonesFromClasses,
+  type ClipMaps,
+} from './sceneFromClasses';
 import type { ClassMap } from './scoring';
 
 /**
@@ -87,6 +101,53 @@ describe('zonesFromClasses', () => {
     expect(Math.max(...ys)).toBeLessThanOrEqual(51 * 8);
   });
 
+  it('calls a narrow strip under a high "driveway" probability a walkway, a wide one a driveway', () => {
+    const classes = houseScene();
+    const W = classes.width;
+    const n = W * classes.height;
+    const paint = (x0: number, y0: number, x1: number, y1: number, c: number) => {
+      for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) classes.labels[y * W + x] = c;
+    };
+    // A real drive on the right (70 px of 200 = 35%), and the 16 px walk to the door; CLIPSeg says "driveway" for both.
+    paint(130, 100, 200, 150, ADE.road);
+    const driveway = new Float32Array(n);
+    for (let y = 95; y < 150; y++) for (let x = 92; x < 108; x++) driveway[y * W + x] = 0.9;
+    for (let y = 100; y < 150; y++) for (let x = 130; x < 200; x++) driveway[y * W + x] = 0.9;
+    const zones = zonesFromClasses(classes, photo, false, { width: W, height: classes.height, probs: { driveway } });
+    const walk = zones.find((z) => z.kind === 'walkway');
+    expect(walk).toBeDefined();
+    expect(walk!.label).toBe('Walkway');
+    expect(pointInPolygon({ x: 100 * 8, y: 120 * 8 }, walk!.polygon)).toBe(true);
+    const drives = zones.filter((z) => z.kind === 'driveway');
+    expect(drives).toHaveLength(1);
+    expect(pointInPolygon({ x: 165 * 8, y: 125 * 8 }, drives[0].polygon)).toBe(true);
+  });
+
+  it('calls a wider drive-like strip that leads to the front door a walkway (not when it leads to a garage door)', () => {
+    /** A 30 px (15%) strip under "driveway", starting at y0 (the door ends at y 95). */
+    const strip = (y0: number, garage = false) => {
+      const classes = houseScene();
+      const W = classes.width;
+      const paint = (x0: number, ya: number, x1: number, yb: number, c: number) => {
+        for (let y = ya; y < yb; y++) for (let x = x0; x < x1; x++) classes.labels[y * W + x] = c;
+      };
+      if (garage) {
+        paint(92, 62, 108, 95, ADE.house);
+        paint(80, 72, 130, 95, ADE.door); // wider than tall: a garage door
+      }
+      paint(85, y0, 115, 150, ADE.sidewalk);
+      const driveway = new Float32Array(W * classes.height);
+      for (let y = y0; y < 150; y++) for (let x = 85; x < 115; x++) driveway[y * W + x] = 0.9;
+      return zonesFromClasses(classes, photo, false, { width: W, height: classes.height, probs: { driveway } }).map((z) => z.kind);
+    };
+    expect(strip(95)).toContain('walkway');
+    expect(strip(95)).not.toContain('driveway');
+    // Off on its own (not reaching the door) it stays a drive.
+    expect(strip(115)).toContain('driveway');
+    expect(strip(95, true)).toContain('garage-door');
+    expect(strip(95, true)).toContain('driveway');
+  });
+
   it('maps interiors and ignores CLIPSeg there', () => {
     const W = 120;
     const H = 90;
@@ -130,6 +191,32 @@ describe('kindGrid', () => {
   });
 });
 
+describe('offlineSceneCategory', () => {
+  it("keeps the user's space type; the class-mix guess only fills in a generic one", () => {
+    expect(offlineSceneCategory('garden', 'front-exterior')).toBe('front-exterior');
+    expect(offlineSceneCategory('garden', 'backyard')).toBe('backyard');
+    expect(offlineSceneCategory('driveway', 'front-yard')).toBe('front-yard');
+    expect(offlineSceneCategory('garden', 'other-exterior')).toBe('garden');
+    expect(offlineSceneCategory('other-exterior', 'other-exterior')).toBe('other-exterior');
+    expect(offlineSceneCategory('kitchen', 'other-interior')).toBe('kitchen');
+    expect(offlineSceneCategory('kitchen', 'bathroom')).toBe('bathroom');
+    // Never across inside / outside.
+    expect(offlineSceneCategory('kitchen', 'other-exterior')).toBe('other-exterior');
+  });
+
+  it('a front-of-house class mix keeps "Front of house" even when it reads as a garden', () => {
+    const W = 100;
+    const H = 100;
+    const labels = new Uint8Array(W * H).fill(ADE.grass);
+    for (let i = 0; i < W * 30; i++) labels[i] = ADE.sky;
+    for (let i = W * 30; i < W * 45; i++) labels[i] = ADE.house; // 15% house: below the front-of-house share
+    const classes = { width: W, height: H, labels };
+    expect(offlineCategory(classes, false)).toBe('front-yard');
+    const scene = buildOfflineScene([], offlineSceneCategory(offlineCategory(classes, false), 'front-exterior'), true, 1, false);
+    expect(scene.category).toBe('front-exterior');
+  });
+});
+
 describe('buildOfflineScene', () => {
   it('wraps zones in a SceneMap with ids, summary and model', () => {
     const zones = zonesFromClasses(houseScene(), { width: 1600, height: 1200 }, false);
@@ -142,5 +229,66 @@ describe('buildOfflineScene', () => {
     expect(scene.paths).toEqual([]);
     expect(scene.summary).toMatch(/without AI/);
     expect(offlineSummary([])).toMatch(/no clear areas/);
+  });
+});
+
+describe('CLIPSeg-only map (SegFormer licence declined)', () => {
+  /** One probability plane per CLIP_ONLY_CLASSES entry, painted like houseScene(). */
+  function clipPlanes(W: number, H: number, interior = false): Float32Array[] {
+    const list = interior ? CLIP_ONLY_CLASSES.interior : CLIP_ONLY_CLASSES.exterior;
+    const planes = list.map(() => new Float32Array(W * H).fill(0.05));
+    const at = (prompt: string) => planes[list.findIndex((c) => c.prompt === prompt)];
+    const paint = (plane: Float32Array, x0: number, y0: number, x1: number, y1: number, p: number) => {
+      for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) plane[y * W + x] = p;
+    };
+    if (interior) return planes;
+    paint(at('the sky'), 0, 0, W, 30, 0.9);
+    paint(at('the walls of a house'), 40, 50, 160, 95, 0.8);
+    paint(at(CLIP_PROMPTS.roof), 40, 30, 160, 50, 0.85);
+    paint(at('a window'), 55, 60, 75, 80, 0.9);
+    paint(at(CLIP_PROMPTS.lawn), 0, 95, W, H, 0.85);
+    paint(at('a garden path'), 92, 95, 108, H, 0.9);
+    return planes;
+  }
+
+  it('labels each pixel with its most likely prompt above the threshold', () => {
+    const list = CLIP_ONLY_CLASSES.exterior;
+    const planes = list.map(() => new Float32Array(2).fill(0.1));
+    planes[list.findIndex((c) => c.prompt === 'the sky')][0] = 0.9;
+    planes[list.findIndex((c) => c.prompt === 'a tree')][0] = 0.6;
+    const { classes, clip } = classMapFromClip(planes, list, 2, 1);
+    expect(classes.labels[0]).toBe(ADE.sky);
+    expect(classes.labels[1]).toBe(UNLABELED); // nothing reached the threshold
+    expect(Object.keys(clip.probs).sort()).toEqual(['driveway', 'lawn', 'mulch', 'patio', 'roof']);
+  });
+
+  it('builds a usable exterior map (roof via the override, lawn, path, windows)', () => {
+    const W = 200;
+    const H = 150;
+    const { classes, clip } = classMapFromClip(clipPlanes(W, H), CLIP_ONLY_CLASSES.exterior, W, H);
+    const kinds = new Set(zonesFromClasses(classes, { width: 1600, height: 1200 }, false, clip).map((z) => z.kind));
+    for (const k of ['sky', 'roof', 'facade', 'lawn', 'walkway', 'windows'] as const) expect(kinds.has(k), k).toBe(true);
+    expect(offlineCategory(classes, false)).toBe('front-exterior');
+  });
+
+  it('names the model in the scene', () => {
+    expect(buildOfflineScene([], 'front-exterior', true, 1, false).model).toBe('On-device (CLIPSeg, no AI)');
+  });
+
+  it('every prompt maps to a real ADE20K class', () => {
+    for (const c of [...CLIP_ONLY_CLASSES.exterior, ...CLIP_ONLY_CLASSES.interior]) expect(ADE[c.ade], c.ade).toBeTypeOf('number');
+    expect(() => classMapFromClip([], [{ prompt: 'x', ade: 'no such class' }], 1, 1)).toThrow(/Unknown ADE20K class/);
+  });
+});
+
+describe('task models without SegFormer', () => {
+  it('drops SegFormer and maps with CLIPSeg instead', () => {
+    expect(taskModels('refine', true)).toEqual(['edgetam', 'segformer']);
+    expect(taskModels('refine', false)).toEqual(['edgetam']);
+    expect(taskModels('mapExterior', false)).toEqual(['clipseg', 'edgetam']);
+    expect(taskModels('mapInterior', false)).toEqual(['clipseg', 'edgetam']);
+    expect(taskModels('select', false)).toEqual(['edgetam']);
+    expect(taskUsesSegformer('select')).toBe(false);
+    expect(taskUsesSegformer('refine')).toBe(true);
   });
 });

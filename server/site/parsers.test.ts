@@ -5,6 +5,7 @@ import {
   chooseFrostStation,
   distanceKm,
   formatStationName,
+  frostFreeSection,
   frostSection,
   nearestStations,
   normalsUrl,
@@ -15,7 +16,8 @@ import {
   type NormalsStation,
 } from './noaa';
 import { SdaFormatError, parseSdaResponse, soilQuery, soilRequestBody, summarizeSoil, type SdaRow } from './soil';
-import { FIXTURE_POINTS, fixtureJson, fixtureText } from './testing';
+import { looksLikeHtml } from './profile';
+import { FIXTURE_POINTS, SDA_MAINTENANCE_HTML, fixtureJson, fixtureText } from './testing';
 
 const inventory = parseStationInventory(fixtureText('noaa-inventory-excerpt.txt'));
 const point = FIXTURE_POINTS;
@@ -75,6 +77,8 @@ describe('NOAA freeze normals', () => {
     for (const bad of [' -9999.0', '-7777', '13/01', '00/10', '04/32', '', null, 401]) expect(parseMonthDay(bad)).toBeNull();
     expect(formatStationName('ROCKVILLE 1 NE, MD US')).toBe('ROCKVILLE 1 NE, MD');
     expect(formatStationName('  EGBERT 1 W, ON CA ')).toBe('EGBERT 1 W, ON CA');
+    expect(formatStationName('TOA BAJA LEVITTOWN, PR RQ')).toBe('TOA BAJA LEVITTOWN, PR');
+    expect(formatStationName('PAGO PAGO WSO AP, AS AQ')).toBe('PAGO PAGO WSO AP, AS');
     expect(formatStationName(undefined)).toBeNull();
   });
 
@@ -116,9 +120,21 @@ describe('NOAA freeze normals', () => {
     expect(sea.kind === 'dates' && frostSection(sea)).toMatchObject({ station: 'NANTUCKET MEM AP, MA', distanceKm: 144.2 });
   });
 
-  it('treats a frost-free nearest station as "no frost dates" (Miami)', () => {
-    const { choice } = chooseFor('miami');
+  it('reports a frost-free nearest station without dates (Miami)', () => {
+    const { candidates, records, choice } = chooseFor('miami');
     expect(choice.kind).toBe('frost-free');
+    // The recorded answer: every 32 °F date is -9999 and the median freeze-free season is 365 days.
+    expect(records.get(candidates[0].station.id)).toMatchObject({ lastSpring50: null, firstFall50: null, seasonDays: 365 });
+    if (choice.kind !== 'frost-free') return;
+    expect(frostFreeSection(choice)).toEqual({ station: 'MIAMI BEACH, FL', distanceKm: 7.7, frostFree: true });
+  });
+
+  it('does not call a station frost-free without a 365-day season', () => {
+    const s: NormalsStation = { id: 'X', lat: 0, lon: 0, state: 'HI', name: 'MAUNA' };
+    const rec: FreezeRecord = { id: 'X', name: null, hasFields: true, lastSpring50: null, lastSpringLate: null, firstFall50: null, firstFallEarly: null, seasonDays: null };
+    expect(chooseFrostStation([{ station: s, km: 1 }], new Map([['X', rec]]))).toEqual({ kind: 'none' });
+    const free = chooseFrostStation([{ station: s, km: 1.26 }], new Map([['X', { ...rec, seasonDays: 365 }]]));
+    expect(free.kind === 'frost-free' && frostFreeSection(free)).toEqual({ station: 'MAUNA, HI', distanceKm: 1.3, frostFree: true });
   });
 
   it('skips stations too cold to compute dates (Leadville → Twin Lakes)', () => {
@@ -272,5 +288,17 @@ describe('EPA ecoregion', () => {
     expect(parseEcoregion(fixtureJson('epa-offshore.json'))).toBeNull();
     expect(() => parseEcoregion({ error: { code: 500, message: 'Unable to complete operation.' } })).toThrow(EcoregionFormatError);
     expect(() => parseEcoregion('nope')).toThrow(EcoregionFormatError);
+  });
+});
+
+describe('HTML instead of JSON (SDA maintenance window)', () => {
+  it('trusts JSON content types and flags HTML pages', () => {
+    expect(looksLikeHtml('application/json; charset=utf-8', '{"Table":[]}')).toBe(false);
+    expect(looksLikeHtml('application/geo+json', '{}')).toBe(false);
+    expect(looksLikeHtml('text/html; charset=utf-8', SDA_MAINTENANCE_HTML)).toBe(true);
+    expect(looksLikeHtml('TEXT/HTML', '')).toBe(true);
+    // No or vague content type: judged by the body.
+    expect(looksLikeHtml('', '  \n<!DOCTYPE html><html></html>')).toBe(true);
+    expect(looksLikeHtml('text/plain', '[{"STATION":"X"}]')).toBe(false);
   });
 });

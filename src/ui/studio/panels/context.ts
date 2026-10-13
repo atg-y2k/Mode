@@ -16,6 +16,7 @@ import {
 } from '../../../../shared/types';
 import { feasibilityContext, getTheme, newElementSpec } from '../../../assets/design';
 import { blobToAIDataUrl } from '../../../lib/imageImport';
+import { useInvasivesReady } from '../../../site/hooks';
 import * as db from '../../../state/persistence';
 import { findVariation, selectActivePhoto, selectActiveSpace, useStore } from '../../../state/store';
 import { isDesktopViewport } from '../../shell/hooks';
@@ -31,12 +32,19 @@ export interface StudioContext {
   /** The photo's draft brief (an empty brief when none exists yet). */
   brief: DesignBrief;
   setting: 'interior' | 'exterior';
+  /**
+   * True once the US-RIIS invasive list has loaded (it starts loading when a
+   * panel mounts). Plant ratings memoized from this context list it as a
+   * dependency so invasive flags appear as soon as the list arrives.
+   */
+  invasivesReady: boolean;
 }
 
 export function useStudioContext(): StudioContext {
   const project = useStore((s) => s.project);
   const space = useStore(selectActiveSpace);
   const photo = useStore(selectActivePhoto);
+  const invasivesReady = useInvasivesReady();
   return {
     project,
     space,
@@ -44,6 +52,7 @@ export function useStudioContext(): StudioContext {
     scene: photo?.scene,
     brief: photo?.draft ?? EMPTY_BRIEF,
     setting: space?.kind ?? 'exterior',
+    invasivesReady,
   };
 }
 

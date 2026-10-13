@@ -118,6 +118,16 @@ describe('POST /api/studio/scene', () => {
     expect(res.status).toBe(400);
   });
 
+  it('refuses bodies not declared as JSON (cross-site text/plain), even outside the host app', async () => {
+    const fake = fakeClaude((p) => structuredMessage(p, sceneData));
+    const { app } = makeApp({ anthropic: fake.client });
+    for (const type of ['text/plain;charset=UTF-8', 'application/x-www-form-urlencoded', '']) {
+      const res = await app.request('/api/studio/scene', { method: 'POST', body: JSON.stringify(sceneRequest), headers: type ? { 'content-type': type } : {} });
+      expect(res.status, type).toBe(415);
+    }
+    expect(fake.calls).toHaveLength(0);
+  });
+
   it('answers ai_disabled without a Claude client', async () => {
     const { app } = makeApp();
     const res = await post(app, '/api/studio/scene', sceneRequest);
@@ -463,6 +473,29 @@ describe('POST /api/studio/plan', () => {
     const content = fake.calls[0].messages[0].content as { type: string; source?: { media_type: string } }[];
     expect(content.map((b) => b.type)).toEqual(['image', 'image', 'image', 'text']);
     expect(content[0].source?.media_type).toBe('image/jpeg');
+  });
+
+  it('refuses a plan whose prompt would exceed the budget (413) before the rate limiter or Claude', async () => {
+    const fake = fakeClaude((p) => structuredMessage(p, { plan: 'x', plants: [], variations: [{ title: 't', brief: 'b', optionId: null }] }));
+    let aiCalls = 0;
+    const { app } = makeApp({ anthropic: fake.client, beforeAiCall: () => void aiCalls++ });
+    // Within every per-list cap, but each entry at its per-entry length.
+    const element = (i: number) => ({
+      type: 'pathway' as const,
+      label: `Walk ${i}`,
+      where: ['Front walk'],
+      choices: Array.from({ length: 12 }, (_, j) => ({ dimension: `Dim ${j}`, options: Array.from({ length: 8 }, () => 'flagstone '.repeat(40)) })),
+      note: '',
+    });
+    const res = await post(app, '/api/studio/plan', { ...planRequest, brief: { ...planRequest.brief, elements: Array.from({ length: 16 }, (_, i) => element(i)) } });
+    expect(res.status).toBe(413);
+    const body = (await res.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe('payload_too_large');
+    expect(body.error.message).toMatch(/too much text for one AI call/);
+    expect(aiCalls).toBe(0);
+    expect(fake.calls).toHaveLength(0);
+    // Normal plans are untouched.
+    expect((await post(app, '/api/studio/plan', { ...planRequest, count: 1 })).status).toBe(200);
   });
 
   it('falls back to a template plan when Claude is not configured', async () => {

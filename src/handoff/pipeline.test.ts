@@ -5,8 +5,8 @@ import type { ImageDataLike } from '../engine/types';
 import { alignFeatures } from './alignCore';
 import { compositeBand } from './bands';
 import { resolveOpenCv, type CvLike } from './cv';
-import { plainMapping, runImport } from './pipeline';
-import { renderHandoff } from './prepare';
+import { looksUnchanged, plainMapping, runImport } from './pipeline';
+import { parseRatioList, renderHandoff } from './prepare';
 import { applyAffine, invertAffine, resampleGray, toGray, type Affine } from './resample';
 import { ellipseMask, simulateReturn, texturedScene } from './testing';
 
@@ -99,6 +99,47 @@ describe('runImport (synthetic round trip)', () => {
     expect(Math.abs(mean[2] - 80 * 0.875)).toBeLessThan(8);
   }, 60_000);
 
+  it('wrong-image check: flags a return that changed nothing inside the target', () => {
+    // The clean export pasted straight back.
+    const same = simulateReturn(exp.clean, exp.crop, target, { noEdit: true, scale: 1, zoom: 1, shift: { x: 0, y: 0 }, cast: { gain: [1, 1, 1], offset: [0, 0, 0] } });
+    const a = runImport(cv, { original: scene, target, crop: exp.crop, outW: exp.outW, outH: exp.outH, returned: same.returned });
+    expect(a.insideCheck?.unchanged).toBe(true);
+    expect(a.insideCheck!.medianInside).toBeLessThan(3);
+    // Gemini saved the uploaded original: resized, shifted, colour-shifted — still nothing changed in the area.
+    const original = simulateReturn(exp.marked, exp.crop, target, { noEdit: true });
+    const b = runImport(cv, { original: scene, target, crop: exp.crop, outW: exp.outW, outH: exp.outH, returned: original.returned });
+    expect(b.report.aligned).toBe(true);
+    expect(b.insideCheck?.unchanged).toBe(true);
+    // A real edit is not flagged.
+    const edited = simulateReturn(exp.marked, exp.crop, target);
+    const c = runImport(cv, { original: scene, target, crop: exp.crop, outW: exp.outW, outH: exp.outH, returned: edited.returned });
+    expect(c.insideCheck?.unchanged).toBe(false);
+    expect(c.insideCheck!.medianInside).toBeGreaterThan(10);
+  }, 60_000);
+
+  it('wrong-image check: a target with room beside the element compares the element’s own area', () => {
+    // Room for a wider path: the target is much larger than what the model edited.
+    const room = ellipseMask(W, H, 600, 650, 330, 150);
+    const edited = simulateReturn(exp.marked, exp.crop, target, { cast: { gain: [1, 1, 1], offset: [0, 0, 0] }, shift: { x: 0, y: 0 }, scale: 1, zoom: 1 });
+    const job = { original: scene, target: room, crop: exp.crop, outW: exp.outW, outH: exp.outH, returned: edited.returned };
+    const plain = runImport(cv, job);
+    expect(plain.insideCheck!.medianInside).toBeLessThan(3); // the unchanged room dominates
+    const core = runImport(cv, { ...job, inside: target });
+    expect(core.insideCheck?.unchanged).toBe(false);
+    expect(core.insideCheck!.medianInside).toBeGreaterThan(10);
+  }, 60_000);
+
+  it('wrong-image rule: inside median < 3 and < 1.5 × the outside median (no outside: < 3)', () => {
+    expect(looksUnchanged(1.2, 1.1)).toBe(true);
+    expect(looksUnchanged(2.5, 1.0)).toBe(false); // subtle but real change
+    expect(looksUnchanged(3.5, 3.0)).toBe(false);
+    expect(looksUnchanged(2.9, null)).toBe(true);
+    // The export pasted back bit-exact: nothing changed inside or out.
+    expect(looksUnchanged(0, 0)).toBe(true);
+    expect(looksUnchanged(0.3, 0.1)).toBe(true);
+    expect(looksUnchanged(4, null)).toBe(false);
+  });
+
   it('reports changes the model made outside the target, with their location', () => {
     const sim = simulateReturn(exp.marked, exp.crop, target, { outsideChange: { x: 380, y: 560, r: 45, color: [220, 30, 40] } });
     const res = runImport(cv, { original: scene, target, crop: exp.crop, outW: exp.outW, outH: exp.outH, returned: sim.returned });
@@ -122,7 +163,8 @@ describe('runImport (synthetic round trip)', () => {
 
   it('aligns a full-frame export that the app returned at a different aspect (ChatGPT 3:2)', () => {
     const big = ellipseMask(W, H, 600, 450, 420, 300); // ~37 % → full frame
-    const full = renderHandoff(scene, big, { app: 'chatgpt' });
+    // The API's recommended sizes only (a user override of the ratio table): the 4:3 photo is trimmed to 3:2.
+    const full = renderHandoff(scene, big, { app: 'chatgpt', ratios: parseRatioList('1:1, 3:2, 2:3') });
     expect(full.mode).toBe('full');
     expect(full.ratio).toBe('3:2');
     const sim = simulateReturn(full.marked, full.crop, big, { scale: 0.75, zoom: 1.0, shift: { x: 4, y: 3 } });

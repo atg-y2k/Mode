@@ -315,10 +315,18 @@ function worstLevel(checks: Check[]): PlantFeasibility['rating'] {
   return worst === 2 ? 'poor' : worst === 1 ? 'caution' : 'good';
 }
 
+/** Within a level, what decides most comes first: an invasive flag outranks deer or siting advice. */
+const KIND_PRIORITY: Record<CheckKind, number> = { setting: 0, zone: 1, sun: 2, invasive: 3, size: 4, water: 5, deer: 6, siting: 7 };
+
+/** The checks of one level, most decisive kind first. */
+function checksAt(checks: Check[], lvl: Level): Check[] {
+  return checks.filter((c) => c.level === lvl).sort((a, b) => KIND_PRIORITY[a.kind] - KIND_PRIORITY[b.kind]);
+}
+
 /** Problems first (poor, caution), then confirmations (✓), then notes. */
 function orderedReasons(checks: Check[]): string[] {
   const order: Level[] = ['poor', 'caution', 'ok', 'info'];
-  return order.flatMap((lvl) => checks.filter((c) => c.level === lvl).map((c) => c.text));
+  return order.flatMap((lvl) => checksAt(checks, lvl).map((c) => c.text));
 }
 
 function feasibilityOf(info: PlantInfo, name: string, ctx: FeasibilityContext): PlantFeasibility {
@@ -370,9 +378,11 @@ export function paletteFeasibility(plants: PlantProfile[], mode: 'all' | 'any', 
     return { p, checks, rating: worstLevel(checks) };
   });
   const rank = { good: 0, caution: 1, poor: 2 } as const;
-  const firstProblem = (checks: Check[]) =>
-    checks.find((c) => c.level === 'poor')?.text ?? checks.find((c) => c.level === 'caution')?.text ?? '';
-  const problemLines = (list: typeof evals) => list.map((e) => `${shortPlantName(e.p.name)}: ${firstProblem(e.checks)}`);
+  // A single plant (e.g. a tree species option) reads like that plant's own rating: every problem, then ✓, then notes.
+  if (plants.length === 1) return { rating: evals[0].rating, reasons: orderedReasons(evals[0].checks) };
+  // Every problem of each problem plant (an invasive flag must not hide behind a deer caution).
+  const problemsOf = (checks: Check[]) => [...checksAt(checks, 'poor'), ...checksAt(checks, 'caution')].map((c) => c.text);
+  const problemLines = (list: typeof evals) => list.flatMap((e) => problemsOf(e.checks).map((t) => `${shortPlantName(e.p.name)}: ${t}`));
 
   if (mode === 'any') {
     const best = Math.min(...evals.map((e) => rank[e.rating]));

@@ -10,8 +10,15 @@ work offline.
 - Source: the 2023 USDA Plant Hardiness Zone Map GIS data by the PRISM Climate Group, Oregon State
   University (https://prism.oregonstate.edu/phzm/), as compiled per ZIP code by phzmapi.org
   (https://phzmapi.org/, `all.json`, code MIT-licensed).
+- Fallback for ZIPs phzmapi.org drops (~219 PO-box and single-organisation ZIPs without a
+  centroid, e.g. 02455, 06338, 569xx): the PRISM Climate Group's own ZIP-code tables of the 2023
+  map (`phzm_us_zipcode_2023.csv`, `phzm_ak_…`, `phzm_hi_…`, `phzm_pr_…`, columns
+  `zipcode,zone,trange,zonetitle`, https://prism.oregonstate.edu/phzm/). © Oregon State
+  University; free to reproduce and redistribute under OSU's terms of use — the data are altered
+  (reduced to one zone per ZIP), hence the disclaimer above.
 - Transformations: kept the zone and the ZIP centroid only (`zips[zip] = [zone, lat, lon]`),
-  coordinates rounded to 3 decimals (~110 m).
+  coordinates rounded to 3 decimals (~110 m); ZIPs only the PRISM tables list are zone-only rows
+  (`zips[zip] = [zone]`). Both sources agree on the zone of every ZIP they share.
 - Caveat: a zone at the ZIP centroid can be off by a half zone in hilly areas and near coasts or
   large water bodies. Users can override it in Settings.
 

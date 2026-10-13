@@ -13,7 +13,7 @@
 import { useId, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react';
 import { MapPin, RotateCcw, Sun, SunDim } from 'lucide-react';
 import type { Photo, ProjectLocation, SceneMap } from '../../../../shared/types';
-import { coordsOf, useZipLookup, type LatLon } from '../../../site';
+import { coordsOf, hasZipCoords, useZipLookup, type LatLon } from '../../../site';
 import { useStore } from '../../../state/store';
 import { Badge, Button, Section, Select, Slider, cn } from '../../common';
 import { openSettings } from '../../shell/shellUI';
@@ -69,7 +69,7 @@ export function SunCard({ photo, scene, location }: { photo: Photo; scene: Scene
   const known = sunCoords(location, photo);
   // Projects whose ZIP predates stored coordinates: use the ZIP's centre from the bundled table.
   const zip = useZipLookup(known ? undefined : location?.zip);
-  const coords: SunCoords | null = known ?? (zip.status === 'found' ? { lat: zip.info.lat, lon: zip.info.lon, from: 'zip' } : null);
+  const coords: SunCoords | null = known ?? (zip.status === 'found' && hasZipCoords(zip.info) ? { lat: zip.info.lat, lon: zip.info.lon, from: 'zip' } : null);
   const clock = coords ? clockFor(coords.lon, new Date().getTimezoneOffset()) : 'local';
   const taken = photo.capture?.takenAt ? new Date(photo.capture.takenAt) : null;
   const [month, setMonth] = useState(() => (taken ?? new Date()).getMonth() + 1);

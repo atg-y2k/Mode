@@ -12,7 +12,13 @@
  *   downloads (.crdownload, .part, .download, .tmp…) and hidden files are
  *   ignored, as are empty placeholders (Firefox creates the final name with
  *   0 bytes, then renames the .part over it — that shows up as a change) and
- *   Mode's own hand-off photo downloads (`mode-handoff-*`).
+ *   Mode's own hand-off photo downloads (`mode-handoff-*`, the prefix the
+ *   hand-off client saves under: src/handoff/filenames.ts).
+ * - Before watching, the folder is opened once: on macOS ~/Downloads is
+ *   privacy-protected (TCC) and an app without the "Files & Folders"
+ *   permission gets EPERM — chokidar would then watch silently and see
+ *   nothing. Status answers `available: false` with a `reason` explaining
+ *   where to grant access.
  * - Each announced file gets a random opaque id; only announced ids map back
  *   to a path, so the file route can never be steered to other files.
  * - Watching runs only while asked: `start()` (POST {on:true}); it stops on
@@ -24,11 +30,13 @@
  *   events can be replayed by sequence number after a reconnect.
  */
 import { randomBytes } from 'node:crypto';
-import { statSync } from 'node:fs';
+import { opendirSync, statSync } from 'node:fs';
 import { lstat, open } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { watch as chokidarWatch } from 'chokidar';
+// Pure module (no DOM): the hand-off client names its downloads with this prefix.
+import { HANDOFF_DOWNLOAD_PREFIX, isOwnHandoffDownload } from '../../src/handoff/filenames';
 import { sniffImageMime, type SniffedImageMime } from '../studio/util';
 
 /** File extensions a returned image can have (browsers decode all of these). */
@@ -36,11 +44,11 @@ export const IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'webp', 'avif', 'gif'] as
 /** Suffixes browsers and download managers use while a file is still being written. */
 export const PARTIAL_SUFFIXES = ['crdownload', 'part', 'partial', 'download', 'opdownload', 'tmp', 'temp'] as const;
 /**
- * Mode's own hand-off photo downloads (src/ui/studio/handoff/Companion.tsx
- * saves `mode-handoff-<title>.png` when the clipboard is unavailable): saved
- * to the same folder while watching, they must not come back as "results".
+ * Mode's own hand-off photo downloads (the hand-off companion saves
+ * `mode-handoff-<title>.png` when the clipboard is unavailable): saved to the
+ * same folder while watching, they must not come back as "results".
  */
-export const OWN_EXPORT_PREFIX = 'mode-handoff-';
+export const OWN_EXPORT_PREFIX = HANDOFF_DOWNLOAD_PREFIX;
 
 export const WATCH_IDLE_MS = 30 * 60 * 1000;
 /** Grace period after the last event stream disconnects (covers EventSource reconnects and page reloads). */
@@ -80,7 +88,48 @@ export interface WatchStatus {
   dir: string | null;
   /** Whether watching is currently on. */
   on: boolean;
+  /** When not available: why, and how to fix it (e.g. the macOS privacy setting to change). */
+  reason?: string;
 }
+
+/** Opens the folder like a watcher would (throws ENOENT, EPERM, EACCES…). */
+export type DirProbe = (dir: string) => void;
+
+/** Lists one entry of the folder: on macOS this is what a missing "Files & Folders" permission refuses. */
+export const probeDirReadable: DirProbe = (dir) => {
+  const handle = opendirSync(dir);
+  try {
+    handle.readSync();
+  } finally {
+    handle.closeSync();
+  }
+};
+
+export const NO_FOLDER_REASON =
+  'This computer has no Downloads folder to watch. Set HANDOFF_WATCH_DIR in .env to the folder your browser saves to, then restart the server.';
+
+/** Why the folder can't be read, with the fix for this platform. */
+export function permissionReason(shown: string, platform: NodeJS.Platform = process.platform): string {
+  if (platform === 'darwin') {
+    return `macOS is blocking Mode from reading ${shown}. Open System Settings → Privacy & Security → Files & Folders and turn on "Downloads Folder" for the app that runs the Mode server (Terminal, iTerm, VS Code…), or add that app under Full Disk Access. Then quit and reopen that app and restart Mode.`;
+  }
+  return `The Mode server isn't allowed to read ${shown} (permission denied). Give the account that runs the server read access to it, or set HANDOFF_WATCH_DIR in .env to another folder and restart the server.`;
+}
+
+/** Thrown by start() when the folder can't be watched; the message says why (safe to show). */
+export class WatchUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WatchUnavailableError';
+  }
+}
+
+const errorCode = (err: unknown): string | undefined =>
+  typeof err === 'object' && err !== null && typeof (err as { code?: unknown }).code === 'string' ? (err as { code: string }).code : undefined;
+const isPermissionError = (err: unknown): boolean => {
+  const code = errorCode(err);
+  return code === 'EPERM' || code === 'EACCES';
+};
 
 /** The part of chokidar's FSWatcher this module uses (test seam). */
 export interface FsWatcherLike {
@@ -124,12 +173,18 @@ export interface DownloadsWatcherOptions {
   now?: () => number;
   watchFactory?: WatchFactory;
   log?: (line: string) => void;
+  /** Checks the folder can be listed (tests inject EPERM). Default: probeDirReadable. */
+  probeDir?: DirProbe;
+  /** Platform for the permission advice (tests). Default: process.platform. */
+  platform?: NodeJS.Platform;
+  /** Why `dir` is null, when known (e.g. HANDOFF_WATCH_DIR is not a folder). */
+  missingReason?: string | null;
 }
 
 /** True for a file name that may be a finished image download. */
 export function isCandidateImageName(name: string): boolean {
   if (!name || name.startsWith('.') || name.endsWith('~')) return false;
-  if (name.toLowerCase().startsWith(OWN_EXPORT_PREFIX)) return false;
+  if (isOwnHandoffDownload(name)) return false;
   const dot = name.lastIndexOf('.');
   if (dot <= 0) return false;
   const ext = name.slice(dot + 1).toLowerCase();
@@ -143,13 +198,17 @@ export function displayPath(dir: string, home: string = homedir()): string {
   return dir;
 }
 
-function isDirectory(dir: string): boolean {
+/** 'denied' = the folder can't even be looked at (macOS privacy protection): it exists, the probe explains. */
+function dirState(dir: string): 'dir' | 'missing' | 'denied' {
   try {
-    return statSync(dir).isDirectory();
-  } catch {
-    return false;
+    return statSync(dir).isDirectory() ? 'dir' : 'missing';
+  } catch (err) {
+    return isPermissionError(err) ? 'denied' : 'missing';
   }
 }
+
+/** A folder worth trying to watch: a directory, or one the OS won't let us look at yet (permission advice follows). */
+const watchable = (dir: string) => dirState(dir) !== 'missing';
 
 /**
  * The folder to watch: HANDOFF_WATCH_DIR (a leading "~" means the home
@@ -165,12 +224,12 @@ export function resolveWatchDir(env: Record<string, string | undefined> = proces
   if (raw) {
     const expanded = raw === '~' ? home : raw.startsWith('~/') || raw.startsWith('~\\') ? join(home, raw.slice(2)) : raw;
     const dir = resolve(expanded);
-    if (isDirectory(dir)) return { dir, warning: null };
+    if (watchable(dir)) return { dir, warning: null };
     return { dir: null, warning: `HANDOFF_WATCH_DIR="${raw}" is not a folder; the Downloads watcher is off.` };
   }
   if (!home) return { dir: null, warning: null };
   const downloads = join(home, 'Downloads');
-  return { dir: isDirectory(downloads) ? downloads : null, warning: null };
+  return { dir: watchable(downloads) ? downloads : null, warning: null };
 }
 
 function randomId(): string {
@@ -191,7 +250,7 @@ async function sniffFile(path: string): Promise<SniffedImageMime | null> {
   }
 }
 
-const STOP_MESSAGES: Record<StopReason, string> = {
+export const STOP_MESSAGES: Record<StopReason, string> = {
   client: 'Watching the Downloads folder was turned off.',
   idle: 'Stopped watching the Downloads folder after 30 minutes without activity. Turn it on again when you have a new image to bring back.',
   'no-listeners': 'Stopped watching the Downloads folder: no Mode window is listening.',
@@ -210,6 +269,9 @@ export class DownloadsWatcher {
   private readonly now: () => number;
   private readonly factory: WatchFactory;
   private readonly log: (line: string) => void;
+  private readonly probeDir: DirProbe;
+  private readonly platform: NodeJS.Platform;
+  private readonly missingReason: string | null;
 
   private fsw: FsWatcherLike | null = null;
   private starting: Promise<void> | null = null;
@@ -237,6 +299,9 @@ export class DownloadsWatcher {
     this.now = opts.now ?? Date.now;
     this.factory = opts.watchFactory ?? chokidarFactory;
     this.log = opts.log ?? ((line) => console.log(line));
+    this.probeDir = opts.probeDir ?? probeDirReadable;
+    this.platform = opts.platform ?? process.platform;
+    this.missingReason = opts.missingReason ?? null;
   }
 
   get on(): boolean {
@@ -253,21 +318,46 @@ export class DownloadsWatcher {
   }
 
   available(): boolean {
-    return this.dir !== null && isDirectory(this.dir);
+    return this.unavailableReason() === null;
+  }
+
+  /**
+   * Null when the folder can be watched; otherwise why not, worded for the
+   * user (no folder, folder gone, or no permission — on macOS: which privacy
+   * setting to change).
+   */
+  unavailableReason(): string | null {
+    const dir = this.dir;
+    if (!dir) return this.missingReason ?? NO_FOLDER_REASON;
+    const shown = displayPath(dir);
+    const state = dirState(dir);
+    if (state === 'denied') return permissionReason(shown, this.platform);
+    if (state === 'missing') {
+      return `${shown} doesn't exist any more. Set HANDOFF_WATCH_DIR in .env to the folder your browser saves to, then restart the server.`;
+    }
+    try {
+      this.probeDir(dir);
+      return null;
+    } catch (err) {
+      if (isPermissionError(err)) return permissionReason(shown, this.platform);
+      return `The Mode server can't read ${shown} (${errorCode(err) ?? 'unknown error'}). Check the folder, or set HANDOFF_WATCH_DIR in .env to another one and restart the server.`;
+    }
   }
 
   status(): WatchStatus {
-    const available = this.available();
-    return { available, dir: available && this.dir ? displayPath(this.dir) : null, on: this.on };
+    const reason = this.unavailableReason();
+    const shown = this.dir && watchable(this.dir) ? displayPath(this.dir) : null;
+    return reason === null ? { available: true, dir: shown, on: this.on } : { available: false, dir: shown, on: this.on, reason };
   }
 
-  /** Starts watching (no-op when already on). Throws when the folder is missing or can't be watched. */
+  /** Starts watching (no-op when already on). Throws WatchUnavailableError when the folder is missing or can't be read. */
   async start(): Promise<void> {
     this.touch();
     if (this.fsw) return;
     if (this.starting) return this.starting;
     const dir = this.dir;
-    if (!dir || !isDirectory(dir)) throw new Error('There is no Downloads folder to watch on this computer.');
+    const reason = this.unavailableReason();
+    if (!dir || reason) throw new WatchUnavailableError(reason ?? NO_FOLDER_REASON);
     const generation = ++this.generation;
     this.starting = (async () => {
       const fsw = this.factory(dir, {
@@ -284,7 +374,7 @@ export class DownloadsWatcher {
       fsw.on('error', (err) => {
         if (generation !== this.generation) return;
         this.log(`[handoff] watcher error: ${err instanceof Error ? err.message : String(err)}`);
-        void this.stop('error');
+        void this.stop('error', isPermissionError(err) ? permissionReason(displayPath(dir), this.platform) : undefined);
       });
       await new Promise<void>((resolveReady, reject) => {
         const timer = setTimeout(() => reject(new Error('Timed out scanning the Downloads folder.')), this.readyTimeoutMs);
@@ -325,8 +415,8 @@ export class DownloadsWatcher {
     else this.scheduleGrace();
   }
 
-  /** Stops watching and tells every listener why (announced ids stay valid). */
-  async stop(reason: StopReason): Promise<void> {
+  /** Stops watching and tells every listener why (announced ids stay valid). `message` overrides the default wording. */
+  async stop(reason: StopReason, message?: string): Promise<void> {
     this.generation++;
     this.clearTimers();
     const fsw = this.fsw;
@@ -334,7 +424,7 @@ export class DownloadsWatcher {
     this.fsw = null;
     if (fsw) await fsw.close().catch(() => undefined);
     if (wasOn) {
-      this.emit({ type: 'stopped', reason, message: STOP_MESSAGES[reason] });
+      this.emit({ type: 'stopped', reason, message: message ?? STOP_MESSAGES[reason] });
       if (this.dir) this.log(`[handoff] stopped watching ${displayPath(this.dir)} (${reason})`);
     }
   }

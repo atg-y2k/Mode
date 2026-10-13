@@ -148,6 +148,7 @@ export const PATHWAY: ElementInput = {
         },
         {
           id: 'gentle-curve',
+          footprint: 'grow',
           label: 'Gentle curve',
           description: 'One soft, wide arc',
           promptText: 'following one gentle, wide curve (radius 10 ft or more) to the steps',
@@ -156,6 +157,7 @@ export const PATHWAY: ElementInput = {
         },
         {
           id: 'meander',
+          footprint: 'grow',
           label: 'Meandering',
           description: 'Relaxed, garden-like',
           promptText: 'meandering in relaxed curves through planting while still arriving clearly at the door',
@@ -164,6 +166,7 @@ export const PATHWAY: ElementInput = {
         },
         {
           id: 'angled',
+          footprint: 'grow',
           label: 'Offset straight',
           description: 'Crisp segments, 90° or 45° turns',
           promptText: 'in crisp straight segments with one or two offset right-angle turns and generous landings',
@@ -187,6 +190,14 @@ export const PATHWAY: ElementInput = {
       defaultOptionId: 'width-5ft',
       options: [
         {
+          id: 'keep-width',
+          label: 'Keep current',
+          description: 'Same width as the walk today',
+          promptText: 'keeping its current width',
+          visual: diagram('keep-existing'),
+          rationale: 'Resurfacing in place: nothing beside the walk has to change.',
+        },
+        {
           id: 'width-3ft',
           label: '3 ft',
           description: 'Single file — side or garden paths',
@@ -204,6 +215,7 @@ export const PATHWAY: ElementInput = {
         },
         {
           id: 'width-5ft',
+          footprint: 'grow',
           label: '5 ft',
           description: 'Two people side by side',
           promptText: 'about 5 ft wide, generous enough for two people walking side by side',
@@ -212,6 +224,7 @@ export const PATHWAY: ElementInput = {
         },
         {
           id: 'width-6ft',
+          footprint: 'grow',
           label: '6 ft',
           description: 'Grand, with a landing at the steps',
           promptText: 'about 6 ft wide, widening into a landing at the steps',
@@ -536,6 +549,7 @@ export const PATIO: ElementInput = {
         },
         {
           id: 'patio-lounge',
+          footprint: 'grow',
           label: 'Dining + lounge 16×20 ft',
           description: 'Two zones: eat and relax',
           promptText: 'about 16×20 ft with a dining area and a separate lounge seating area',
@@ -553,7 +567,7 @@ export const PATIO: ElementInput = {
         { id: 'rectangle', label: 'Rectangle', description: 'Aligned with the house', promptText: 'rectangular, aligned with the house wall and door', visual: diagram('shape-rectangle'), rationale: 'Ties the patio to the architecture; easiest to furnish.' },
         { id: 'curved', label: 'Curved edge', description: 'One soft outer curve', promptText: 'with one long, softly curved outer edge meeting the lawn', visual: diagram('shape-curved'), rationale: 'Softens the transition to the garden on informal houses.' },
         { id: 'circle', label: 'Round', description: 'Circle around a fire pit', promptText: 'circular, centered on a fire pit', visual: diagram('shape-circle'), rationale: 'Ideal for a fire-pit gathering spot set apart from the house.' },
-        { id: 'l-shape', label: 'L-shape', description: 'Wraps a corner', promptText: 'L-shaped, wrapping the corner of the house', visual: diagram('shape-l'), rationale: 'Creates two zones and connects two doors.' },
+        { id: 'l-shape', footprint: 'grow', label: 'L-shape', description: 'Wraps a corner', promptText: 'L-shaped, wrapping the corner of the house', visual: diagram('shape-l'), rationale: 'Creates two zones and connects two doors.' },
       ],
     },
     {
@@ -720,8 +734,8 @@ export const DRIVEWAY: ElementInput = {
       options: [
         { id: 'keep-width', label: 'Keep current', description: 'Same footprint', promptText: 'keeping its current footprint', visual: diagram('keep-existing'), rationale: 'Resurfacing only — the least disruptive change.' },
         { id: 'drive-single', label: 'Single 10–12 ft', description: 'One car wide', promptText: 'narrowed to a single-car width of about 10–12 ft with planting along the reclaimed edge', visual: diagram('drive-single'), rationale: 'Less pavement and more garden; enough for one car plus a walk-off strip.' },
-        { id: 'drive-double', label: 'Double 18–24 ft', description: 'Two cars side by side', promptText: 'widened to about 20 ft for two cars side by side', visual: diagram('drive-double'), rationale: 'Two-car parking without blocking; soften the extra width with planting.' },
-        { id: 'drive-parking-pad', label: 'Add a parking pad', description: 'Extra side pad / turnaround', promptText: 'with an added side parking pad / turnaround', visual: diagram('drive-parking-pad'), rationale: 'Guest parking or a turnaround to avoid backing onto a busy street.' },
+        { id: 'drive-double', footprint: 'grow', label: 'Double 18–24 ft', description: 'Two cars side by side', promptText: 'widened to about 20 ft for two cars side by side', visual: diagram('drive-double'), rationale: 'Two-car parking without blocking; soften the extra width with planting.' },
+        { id: 'drive-parking-pad', footprint: 'grow', label: 'Add a parking pad', description: 'Extra side pad / turnaround', promptText: 'with an added side parking pad / turnaround', visual: diagram('drive-parking-pad'), rationale: 'Guest parking or a turnaround to avoid backing onto a busy street.' },
       ],
     },
   ],

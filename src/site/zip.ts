@@ -4,6 +4,12 @@
  * official USDA map"). The ~1.2 MB table loads lazily once and stays in memory;
  * the service worker caches it for offline use. A ZIP missing from the table
  * falls back to phzmapi.org's per-ZIP file when online (CORS is open).
+ *
+ * About 219 ZIPs (PO-box and single-organisation ZIPs such as 02455, 06338,
+ * 569xx) have no centroid: phzmapi drops them, so the table carries PRISM's own
+ * ZIP-table zone for them as a zone-only row ([zone]). Their ZipInfo has a zone
+ * but no lat/lon (see hasZipCoords) — sun, frost and soil then need photo GPS
+ * or coordinates entered in Settings.
  */
 import { canFetchRelative, fetchDataJson } from './data';
 import type { Locality } from './invasives';
@@ -12,13 +18,23 @@ export interface ZipInfo {
   zip: string;
   /** e.g. "7a" */
   zone: string;
-  lat: number;
-  lon: number;
+  /** ZIP centroid (WGS84); absent for zone-only ZIPs (no centroid exists — see hasZipCoords). */
+  lat?: number;
+  lon?: number;
   /** Where the answer came from (the bundled table, or phzmapi.org when the table lacked the ZIP). */
   source?: 'table' | 'online';
 }
 
-export type ZipTable = Record<string, [zone: string, lat: number, lon: number]>;
+/** A ZipInfo with its centroid. */
+export type ZipInfoWithCoords = ZipInfo & { lat: number; lon: number };
+
+/** Rows: [zone, lat, lon], or [zone] for ZIPs only PRISM's ZIP tables list (no centroid). */
+export type ZipTable = Record<string, [zone: string, lat: number, lon: number] | [zone: string]>;
+
+/** True when the ZIP resolved with a centroid (zone-only ZIPs have none). */
+export function hasZipCoords(info: ZipInfo | null | undefined): info is ZipInfoWithCoords {
+  return !!info && typeof info.lat === 'number' && typeof info.lon === 'number' && Number.isFinite(info.lat) && Number.isFinite(info.lon);
+}
 
 export const ZONE_SOURCE_NOTE = 'Derived from the USDA/OSU PRISM 2023 map; not the official USDA map.';
 export const PHZM_ONLINE_URL = (zip: string) => `https://phzmapi.org/${zip}.json`;
@@ -77,13 +93,16 @@ export function loadZipTable(): Promise<ZipTable | null> {
   return loading;
 }
 
-/** Synchronous lookup in a table. */
+/** Synchronous lookup in a table (zone-only rows give a ZipInfo without lat/lon). */
 export function zipFromTable(t: ZipTable, zip: string): ZipInfo | null {
   const z = normalizeZip(zip);
   const row = z ? t[z] : undefined;
   if (!z || !Array.isArray(row)) return null;
-  const [zone, lat, lon] = row;
-  if (typeof zone !== 'string' || !ZONE_RE.test(zone) || !Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  const zone = row[0];
+  if (typeof zone !== 'string' || !ZONE_RE.test(zone)) return null;
+  if (row.length === 1) return { zip: z, zone, source: 'table' };
+  const [, lat, lon] = row;
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
   return { zip: z, zone, lat, lon, source: 'table' };
 }
 

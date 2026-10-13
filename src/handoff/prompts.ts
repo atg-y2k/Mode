@@ -44,8 +44,13 @@ export interface PromptContext {
   markerColorName: string;
   strictness: NonNullable<DesignBrief['strictness']>;
   plantMaturity: DesignBrief['plantMaturity'];
-  /** Roles of attached inspiration images, in order (Image 2, 3, …). */
+  /** Roles of attached inspiration images, in order (Image 2, 3, …; at most MAX_REFERENCES). */
   references: { role: string }[];
+  /**
+   * The user pastes the CLEAN export (no outline drawn) although the change
+   * has a target: the area is named in words only (no marker sentences).
+   */
+  unmarked?: boolean;
   interior: boolean;
   /** What the photo shows, lower case ("backyard", "kitchen"); refines the subject phrase. */
   place?: string;
@@ -224,9 +229,20 @@ const STRICTNESS: Record<HandoffApp, Record<PromptContext['strictness'], (interi
   },
 };
 
+/**
+ * Whole-image edits (no outline): no area wording. 'balanced' has no sentence
+ * on purpose. The strict sentences start like the marked ones so packs saved
+ * before `strictness` was recorded are still recognised (pack.ts).
+ */
 const STRICTNESS_WHOLE: Record<HandoffApp, Partial<Record<PromptContext['strictness'], (interior: boolean) => string>>> = {
-  chatgpt: { creative: (i) => `You may refine details (textures, plant mix, small accents) as long as they suit the ${i ? 'room' : 'house'}.` },
-  gemini: { creative: (i) => `You may refine the details (textures, plant mix, small accents) so it looks its best and suits the ${i ? 'room' : 'house'}.` },
+  chatgpt: {
+    strict: () => 'Change nothing beyond this request: no extra objects, plants or decorations, and everything the request does not name keeps its shape, material and color.',
+    creative: (i) => `You may refine details (textures, plant mix, small accents) as long as they suit the ${i ? 'room' : 'house'}.`,
+  },
+  gemini: {
+    strict: () => 'Make exactly this change and nothing more, without extra objects, plants or decorations, so everything the request does not name keeps its shape, material and color.',
+    creative: (i) => `You may refine the details (textures, plant mix, small accents) so it looks its best and suits the ${i ? 'room' : 'house'}.`,
+  },
 };
 
 const MATURITY: Record<DesignBrief['plantMaturity'], string> = {
@@ -262,23 +278,35 @@ interface Slots {
   keep: string[];
   light: string;
   ratio: string;
+  /** Marker colour name; '' when the pasted image carries no outline. */
   color: string;
+  /** A target exists but no outline is drawn: name the area in words only. */
+  areaOnly: boolean;
   refs: string[];
   interior: boolean;
   edgingInChange: boolean;
   openingsTargeted: boolean;
 }
 
-function refSentencesChatgpt(refs: string[]): string {
-  return refs
-    .map((role, i) => `Image ${i + 2} is only a reference for ${role}: copy its color and texture, not its layout, perspective, lighting or surroundings.`)
-    .join(' ');
+/** At most this many inspiration images go with a hand-off (Image 2 … Image 4). */
+export const MAX_REFERENCES = 3;
+
+/** A reference role as the prompt writes it ("the stone in “Bluestone patio”"). */
+function roleText(role: string): string {
+  return lowerFirst(stripTrailingPunct(role)) || 'the look';
 }
 
-function refSentencesGemini(refs: string[]): string {
-  return refs
-    .map((role, i) => `Image ${i + 2} serves only as a reference for ${role}: use its color and texture, not its layout, perspective or surroundings.`)
-    .join(' ');
+/**
+ * The exact sentences a prompt uses to introduce reference images, in order
+ * (Image 2, Image 3, …) — the companion shows the same text next to each
+ * "Copy reference" button, so what the user pastes matches the prompt.
+ */
+export function referenceSentences(app: HandoffApp, roles: readonly string[]): string[] {
+  return roles.slice(0, MAX_REFERENCES).map((r, i) =>
+    app === 'gemini'
+      ? `Image ${i + 2} serves only as a reference for ${roleText(r)}: use its color and texture, not its layout, perspective or surroundings.`
+      : `Image ${i + 2} is only a reference for ${roleText(r)}: copy its color and texture, not its layout, perspective, lighting or surroundings.`,
+  );
 }
 
 function groundPhrase(interior: boolean): string {
@@ -290,15 +318,17 @@ function groundPhrase(interior: boolean): string {
 function chatgptTemplate(s: Slots): string {
   const lines: string[] = [];
   const intro = `Edit the attached photo of ${s.subject} (Image 1). It must stay the same photograph.`;
-  lines.push(s.refs.length ? `${intro} ${refSentencesChatgpt(s.refs)}` : intro);
+  lines.push(s.refs.length ? `${intro} ${referenceSentences('chatgpt', s.refs).join(' ')}` : intro);
   const changeBody = [s.change, s.extras].filter(Boolean).join(' ');
   if (s.color) lines.push(`CHANGE — only inside the ${s.color} outline (${s.area}): ${changeBody}`);
+  else if (s.areaOnly) lines.push(`CHANGE — only ${s.area}: ${changeBody}`);
   else lines.push(`CHANGE: ${changeBody}`);
   const openings = s.interior
     ? `Do not add, remove or move any${s.openingsTargeted ? ' other' : ''} windows, doors or openings.`
     : `Do not add, remove or move any${s.openingsTargeted ? ' other' : ''} doors or windows.`;
   const keepList = s.keep.length ? joinList(s.keep) : s.interior ? "the room's walls, ceiling, windows and doors" : "the house's architecture, roofline, doors and windows";
-  lines.push(`KEEP EXACTLY AS IS: ${keepList}${s.color ? ', and everything else outside the outline' : ''}. ${openings}`);
+  const rest = s.color ? ', and everything else outside the outline' : s.areaOnly ? `, and everything else outside ${s.area}` : '';
+  lines.push(`KEEP EXACTLY AS IS: ${keepList}${rest}. ${openings}`);
   lines.push(`Same camera position, lens, perspective and framing; same ${s.ratio} aspect ratio; do not crop, zoom, rotate, straighten or extend the image.`);
   lines.push(`MATCH THE PHOTO: ${s.light}; same white balance, exposure, contrast, sharpness and grain; ${groundPhrase(s.interior)}.`);
   if (s.color) {
@@ -322,6 +352,11 @@ function geminiTemplate(s: Slots): string {
       `Using the provided photo of ${s.subject}${s.refs.length ? ' (Image 1)' : ''}, change only ${s.area}, which is marked with a ${s.color} outline. ${changeBody} ` +
         `Keep everything else in the image exactly the same, preserving the original style, lighting and composition: leave ${keepList} untouched, ${openings}, and everything outside the outline remains exactly as it is.`,
     );
+  } else if (s.areaOnly) {
+    paras.push(
+      `Using the provided photo of ${s.subject}${s.refs.length ? ' (Image 1)' : ''}, change only ${s.area}. ${changeBody} ` +
+        `Keep everything else in the image exactly the same, preserving the original style, lighting and composition: leave ${keepList} untouched, ${openings}, and everything outside ${s.area} remains exactly as it is.`,
+    );
   } else {
     paras.push(
       `Using the provided photo of ${s.subject}${s.refs.length ? ' (Image 1)' : ''}, make this change: ${changeBody} ` +
@@ -335,7 +370,7 @@ function geminiTemplate(s: Slots): string {
         ? ` The ${s.color} outline is only a selection marker: remove it completely, so the finished photo shows no outline, border or line where it was${s.edgingInChange ? ' (the only edging is the one the change describes)' : ''}.`
         : ''),
   );
-  if (s.refs.length) paras.push(refSentencesGemini(s.refs));
+  if (s.refs.length) paras.push(referenceSentences('gemini', s.refs).join(' '));
   return paras.join('\n\n');
 }
 
@@ -349,15 +384,20 @@ function geminiTemplate(s: Slots): string {
  * wording is added when the change involves plants. ≤ MAX_PROMPT_CHARS.
  */
 export function buildHandoffPrompt(ctx: PromptContext): string {
-  const color = clean(ctx.markerColorName);
-  const whole = !color;
+  const marker = clean(ctx.markerColorName);
+  const whole = !marker;
+  const color = ctx.unmarked ? '' : marker;
   const change = changeFromInstruction(ctx.instruction || 'Apply the requested design change');
   const extrasParts: string[] = [];
   for (const c of ctx.constraints ?? []) if (clean(c)) extrasParts.push(sentence(c));
   if (mentionsPlants(change) && (!ctx.interior || /\b(houseplants?|potted)\b/i.test(change))) extrasParts.push(MATURITY[ctx.plantMaturity]);
   const strict = whole ? STRICTNESS_WHOLE[ctx.app][ctx.strictness] : STRICTNESS[ctx.app][ctx.strictness];
-  if (strict) extrasParts.push(strict(ctx.interior));
-  const refs = ctx.references.slice(0, 3).map((r) => lowerFirst(stripTrailingPunct(r.role)) || 'the look');
+  if (strict) {
+    const text = strict(ctx.interior);
+    // No outline drawn: "inside the outline" becomes the named area.
+    extrasParts.push(color || whole ? text : text.replace(/inside the outline/g, 'inside that area').replace(/Within the outlined area/g, 'Within that area'));
+  }
+  const refs = ctx.references.slice(0, MAX_REFERENCES).map((r) => r.role);
   const base: Omit<Slots, 'change' | 'keep'> = {
     subject: subjectPhrase(ctx.style, ctx.interior, ctx.place),
     area: truncateWords(stripTrailingPunct(ctx.areaText) || 'the outlined area', 200),
@@ -365,6 +405,7 @@ export function buildHandoffPrompt(ctx: PromptContext): string {
     light: truncateWords(lowerFirst(stripTrailingPunct(ctx.light).replace(/\s*;\s*/g, ', ')) || defaultLight(ctx.interior), 180),
     ratio: clean(ctx.ratio) || 'original',
     color,
+    areaOnly: !whole && !color,
     refs,
     interior: ctx.interior,
     edgingInChange: EDGING_WORDS.test(change),
@@ -373,6 +414,7 @@ export function buildHandoffPrompt(ctx: PromptContext): string {
   const render = ctx.app === 'gemini' ? geminiTemplate : chatgptTemplate;
   let keep = ctx.keep.map((k) => stripTrailingPunct(k)).filter(Boolean);
   if (whole) keep = keep.map((k) => k.replace(/\s+(outside|beyond) the outline$/i, ''));
+  else if (!color) keep = keep.map((k) => k.replace(/^the (.+?)\s+(outside|beyond) the outline$/i, 'the rest of the $1'));
   keep = keep.filter((k, i) => keep.findIndex((o) => o.toLowerCase() === k.toLowerCase()) === i).map((k) => truncateWords(k, 90));
 
   let text = render({ ...base, change, keep });
@@ -661,6 +703,12 @@ export interface SceneContextOptions {
   view?: Rect;
   /** Photo size; estimated from the scene geometry when omitted. */
   frame?: { width: number; height: number };
+  /**
+   * Ground zones beside the target that may change too, because a choice
+   * changes the element's footprint (a wider or curvier path): named in the
+   * area words and never listed as things to keep.
+   */
+  roomZoneIds?: readonly string[];
 }
 
 /**
@@ -731,9 +779,18 @@ export function promptContextFromScene(
     if (route) constraints.push(`It must still lead ${route}.`);
   }
   let areaText = '';
+  const roomIds = new Set(whole ? [] : (opts.roomZoneIds ?? []).filter((id) => !targetIds.has(id)));
   if (!whole) {
     areaText = areaParts.length > 3 ? `${areaParts.slice(0, 3).join(', ')} and ${areaParts.length - 3} more area${areaParts.length > 4 ? 's' : ''}` : joinList(areaParts);
     if (!areaText) areaText = 'the outlined area';
+    // Room for a wider / curvier footprint: the ground right beside it may change too.
+    const room = scene.zones.filter((z) => roomIds.has(z.id));
+    if (room.length) {
+      const lawn = room.some((z) => z.kind === 'lawn');
+      const names = [...new Set(room.map((z) => (z.kind === 'lawn' ? 'the lawn' : withArticle(z.label || KIND_PHRASE[z.kind] || z.kind))))];
+      const old = targetPaths.length || targetKinds.has('walkway') ? 'walk' : targetKinds.has('driveway') ? 'drive' : targetKinds.has('patio') ? 'patio' : 'surface';
+      areaText = `${areaText}, and ${joinList(names.slice(0, 2))} right beside it (${lawn ? 're-lawn' : 'replant'} where the old ${old} no longer runs)`;
+    }
   }
 
   // Keep list: routes first (driveway → door), then zones by kind priority, then the scene keep-list.
@@ -759,7 +816,7 @@ export function promptContextFromScene(
   const order = interior ? INTERIOR_ORDER : EXTERIOR_ORDER;
   const byKind = new Map<ZoneKind, SceneZone[]>();
   for (const z of scene.zones) {
-    if (targetIds.has(z.id)) continue;
+    if (targetIds.has(z.id) || roomIds.has(z.id)) continue;
     const box = boxOf(z.polygon);
     if (!visibleIn(box, view)) continue;
     // The walkway a targeted path redraws is part of the change.

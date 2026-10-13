@@ -10,8 +10,10 @@ import {
   chooseMarkerColor,
   exportSize,
   markerColorName,
+  parseRatioList,
   planExport,
   ratioLabel,
+  ratiosFor,
   renderHandoff,
   snapToRatio,
 } from './prepare';
@@ -20,6 +22,8 @@ import { ellipseMask, texturedScene } from './testing';
 
 const W = 1600;
 const H = 1200;
+/** OpenAI's recommended API sizes — a user override of the ratio table. */
+const API_SIZES = parseRatioList('1:1, 3:2, 2:3');
 
 function solid(w: number, h: number, rgb: [number, number, number]): ImageDataLike {
   const data = new Uint8ClampedArray(w * h * 4);
@@ -49,16 +53,18 @@ describe('snapToRatio', () => {
     expect(contains({ x: 0, y: 0, w: W, h: H }, r!.rect)).toBe(true);
   });
 
-  it('only offers the app’s ratios (ChatGPT: 1:1, 3:2, 2:3)', () => {
-    const r = snapToRatio({ x: 0, y: 0, w: W, h: H }, { x: 400, y: 300, w: 800, h: 600 }, W, H, HANDOFF_RATIOS.chatgpt);
+  it('only offers the given ratios (e.g. the API sizes 1:1, 3:2, 2:3)', () => {
+    const r = snapToRatio({ x: 0, y: 0, w: W, h: H }, { x: 400, y: 300, w: 800, h: 600 }, W, H, API_SIZES);
     expect(r!.ratio.label).toBe('3:2');
     expect(r!.rect.w).toBe(W);
     expect(r!.rect.h).toBe(Math.round(W / 1.5));
+    // ChatGPT's default table includes 4:3 (GPT Image 2.5 takes custom sizes).
+    expect(snapToRatio({ x: 0, y: 0, w: W, h: H }, { x: 400, y: 300, w: 800, h: 600 }, W, H, HANDOFF_RATIOS.chatgpt)!.ratio.label).toBe('4:3');
   });
 
   it('returns null when no ratio can hold the required rect inside the photo', () => {
-    // 4:3 photo, required = the whole photo: ChatGPT has no 4:3.
-    expect(snapToRatio({ x: 0, y: 0, w: W, h: H }, { x: 0, y: 0, w: W, h: H }, W, H, HANDOFF_RATIOS.chatgpt)).toBeNull();
+    // 4:3 photo, required = the whole photo: the API sizes have no 4:3.
+    expect(snapToRatio({ x: 0, y: 0, w: W, h: H }, { x: 0, y: 0, w: W, h: H }, W, H, API_SIZES)).toBeNull();
     expect(snapToRatio({ x: 0, y: 0, w: W, h: H }, { x: 0, y: 0, w: W, h: H }, W, H, HANDOFF_RATIOS.gemini)!.ratio.label).toBe('4:3');
   });
 
@@ -67,6 +73,25 @@ describe('snapToRatio', () => {
     expect(r!.rect.x + r!.rect.w).toBeLessThanOrEqual(W);
     expect(r!.rect.y + r!.rect.h).toBeLessThanOrEqual(H);
     expect(contains(r!.rect, { x: 1350, y: 950, w: 240, h: 240 })).toBe(true);
+  });
+});
+
+describe('ratio table (pref-overridable)', () => {
+  it('ChatGPT defaults keep 1:1 / 3:2 / 2:3 and add 4:3, 3:4, 16:9, 9:16', () => {
+    expect(HANDOFF_RATIOS.chatgpt.map((r) => r.label)).toEqual(['1:1', '3:2', '2:3', '4:3', '3:4', '16:9', '9:16']);
+  });
+
+  it('parses a user list, dropping junk, duplicates and anything beyond 3:1', () => {
+    expect(parseRatioList('1:1, 3:2 ; 2x3, 4/3, 6:4, 4:1, 0:2, abc, 21:9').map((r) => r.label)).toEqual(['1:1', '3:2', '2:3', '4:3', '21:9']);
+    expect(parseRatioList('')).toEqual([]);
+  });
+
+  it('an empty override falls back to the defaults; a set one is used for planning', () => {
+    expect(ratiosFor('chatgpt', [])).toBe(HANDOFF_RATIOS.chatgpt);
+    expect(ratiosFor('gemini', null)).toBe(HANDOFF_RATIOS.gemini);
+    const only = parseRatioList('1:1');
+    expect(ratiosFor('chatgpt', only)).toBe(only);
+    expect(planExport(W, H, { x: 500, y: 300, w: 600, h: 500 }, 0.45, 'chatgpt', { ratios: only }).ratio).toBe('1:1');
   });
 });
 
@@ -95,7 +120,8 @@ describe('planExport', () => {
     expect(g.mode).toBe('full');
     expect(g.ratio).toBe('4:3');
     expect(g.crop).toEqual({ x: 0, y: 0, w: W, h: H });
-    const c = planExport(W, H, big, 0.45, 'chatgpt');
+    expect(planExport(W, H, big, 0.45, 'chatgpt')).toEqual(g);
+    const c = planExport(W, H, big, 0.45, 'chatgpt', { ratios: API_SIZES });
     expect(c.mode).toBe('full');
     expect(c.ratio).toBe('3:2');
     expect(c.crop.w).toBe(W);

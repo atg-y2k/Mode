@@ -3,8 +3,9 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { emptyBrief, type Generation, type HandoffPack, type Photo, type PlannedVariation, type Project } from '../../../../shared/types';
 import * as db from '../../../state/persistence';
 import { findPhoto, newDesign, useStore } from '../../../state/store';
-import { acceptStaged, installHandoffCleanup, rejectStaged, setDefaultHandoffApp, skipPlanned, switchPendingApp } from './actions';
+import { acceptStaged, openRunHandoff, rejectStaged, setDefaultHandoffApp, skipPlanned, switchPendingApp } from './actions';
 import { HANDOFF_LOG_KEY, recordHandoff, resetHandoffLogCache } from './log';
+import { sweepFinishedPacks } from './pack';
 import { handoffSession, setHandoffSession } from './session';
 
 const pack = (id: string, app: HandoffPack['app'] = 'chatgpt'): HandoffPack => ({
@@ -107,6 +108,48 @@ describe('staging decisions', () => {
     expect(handoffSession().active).toMatchObject({ plannedId: 'b' });
   });
 
+  it('Accept frees the item’s hand-off exports (marked PNG + clean JPEG)', async () => {
+    setup([
+      { id: 'a', title: 'Flagstone', brief: 'Lay flagstones', status: 'staged', handoff: pack('a'), staged: { imageId: 'staged-img', thumbId: 'staged-th', source: { kind: 'handoff', app: 'chatgpt', alignment } } },
+      { id: 'b', title: 'Gravel', brief: 'Pea gravel', status: 'awaiting-handoff', handoff: pack('b') },
+    ]);
+    acceptStaged(ref('a'));
+    expect(gen().planned![0].handoff).toBeUndefined();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(await db.getBlob('clean-a')).toBeUndefined();
+    expect(await db.getBlob('marked-a')).toBeUndefined();
+    // The accepted image itself and the other item's exports stay.
+    expect(await db.getBlob('staged-img')).toBeDefined();
+    expect(await db.getBlob('clean-b')).toBeDefined();
+  });
+
+  it('Skip frees the item’s hand-off exports too', async () => {
+    setup([
+      { id: 'a', title: 'Flagstone', brief: 'Lay flagstones', status: 'awaiting-handoff', handoff: pack('a') },
+      { id: 'b', title: 'Gravel', brief: 'Pea gravel', status: 'awaiting-handoff', handoff: pack('b') },
+    ]);
+    skipPlanned(ref('a'));
+    expect(gen().planned![0]).toMatchObject({ status: 'rejected' });
+    expect(gen().planned![0].handoff).toBeUndefined();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(await db.getBlob('clean-a')).toBeUndefined();
+    expect(await db.getBlob('marked-a')).toBeUndefined();
+  });
+
+  it('projects saved before that: finished items’ exports are swept once', async () => {
+    setup([
+      { id: 'a', title: 'Flagstone', brief: 'Lay flagstones', status: 'done', variationId: 'v', handoff: pack('a') },
+      { id: 'b', title: 'Gravel', brief: 'Pea gravel', status: 'awaiting-handoff', handoff: pack('b') },
+    ]);
+    expect(sweepFinishedPacks()).toBe(1);
+    expect(gen().planned![0].handoff).toBeUndefined();
+    expect(gen().planned![1].handoff).toBeDefined();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(await db.getBlob('clean-a')).toBeUndefined();
+    expect(await db.getBlob('clean-b')).toBeDefined();
+    expect(sweepFinishedPacks()).toBe(0);
+  });
+
   it('Reject discards the result and waits again; Skip leaves the variation out and finishes the run', async () => {
     setup([
       { id: 'a', title: 'Flagstone', brief: 'Lay flagstones', status: 'staged', staged: { imageId: 'staged-img', thumbId: 'staged-th', source: { kind: 'handoff', app: 'chatgpt' } } },
@@ -140,6 +183,18 @@ describe('switching apps', () => {
     expect(await db.getBlob('clean-a')).toBeUndefined();
   });
 
+  it('an item already sent keeps how its export was framed when the waiting items move to the other app', () => {
+    setup([
+      { id: 'a', title: 'A', brief: 'a', status: 'awaiting-handoff', handoff: pack('a') },
+      { id: 'b', title: 'B', brief: 'b', status: 'awaiting-handoff', handoff: pack('b') },
+    ]);
+    recordHandoff('chatgpt', 'a');
+    expect(switchPendingApp('gemini')).toBe(2);
+    expect(gen().planned![0].handoff).toBeUndefined();
+    expect(gen().planned![0].handoffPrev).toMatchObject({ app: 'chatgpt', crop: { x: 0, y: 0, w: 100, h: 80 }, outW: 1024, outH: 820, markerColor: '#ff00ff' });
+    expect(gen().planned![1].handoffPrev).toBeUndefined();
+  });
+
   it('the dock app only moves items that were not sent yet', () => {
     setup([
       { id: 'a', title: 'A', brief: 'a', status: 'awaiting-handoff', handoff: pack('a') },
@@ -153,16 +208,42 @@ describe('switching apps', () => {
 });
 
 describe('cleanup', () => {
-  it('deleting a hand-off run removes its prepared and staged images', async () => {
+  it('deleting a hand-off run removes its prepared and staged images (the store does it)', async () => {
     setup([
       { id: 'a', title: 'A', brief: 'a', status: 'awaiting-handoff', handoff: pack('a') },
       { id: 'b', title: 'B', brief: 'b', status: 'staged', handoff: pack('b'), staged: { imageId: 'staged-img', thumbId: 'staged-th', source: { kind: 'handoff', app: 'chatgpt' } } },
     ]);
-    installHandoffCleanup();
-    setHandoffSession({ staging: ref('b') });
     await useStore.getState().deleteGeneration('pho', 'gen');
-    await new Promise((r) => setTimeout(r, 20));
     for (const id of ['clean-a', 'marked-a', 'clean-b', 'marked-b', 'staged-img', 'staged-th']) expect(await db.getBlob(id)).toBeUndefined();
-    expect(handoffSession().staging).toBeNull();
+  });
+});
+
+describe('the starting image of a pending hand-off', () => {
+  it('cannot be deleted while the run waits for its result (finish or skip it first)', async () => {
+    setup([{ id: 'a', title: 'A', brief: 'a', status: 'awaiting-handoff', handoff: pack('a') }]);
+    const v = { id: 'v1', imageId: 'staged-img', thumbId: 'staged-th', width: 100, height: 80, title: 'Base take', brief: 'b', favorite: false, createdAt: 0 };
+    useStore.getState().updateGeneration('pho', 'gen', (g) => {
+      g.baseVariationId = 'v1';
+    });
+    useStore.getState().addGeneration('pho', { ...gen(), id: 'older', planned: [], baseVariationId: undefined, variations: [v], status: 'done' });
+    expect(await useStore.getState().deleteVariation('pho', 'v1')).toBe(false);
+    expect(findPhoto(useStore.getState().project, 'pho')!.photo.generations.some((g) => g.variations.some((x) => x.id === 'v1'))).toBe(true);
+    expect(await db.getBlob('staged-img')).toBeDefined();
+    skipPlanned(ref('a'));
+    expect(await useStore.getState().deleteVariation('pho', 'v1')).toBe(true);
+  });
+});
+
+describe('open a run from History (mode:open-handoff)', () => {
+  it('opens the companion on the run’s first waiting item, else its staged one', () => {
+    setup([
+      { id: 'a', title: 'A', brief: 'a', status: 'staged', handoff: pack('a'), staged: { imageId: 'staged-img', thumbId: 'staged-th', source: { kind: 'handoff', app: 'chatgpt' } } },
+      { id: 'b', title: 'B', brief: 'b', status: 'awaiting-handoff', handoff: pack('b') },
+    ]);
+    setHandoffSession({ companion: 'closed', active: null });
+    expect(openRunHandoff('gen')).toBe(true);
+    expect(handoffSession().active).toMatchObject({ plannedId: 'b' });
+    expect(handoffSession().companion).toBe('open');
+    expect(openRunHandoff('missing')).toBe(false);
   });
 });

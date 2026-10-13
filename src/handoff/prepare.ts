@@ -39,11 +39,46 @@ export interface RatioSpec {
 
 const r = (w: number, h: number): RatioSpec => ({ label: `${w}:${h}`, w, h });
 
-/** Aspect ratios each app produces for edited photos. */
+/**
+ * Default aspect ratios each app returns edited photos in (the export is
+ * snapped to one of them). ChatGPT: GPT Image 2 / 2.5 accept custom sizes
+ * (edges multiples of 16, aspect 1:3 … 3:1) and the app's Resize presets
+ * include 4:3, 3:4, 16:9 and 9:16 besides the API's recommended 1:1 / 3:2 /
+ * 2:3. What each app really returns is unmeasured — a user can override the
+ * table (Settings → Hand-off → advanced; PrepareOptions.ratios).
+ */
 export const HANDOFF_RATIOS: Record<HandoffApp, readonly RatioSpec[]> = {
-  chatgpt: [r(1, 1), r(3, 2), r(2, 3)],
+  chatgpt: [r(1, 1), r(3, 2), r(2, 3), r(4, 3), r(3, 4), r(16, 9), r(9, 16)],
   gemini: [r(1, 1), r(3, 2), r(2, 3), r(4, 3), r(3, 4), r(16, 9), r(9, 16), r(4, 5), r(5, 4)],
 };
+
+/** Ratios outside 1:3 … 3:1 are refused (no app returns them). */
+const MAX_RATIO_ASPECT = 3;
+
+/**
+ * Parses a user's ratio list ("1:1, 3:2, 4:3" — also "x", "/" or spaces as
+ * separators): valid, de-duplicated ratios within 1:3 … 3:1, in order.
+ * Returns [] when nothing usable is in the text.
+ */
+export function parseRatioList(text: string): RatioSpec[] {
+  const out: RatioSpec[] = [];
+  for (const m of text.matchAll(/(\d+(?:\.\d+)?)\s*[:x×/]\s*(\d+(?:\.\d+)?)/gi)) {
+    const w = Number(m[1]);
+    const h = Number(m[2]);
+    if (!(w > 0 && h > 0)) continue;
+    const a = w / h;
+    if (a > MAX_RATIO_ASPECT + 1e-9 || a < 1 / MAX_RATIO_ASPECT - 1e-9) continue;
+    const label = `${m[1]}:${m[2]}`;
+    if (out.some((o) => Math.abs(o.w / o.h - a) < 1e-6)) continue;
+    out.push({ label, w, h });
+  }
+  return out;
+}
+
+/** The ratio list to snap to: a usable override, else the app's defaults. */
+export function ratiosFor(app: HandoffApp, override?: readonly RatioSpec[] | null): readonly RatioSpec[] {
+  return override && override.length > 0 ? override : HANDOFF_RATIOS[app];
+}
 
 const COMMON_RATIOS: readonly RatioSpec[] = [
   r(1, 1), r(5, 4), r(4, 5), r(4, 3), r(3, 4), r(3, 2), r(2, 3), r(16, 10), r(10, 16), r(16, 9), r(9, 16), r(2, 1), r(1, 2), r(21, 9),
@@ -172,11 +207,11 @@ export function planExport(
   band: Rect | null,
   coverage: number,
   app: HandoffApp,
-  opts: { fullFrame?: boolean; margin?: number } = {},
+  opts: { fullFrame?: boolean; margin?: number; ratios?: readonly RatioSpec[] } = {},
 ): ExportPlan {
   const full: Rect = { x: 0, y: 0, w: W, h: H };
   if (!band) return { crop: full, ratio: ratioLabel(W, H), mode: 'full' };
-  const ratios = HANDOFF_RATIOS[app];
+  const ratios = ratiosFor(app, opts.ratios);
   const margin = opts.margin ?? Math.max(12, Math.round(Math.max(W, H) * 0.012));
   const required = clampRect({ x: band.x - margin, y: band.y - margin, w: band.w + 2 * margin, h: band.h + 2 * margin }, W, H);
 
@@ -391,6 +426,8 @@ export interface RenderOptions {
   app: HandoffApp;
   maxEdge?: number;
   fullFrame?: boolean;
+  /** Ratios to snap to instead of HANDOFF_RATIOS[app] (a user override; empty = defaults). */
+  ratios?: readonly RatioSpec[];
   resize?: Resizer;
 }
 
@@ -413,7 +450,7 @@ export function renderHandoff(image: ImageDataLike, target: Mask, opts: RenderOp
   // frame at the crop edge): crops only enlarge more, so the marker always fits.
   const marginEdge = opts.maxEdge ?? CROP_MAX_EDGE;
   const margin = markerMarginPhotoPx(marginEdge, marginEdge / Math.max(W, H));
-  const plan = planExport(W, H, bounds, coverage, opts.app, { fullFrame: opts.fullFrame, margin });
+  const plan = planExport(W, H, bounds, coverage, opts.app, { fullFrame: opts.fullFrame, margin, ratios: opts.ratios });
   const maxEdge = opts.maxEdge ?? (plan.mode === 'crop' ? CROP_MAX_EDGE : FULL_MAX_EDGE);
   const { outW, outH } = exportSize(plan.crop, maxEdge);
   const clean = (opts.resize ?? resampleRGBA)(image, plan.crop, outW, outH);

@@ -30,6 +30,13 @@ describe('parseSiteProfile', () => {
     expect(parseSiteProfile('nope')).toBeNull();
     expect(parseSiteProfile({}, 'photo-gps')?.coordsSource).toBe('photo-gps');
   });
+
+  it('keeps a frost-free section (no dates) from a frost-free station', () => {
+    const p = parseSiteProfile({ coordsSource: 'zip', frost: { station: 'HILO INTL AP, HI', distanceKm: 2.4, frostFree: true }, updatedAt: 1 });
+    expect(p?.frost).toEqual({ station: 'HILO INTL AP, HI', distanceKm: 2.4, frostFree: true });
+    // a dated section without its dates is still malformed
+    expect(parseSiteProfile({ frost: { station: 'X', distanceKm: 3, frostFree: false } })?.frost).toBeUndefined();
+  });
 });
 
 describe('fetchSiteProfile', () => {

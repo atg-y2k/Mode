@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { ClimateProfile, Project, ProjectLocation } from '../../shared/types';
 import { coordsSourceOf, distanceKm, locationForUserZone, locationForZip, photosWithGps, withCoords } from './location';
-import type { ZipInfo } from './zip';
+import type { ZipInfo, ZipInfoWithCoords } from './zip';
 
-const BETHESDA: ZipInfo = { zip: '20817', zone: '7b', lat: 38.997, lon: -77.135, source: 'table' };
-const ROCKVILLE: ZipInfo = { zip: '20850', zone: '7a', lat: 39.09, lon: -77.18, source: 'table' };
-const BOSTON: ZipInfo = { zip: '02134', zone: '6b', lat: 42.355, lon: -71.132, source: 'table' };
+const BETHESDA: ZipInfoWithCoords = { zip: '20817', zone: '7b', lat: 38.997, lon: -77.135, source: 'table' };
+const ROCKVILLE: ZipInfoWithCoords = { zip: '20850', zone: '7a', lat: 39.09, lon: -77.18, source: 'table' };
+const BOSTON: ZipInfoWithCoords = { zip: '02134', zone: '6b', lat: 42.355, lon: -71.132, source: 'table' };
 const CLIMATE: ClimateProfile = { hardinessZone: '7a', summary: 'Humid subtropical', notes: [], source: 'ai', updatedAt: 1 };
 const SITE = { coordsSource: 'zip' as const, updatedAt: 1, ecoregion: 'Northern Piedmont' };
 
@@ -36,6 +36,18 @@ describe('locationForZip', () => {
     expect('site' in moved && moved.site === undefined).toBe(true); // ~11 km away: stale profile dropped
     const far: ProjectLocation = { zip: '20817', lat: 39.0, lon: -77.1 };
     expect(locationForZip(far, BOSTON, BETHESDA)).toMatchObject({ lat: BOSTON.lat, lon: BOSTON.lon });
+  });
+
+  it('fills only the zone for a zone-only ZIP (no centroid), dropping the old ZIP centre', () => {
+    const NEWTON_PO: ZipInfo = { zip: '02455', zone: '6b', source: 'table' };
+    expect(locationForZip({}, NEWTON_PO)).toEqual({ zip: '02455', hardinessZone: '6b', zoneSource: 'zip-table' });
+    const atCentre: ProjectLocation = { zip: '20817', lat: BETHESDA.lat, lon: BETHESDA.lon, site: SITE };
+    const patch = locationForZip(atCentre, NEWTON_PO, BETHESDA);
+    expect(patch).toMatchObject({ zip: '02455', hardinessZone: '6b' });
+    expect('lat' in patch && patch.lat === undefined && 'site' in patch && patch.site === undefined).toBe(true);
+    // Exact coordinates (photo GPS / typed) stay.
+    expect('lat' in locationForZip({ lat: 42.3, lon: -71.2 }, NEWTON_PO, BETHESDA)).toBe(false);
+    expect(coordsSourceOf({ lat: 42.3, lon: -71.2 }, NEWTON_PO)).toBe('address');
   });
 });
 

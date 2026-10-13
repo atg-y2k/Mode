@@ -13,7 +13,7 @@
  */
 
 /** Looks up a ZIP in the bundled table (fetched lazily once, cached). Null when unknown. */
-export { lookupZip, normalizeZip, localityForZip, loadZipTable, ZONE_SOURCE_NOTE, type ZipInfo } from './zip';
+export { lookupZip, normalizeZip, localityForZip, loadZipTable, hasZipCoords, ZONE_SOURCE_NOTE, type ZipInfo, type ZipInfoWithCoords } from './zip';
 
 /** Reads GPS, compass heading and capture time from an original photo file (before downscaling strips EXIF). */
 export { readPhotoCapture, captureFromTags } from './capture';
@@ -49,6 +49,8 @@ export {
 export {
   invasiveStatus,
   invasiveStatusSync,
+  invasiveCoverageNote,
+  NO_STATE_LIST,
   findInvasive,
   describeInvasive,
   loadInvasives,

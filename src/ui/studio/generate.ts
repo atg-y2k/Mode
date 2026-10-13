@@ -33,6 +33,7 @@ import {
   type Photo,
   type PlannedVariation,
   type PlantNote,
+  type RunTarget,
   type SceneMap,
   type Variation,
 } from '../../../shared/types';
@@ -49,7 +50,8 @@ import { appLabel, rollupStatus } from './handoff/planned';
 import { effectiveRenderMode } from './handoff/prefs';
 import { awaitReview, closeReview, openReview, reviewAvailable, type ReviewItem } from './handoff/review';
 import { focusHandoff } from './handoff/session';
-import { briefTargetIds, maskForBrief } from './maskFromZones';
+import { cloneRunTarget, freezeRunTarget, runTargetMask } from './handoff/target';
+import { maskForBrief, runTargetLost } from './maskFromZones';
 import { buildPlanRequest, ideasForBrief, resolveCompare, sceneSummaryText as sceneText, swapOptionInBrief, type PlanKnowledge } from './planRequest';
 import { forgetRunInfo, getRunInfo, patchRunInfo, patchSlot, setRunInfo, type RunSlot } from './runs';
 
@@ -80,6 +82,12 @@ export interface StartRunOptions {
   app?: HandoffApp;
   /** Show the review step before rendering / handing off (default: whenever the review modal is mounted). */
   review?: boolean;
+  /**
+   * The areas of the run this one repeats (retry, "More like this"): kept
+   * when the brief's own areas are no longer in the scene (re-mapped), so
+   * the new run never quietly becomes a whole-image edit.
+   */
+  target?: RunTarget;
 }
 
 /** Variations rendered in parallel. */
@@ -130,8 +138,8 @@ interface RunContext {
 
 const contexts = new Map<string, RunContext>();
 
-/** Error text of runs a reload interrupted (the strip and History show it as "Interrupted"). */
-export const INTERRUPTED = 'Interrupted — Mode was closed or reloaded before this run finished.';
+/** Error text of runs a reload interrupted (the strip and History show it as "Interrupted"; also set on load by migrateProject). */
+export const INTERRUPTED = db.INTERRUPTED;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -283,21 +291,16 @@ async function ideaImages(ideas: readonly IdeaItem[]): Promise<string[]> {
   return out;
 }
 
-/** Makes sure refined zone masks of the brief's targets are in the runtime cache. */
-async function loadTargetMasks(photo: Photo, brief: DesignBrief): Promise<void> {
-  const { zoneIds } = briefTargetIds(brief, photo.scene);
-  const zones = photo.scene?.zones.filter((z) => z.maskId && zoneIds.includes(z.id)) ?? [];
-  await Promise.all(zones.map((z) => runtime.loadMask(z.maskId as string, photo.width, photo.height).catch(() => undefined)));
-}
-
 async function prepareInputs(ctx: RunContext, photo: Photo): Promise<RenderInputs> {
   const project = state().project;
-  const [{ blob, pixels, blobIsPhotoSize }, references] = await Promise.all([
+  // The run's own target (frozen when it started), not the live scene: re-mapping or deleting a zone never widens it.
+  const run = { id: ctx.generationId, brief: ctx.brief, target: currentGeneration(ctx)?.target };
+  const [{ blob, pixels, blobIsPhotoSize }, references, target] = await Promise.all([
     loadBase(photo, ctx.baseVariationId),
     ideaImages(project ? ideasForBrief(project.ideaBoard, ctx.brief, ctx.spaceId) : []),
-    loadTargetMasks(photo, ctx.brief),
+    runTargetMask(photo, run),
   ]);
-  const mask = buildTargetMask(photo, ctx.brief);
+  const mask = target.wholeImage ? null : target.mask;
   const forApi = ctx.renderMode === 'api';
   const [image, planImage, maskUrl] = await Promise.all([
     // The provider mask must match the image size exactly: send photo-size pixels.
@@ -384,12 +387,14 @@ export async function startRun(opts: StartRunOptions): Promise<string> {
   let brief: DesignBrief;
   let baseVariationId: string | undefined;
   let refine: PlanRequest['refine'] = null;
+  let inherited = opts.target;
   const moreLike = opts.moreLikeThis ? findVariation(photo, opts.moreLikeThis) : undefined;
   if (opts.moreLikeThis && !moreLike) throw new Error('That variation was deleted.');
   if (moreLike) {
     const source = generationOfVariation(photo, moreLike.id);
     baseVariationId = source?.baseVariationId && findVariation(photo, source.baseVariationId) ? source.baseVariationId : undefined;
     brief = opts.brief ?? source?.brief ?? photo.draft ?? emptyBrief();
+    if (!opts.brief) inherited ??= source?.target;
     refine = { title: moreLike.title, brief: moreLike.brief, feedback: null };
   } else {
     const requested = opts.baseVariationId === undefined ? s.studio.viewVariationId : opts.baseVariationId;
@@ -433,6 +438,9 @@ export async function startRun(opts: StartRunOptions): Promise<string> {
   };
   if (compare) generation.compare = { elementId: compare.element.id, dimensionId: compare.dimension.id, optionIds: compare.options.map((o) => o.id) };
   if (baseVariationId) generation.baseVariationId = baseVariationId;
+  // The areas this run may change, frozen now (with copies of refined outlines): later scene edits never move them.
+  // Repeating a run whose areas were re-mapped away keeps that run's areas.
+  generation.target = inherited && runTargetLost({ brief }, photo.scene) ? cloneRunTarget(generationId, photo, inherited) : freezeRunTarget(generationId, photo, brief);
 
   const ctx: RunContext = {
     generationId,
@@ -582,13 +590,14 @@ export async function retryRun(generationId: string): Promise<string | null> {
   if (!owner || !g) return null;
   // A new run follows the Studio's current render mode (the user may have switched since).
   const opts: StartRunOptions = ctx
-    ? { ...ctx.options, photoId: owner.id, renderMode: undefined, app: undefined, review: undefined }
+    ? { ...ctx.options, photoId: owner.id, renderMode: undefined, app: undefined, review: undefined, ...(g.target ? { target: g.target } : {}) }
     : {
         photoId: owner.id,
         mode: g.mode,
         compare: g.compare,
         brief: g.brief,
         baseVariationId: g.baseVariationId ?? null,
+        ...(g.target ? { target: g.target } : {}),
       };
   const id = await startRun(opts);
   if (g.variations.length === 0) {
@@ -602,8 +611,10 @@ export async function retryRun(generationId: string): Promise<string | null> {
 /**
  * Marks runs left 'running' by an earlier session (the app was closed or
  * reloaded mid-run) as interrupted: status 'partial' with an "Interrupted…"
- * error, keeping whatever variations finished. Runs active in this session
- * are left alone. Returns how many runs were marked.
+ * error, keeping whatever variations finished. Runs that never got past
+ * planning or the review (no recorded plan, nothing rendered — the tab was
+ * closed with the review open) are removed instead: nothing was sent.
+ * Runs active in this session are left alone. Returns how many runs were marked.
  */
 export function recoverInterruptedRuns(): number {
   const s = state();
@@ -614,6 +625,14 @@ export function recoverInterruptedRuns(): number {
     for (const photo of space.photos) {
       for (const g of photo.generations) {
         if (g.status !== 'running' || contexts.get(g.id)?.active) continue;
+        if (g.variations.length === 0 && !g.planned?.length) {
+          // Same cleanup as cancelling an empty run.
+          s.setRunProgress(g.id, null);
+          forgetRunInfo(g.id);
+          contexts.delete(g.id);
+          void s.deleteGeneration(photo.id, g.id);
+          continue;
+        }
         n++;
         s.updateGeneration(photo.id, g.id, (gen) => {
           gen.status = 'partial';

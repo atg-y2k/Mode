@@ -16,7 +16,9 @@
  * change" (full frame, no marker, nothing protected).
  *
  * Module map: prepare.ts (crop / ratio / marker), prompts.ts (templates,
- * scene → context, fix prompts), deeplinks.ts, pipeline.ts (import), with
+ * scene → context, fix prompts), deeplinks.ts, filenames.ts (Mode's own
+ * download names, shared with the server), watermark.ts (Gemini's corner
+ * sparkle), pipeline.ts (import, incl. the wrong-image check), with
  * alignCore.ts (OpenCV ORB + RANSAC), colorMatch.ts, changeMap.ts, bands.ts,
  * resample.ts; prepare.worker.ts (export) and align.worker.ts (import, with
  * OpenCV.js loaded lazily) run the pixel work off the main thread via
@@ -32,11 +34,24 @@ import type { ImportResult } from './pipeline';
 import { resampleRGBA } from './resample';
 
 export type { PromptContext, SceneContextOptions } from './prompts';
-export type { ImportResult } from './pipeline';
+export type { ImportResult, InsideCheck } from './pipeline';
 export type { ImportProgress } from './client';
-export { buildHandoffPrompt, promptContextFromScene, FIX_PROMPTS, fixPromptsFor, changeFromInstruction, MAX_PROMPT_CHARS } from './prompts';
+export type { RatioSpec } from './prepare';
+export {
+  buildHandoffPrompt,
+  promptContextFromScene,
+  FIX_PROMPTS,
+  fixPromptsFor,
+  changeFromInstruction,
+  referenceSentences,
+  MAX_PROMPT_CHARS,
+  MAX_REFERENCES,
+} from './prompts';
 export { chatgptDeepLink, GEMINI_APP_URL, CHATGPT_URL } from './deeplinks';
-export { HANDOFF_RATIOS, MARKER_COLORS, markerColorName, ratioLabel } from './prepare';
+export { HANDOFF_RATIOS, MARKER_COLORS, markerColorName, parseRatioList, ratioLabel, ratiosFor } from './prepare';
+export { UNCHANGED_DELTA_E, UNCHANGED_RATIO, looksUnchanged } from './pipeline';
+export { HANDOFF_DOWNLOAD_PREFIX, handoffDownloadName, isOwnHandoffDownload } from './filenames';
+export { WATERMARK_CORNER_SHARE, targetTouchesWatermark, watermarkCorner } from './watermark';
 export { warmUpAlignment } from './client';
 
 // ---------------------------------------------------------------------------
@@ -49,6 +64,8 @@ export interface PrepareOptions {
   maxEdge?: number;
   /** Force full frame even for small targets. */
   fullFrame?: boolean;
+  /** Aspect ratios to snap to instead of the app's defaults (HANDOFF_RATIOS; a user override). */
+  ratios?: readonly import('./prepare').RatioSpec[];
   /** Start loading the alignment engine in the background (default true). */
   warmUp?: boolean;
 }
@@ -80,9 +97,9 @@ const CLEAN_QUALITY = 0.92;
  * - crop vs full frame: crop when the target covers < ~37.5 % of the photo
  *   (bounding box + 40 % context per side, ≥ 1/3 of the frame per side),
  *   else full frame;
- * - snap to an aspect ratio the app produces (ChatGPT 1:1 · 3:2 · 2:3; Gemini
- *   1:1 · 3:2 · 2:3 · 4:3 · 3:4 · 16:9 · 9:16 · 4:5 · 5:4) by growing the crop
- *   (never squashing) and clamping to the photo;
+ * - snap to an aspect ratio the app produces (ChatGPT 1:1 · 3:2 · 2:3 · 4:3 ·
+ *   3:4 · 16:9 · 9:16; Gemini the same + 4:5 · 5:4; or `opts.ratios`) by
+ *   growing the crop (never squashing) and clamping to the photo;
  * - resize to `maxEdge`; re-encode (drops EXIF/GPS);
  * - marker: outline only (no fill), color = the hue least present in the crop
  *   among magenta / cyan / lime, 1 px dark halo, drawn 2–4 px OUTSIDE the
@@ -90,7 +107,12 @@ const CLEAN_QUALITY = 0.92;
  */
 export async function prepareHandoff(image: ImageDataLike, target: Mask, opts: PrepareOptions): Promise<PreparedHandoff> {
   if (opts.warmUp !== false) scheduleWarmUp();
-  const r = await runPrepareJob(image, target, { app: opts.app, maxEdge: opts.maxEdge, fullFrame: opts.fullFrame });
+  const r = await runPrepareJob(image, target, {
+    app: opts.app,
+    maxEdge: opts.maxEdge,
+    fullFrame: opts.fullFrame,
+    ...(opts.ratios?.length ? { ratios: opts.ratios.map((x) => ({ label: x.label, w: x.w, h: x.h })) } : {}),
+  });
   let clean: Blob;
   let marked: Blob;
   if ('clean' in r) {
@@ -150,6 +172,8 @@ async function decodeReturned(blob: Blob): Promise<ImageDataLike> {
  * 3. feathered composite inside the target (target mask grown a little);
  * 4. change map outside the target (blurred Lab ΔE at ~512 px).
  * `onProgress` reports 'loading' (decoding / first OpenCV load), 'aligning', 'compositing'.
+ * `opts.inside`: the area the wrong-image check compares (default: the
+ * target) — the element's own area when the target has room beside it.
  */
 export async function importHandoffResult(
   photo: Pick<Photo, 'width' | 'height'>,
@@ -159,6 +183,7 @@ export async function importHandoffResult(
   returned: Blob,
   signal?: AbortSignal,
   onProgress?: (stage: ImportProgress) => void,
+  opts: { inside?: Mask | null } = {},
 ): Promise<ImportResult> {
   if (original.width !== photo.width || original.height !== photo.height) {
     throw new Error(`The starting image is ${original.width}×${original.height} but the photo is ${photo.width}×${photo.height}.`);
@@ -169,5 +194,9 @@ export async function importHandoffResult(
   onProgress?.('loading');
   const decoded = await decodeReturned(returned);
   if (signal?.aborted) throw new DOMException('The import was cancelled.', 'AbortError');
-  return runImportJob({ original, target, crop: pack.crop, outW: pack.outW, outH: pack.outH, returned: decoded }, signal, onProgress);
+  return runImportJob(
+    { original, target, crop: pack.crop, outW: pack.outW, outH: pack.outH, returned: decoded, ...(opts.inside ? { inside: opts.inside } : {}) },
+    signal,
+    onProgress,
+  );
 }

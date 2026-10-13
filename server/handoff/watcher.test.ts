@@ -3,7 +3,18 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { JPEG_BYTES, PNG_BYTES, fakeWatchFactory, waitFor } from './testing';
-import { DownloadsWatcher, displayPath, isCandidateImageName, resolveWatchDir, type WatchEvent } from './watcher';
+import { HANDOFF_DOWNLOAD_PREFIX, handoffDownloadName } from '../../src/handoff/filenames';
+import {
+  DownloadsWatcher,
+  NO_FOLDER_REASON,
+  OWN_EXPORT_PREFIX,
+  WatchUnavailableError,
+  displayPath,
+  isCandidateImageName,
+  permissionReason,
+  resolveWatchDir,
+  type WatchEvent,
+} from './watcher';
 
 let dir: string;
 const watchers: DownloadsWatcher[] = [];
@@ -54,6 +65,13 @@ describe('isCandidateImageName', () => {
     ]) {
       expect(isCandidateImageName(name), name).toBe(false);
     }
+  });
+
+  it("ignores exactly what the hand-off client saves (shared prefix)", () => {
+    expect(OWN_EXPORT_PREFIX).toBe(HANDOFF_DOWNLOAD_PREFIX);
+    expect(isCandidateImageName(handoffDownloadName('Curved flagstone path'))).toBe(false);
+    expect(isCandidateImageName(handoffDownloadName('Front door', 'jpg'))).toBe(false);
+    expect(isCandidateImageName('my-mode-handoff-result.png')).toBe(true);
   });
 });
 
@@ -127,8 +145,47 @@ describe('DownloadsWatcher (real folder)', () => {
 describe('DownloadsWatcher lifecycle', () => {
   it('is unavailable without a folder', async () => {
     const w = new DownloadsWatcher({ dir: null, log: () => undefined });
-    expect(w.status()).toEqual({ available: false, dir: null, on: false });
+    expect(w.status()).toEqual({ available: false, dir: null, on: false, reason: NO_FOLDER_REASON });
     await expect(w.start()).rejects.toThrow(/no Downloads folder/);
+    const misconfigured = new DownloadsWatcher({ dir: null, missingReason: 'HANDOFF_WATCH_DIR="~/Nope" is not a folder.', log: () => undefined });
+    expect(misconfigured.status().reason).toBe('HANDOFF_WATCH_DIR="~/Nope" is not a folder.');
+  });
+
+  it('reads a real folder fine with the default probe', () => {
+    expect(make().status()).toEqual({ available: true, dir: displayPath(dir), on: false });
+  });
+
+  it('explains a folder macOS privacy settings keep it from reading (EPERM)', async () => {
+    const eperm = () => {
+      throw Object.assign(new Error(`EPERM: operation not permitted, opendir '${dir}'`), { code: 'EPERM' });
+    };
+    const factory = fakeWatchFactory();
+    const mac = make({ probeDir: eperm, platform: 'darwin', watchFactory: factory });
+    const status = mac.status();
+    expect(status).toMatchObject({ available: false, dir: displayPath(dir), on: false });
+    expect(status.reason).toBe(permissionReason(displayPath(dir), 'darwin'));
+    expect(status.reason).toMatch(/System Settings → Privacy & Security → Files & Folders/);
+    expect(status.reason).toMatch(/Full Disk Access/);
+    expect(mac.available()).toBe(false);
+    // start() refuses instead of watching silently (chokidar would ignore the permission error and see nothing).
+    await expect(mac.start()).rejects.toBeInstanceOf(WatchUnavailableError);
+    expect(factory.instances).toHaveLength(0);
+    // Other systems: plain permission advice.
+    const linux = make({ probeDir: () => { throw Object.assign(new Error('EACCES'), { code: 'EACCES' }); }, platform: 'linux' });
+    expect(linux.status().reason).toMatch(/isn't allowed to read .*permission denied/);
+    expect(linux.status().reason).not.toMatch(/System Settings/);
+    const odd = make({ probeDir: () => { throw Object.assign(new Error('EIO'), { code: 'EIO' }); } });
+    expect(odd.status().reason).toMatch(/can't read .*\(EIO\)/);
+  });
+
+  it('a permission error while watching stops with the same advice', async () => {
+    const factory = fakeWatchFactory();
+    const w = make({ watchFactory: factory, platform: 'darwin' });
+    const { events } = collect(w);
+    await w.start();
+    factory.instances[0].emit('error', Object.assign(new Error('EPERM: operation not permitted, scandir'), { code: 'EPERM' }));
+    await waitFor(() => !w.on);
+    expect(events.at(-1)).toMatchObject({ type: 'stopped', reason: 'error', message: permissionReason(displayPath(dir), 'darwin') });
   });
 
   it('release() stops at once when nobody listens, else after the last listener leaves', async () => {

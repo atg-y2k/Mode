@@ -2,6 +2,7 @@ import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { FreezeTable } from './freezeTable';
 import { NOAA_INVENTORY_URL } from './noaa';
 import { ECOREGION_GRACE_MS, ECOREGION_RETRY_MS, PARTIAL_TTL_MS, SiteUpstreamError, createSiteProfileService, roundedPoint } from './profile';
 import { FIXTURE_POINTS, fixtureFetch, type FixtureFetchOptions } from './testing';
@@ -18,10 +19,11 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-function service(opts: FixtureFetchOptions = {}, cacheDir: string | null = dir) {
+/** A service on the recorded answers. Frost from NOAA's runtime services unless a frost table is given. */
+function service(opts: FixtureFetchOptions = {}, cacheDir: string | null = dir, freezeTable: FreezeTable | string | null = null) {
   const fetch = fixtureFetch(opts);
   const logs: string[] = [];
-  const svc = createSiteProfileService({ fetch, cacheDir, now: () => clock, log: (l) => logs.push(l) });
+  const svc = createSiteProfileService({ fetch, cacheDir, now: () => clock, log: (l) => logs.push(l), freezeTable });
   return { svc, fetch, logs };
 }
 
@@ -95,7 +97,8 @@ describe('site profile service', () => {
   it('handles frost-free, too-cold and offshore spots', async () => {
     const { svc } = service({}, null);
     const miami = await svc.profile(FIXTURE_POINTS.miami.lat, FIXTURE_POINTS.miami.lon);
-    expect(miami.frost).toBeUndefined();
+    // Frost-free: the station and distance, no dates (not "no frost data").
+    expect(miami.frost).toEqual({ station: 'MIAMI BEACH, FL', distanceKm: 7.7, frostFree: true });
     expect(miami).toMatchObject({ soil: { mapUnit: 'Urban land, 0 to 2 percent slopes', disturbed: true }, ecoregion: 'Southern Florida Coastal Plain' });
     const leadville = await svc.profile(FIXTURE_POINTS.leadville.lat, FIXTURE_POINTS.leadville.lon);
     expect(leadville.frost).toMatchObject({ station: 'TWIN LAKES RSVR, CO', lastSpring50: '06-16', firstFall50: '09-10' });
@@ -129,6 +132,25 @@ describe('site profile service', () => {
     const noSoil = await service({ fail: { sda: 500 } }, null).svc.profile(FIXTURE_POINTS.rockville.lat, FIXTURE_POINTS.rockville.lon);
     expect(noSoil.soil).toBeUndefined();
     expect(noSoil.frost?.station).toBe('DALECARLIA RSVR, MD');
+  });
+
+  it('treats the SDA maintenance page (HTTP 200, HTML) as a temporary failure', async () => {
+    const { svc, fetch, logs } = service({ fail: { sda: 'html' } });
+    const p = FIXTURE_POINTS.rockville;
+    const first = await svc.profileWithStatus?.(p.lat, p.lon);
+    expect(first?.unavailable).toEqual(['soil']);
+    expect(first?.profile.soil).toBeUndefined();
+    expect(first?.profile.frost).toEqual(ROCKVILLE.frost);
+    expect(first?.profile.ecoregion).toBe('Northern Piedmont');
+    expect(logs.some((l) => /soil unavailable: USDA Soil Data Access: temporarily unavailable \(HTML page/.test(l))).toBe(true);
+    // Not cached as "no soil here": nothing on disk, asked again after the short window.
+    expect(existsSync(join(dir, 'profile_38.997,-77.135.json'))).toBe(false);
+    const sdaCalls = () => fetch.calls.filter((c) => c.url.includes('sdmdataaccess')).length;
+    await svc.profile(p.lat, p.lon);
+    expect(sdaCalls()).toBe(1);
+    clock += PARTIAL_TTL_MS + 1;
+    await svc.profile(p.lat, p.lon);
+    expect(sdaCalls()).toBe(2);
   });
 
   it('fails only when every service fails', async () => {

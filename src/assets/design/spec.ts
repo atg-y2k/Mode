@@ -22,6 +22,7 @@ import {
 } from '../../../shared/types';
 import { ELEMENT_DEFS, optionPlants } from './elements';
 import { paletteFeasibility, type FeasibilityContext } from './feasibility';
+import { localityForZip } from '../../site/zip';
 import { PLANT_PROFILES } from './plants';
 import { visualFromDraft } from './visuals';
 
@@ -71,6 +72,9 @@ export function deerPressureFromNotes(notes: readonly string[] | undefined): boo
 /**
  * Feasibility context for a spot from the project's location / climate
  * profile and the targeted scene zones (their estimated sun).
+ * Deer pressure: the Settings choice (location.deerPressure) wins over what
+ * the AI climate notes imply. US-RIIS locality from the ZIP (Alaska / Hawaii
+ * have their own invasive lists; default the lower 48).
  */
 export function feasibilityContext(
   location: ProjectLocation | undefined,
@@ -88,8 +92,10 @@ export function feasibilityContext(
   if (sun) ctx.sun = sun;
   const rain = location?.climate?.annualRainfallIn;
   if (typeof rain === 'number' && Number.isFinite(rain)) ctx.annualRainfallIn = rain;
-  const deer = deerPressureFromNotes(location?.climate?.notes);
+  const deer = location?.deerPressure ?? deerPressureFromNotes(location?.climate?.notes);
   if (deer !== undefined) ctx.deerPressure = deer;
+  const locality = localityForZip(location?.zip);
+  if (locality) ctx.locality = locality;
   return ctx;
 }
 

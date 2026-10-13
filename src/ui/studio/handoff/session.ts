@@ -2,9 +2,11 @@
  * Hand-off UI session (memory only): which planned item the companion is
  * working on, whether the companion is open / collapsed / floating in a
  * Picture-in-Picture window, the item shown in staging, per-item progress
- * (preparing the export, lining up a returned image), the change maps of
- * fresh imports (heatmap — not persisted), the Downloads watcher and the
- * "Import copied image?" offer. Persisted state lives on Generation.planned.
+ * (preparing the export, lining up a returned image), the import extras
+ * of staged results (a hot cache: the checks, outside boxes and a small
+ * change map are also saved on the staged result and restored by staging
+ * after a reload), the Downloads watcher and the "Import copied image?"
+ * offer. Persisted state lives on Generation.planned.
  */
 import { create } from 'zustand';
 import type { PlannedRef } from './planned';
@@ -15,6 +17,12 @@ export interface ImportExtras {
   changeMap: { width: number; height: number; data: Uint8Array };
   /** Photo-px boxes of notable outside changes. */
   blobs: { x: number; y: number; w: number; h: number; area: number }[];
+  /** Why feature alignment wasn't trusted (shown when the result was fitted by size only). */
+  alignNote?: string;
+  /** Wrong-image check: nothing changed inside the area (the original or an older image came back). */
+  unchanged?: boolean;
+  /** Gemini result whose bottom-right sparkle lands inside the kept area. */
+  watermark?: boolean;
 }
 
 export interface ItemJob {
@@ -42,6 +50,8 @@ export interface HandoffSessionState {
   clipboardOffer: boolean;
   /** Something is being dragged over a drop zone (files or a link). */
   dragging: boolean;
+  /** Project the items above belong to (switching projects forgets them). */
+  projectId: string | null;
 }
 
 export const useHandoffSession = create<HandoffSessionState>()(() => ({
@@ -55,9 +65,23 @@ export const useHandoffSession = create<HandoffSessionState>()(() => ({
   watch: { on: false, available: null, dir: null, error: null },
   clipboardOffer: false,
   dragging: false,
+  projectId: null,
 }));
 
 export const setHandoffSession = (patch: Partial<HandoffSessionState>): void => useHandoffSession.setState(patch);
+
+/**
+ * Called with the open project's id: when it changed, the session forgets
+ * the old project's items (the companion closes; the watcher status stays).
+ */
+export function syncHandoffProject(projectId: string | null): void {
+  const s = handoffSession();
+  if (s.projectId === projectId) return;
+  const first = s.projectId === null && !s.active && !s.staging;
+  setHandoffSession(
+    first ? { projectId } : { projectId, active: null, staging: null, jobs: {}, extras: {}, errors: {}, clipboardOffer: false, companion: 'closed' },
+  );
+}
 export const handoffSession = (): HandoffSessionState => useHandoffSession.getState();
 
 /** Makes `ref` the companion's item and opens the companion (unless it floats in PiP). */

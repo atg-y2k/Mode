@@ -5,21 +5,28 @@
  * protected"), a toggleable heatmap of what the model changed outside the
  * target (dropped by the composite), and Accept / Reject / Retry with a
  * stricter prompt / Skip, plus one-line fix prompts to paste into the same
- * chat. Replaces the viewer while open (like the compare grid).
+ * chat. Also says why a result was fitted by size only (alignment note),
+ * flags a return that changed nothing inside the area (the original or an
+ * older image came back — Accept then asks first) and a Gemini sparkle
+ * that landed inside the area. Replaces the viewer while open (like the
+ * compare grid).
  */
-import { Check, Columns2, Copy, Flame, RotateCcw, ShieldAlert, SkipForward, Trash2, X } from 'lucide-react';
+import { Check, Columns2, Copy, Flame, ImageOff, RotateCcw, ShieldAlert, SkipForward, Trash2, X } from 'lucide-react';
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { createPortal } from 'react-dom';
-import type { HandoffApp, Photo } from '../../../../shared/types';
+import type { HandoffApp, Photo, PlannedVariation } from '../../../../shared/types';
 import { fixPromptsFor, markerColorName } from '../../../handoff';
+import { blobToImageData } from '../../../lib/imageImport';
+import * as db from '../../../state/persistence';
 import { findPhoto, findVariation, useStore } from '../../../state/store';
-import { cn } from '../../common';
+import { cn, ConfirmModal } from '../../common';
 import { useBlobUrl, useElementSize } from '../hooks';
-import { acceptStaged, closeStaging, rejectStaged, retryStricter, skipPlanned } from './actions';
+import { acceptStaged, closeStaging, rejectStaged, retryStricter, skipPlanned, UNCHANGED_MESSAGE } from './actions';
 import { AlignmentBadge, AppIcon, useFlash } from './bits';
 import { eventWindow, writeText } from './clipboard';
-import { alignmentSummary, appLabel, findPlanned, type PlannedRef } from './planned';
-import { useHandoffSession, type ImportExtras } from './session';
+import { openElement } from '../actions';
+import { alignmentSummary, appLabel, changesTouchArea, findPlanned, footprintHint, type PlannedRef } from './planned';
+import { handoffSession, setExtras, useHandoffSession, type ImportExtras } from './session';
 
 function fitBox(areaW: number, areaH: number, aspect: number): { w: number; h: number } {
   if (areaW <= 0 || areaH <= 0) return { w: 0, h: 0 };
@@ -190,6 +197,40 @@ function FixChip({ text, label }: { text: string; label: string }) {
   );
 }
 
+/**
+ * The import's evidence for a result reviewed after a reload (the session
+ * cache is gone): the persisted change map (decoded from its small PNG) and
+ * outside-change boxes go back into the session, so the heatmap toggle and
+ * the badge's "N areas" come back. False when there is nothing to restore.
+ */
+async function restoreExtras(plannedId: string, staged: NonNullable<PlannedVariation['staged']>): Promise<boolean> {
+  const review = staged.review;
+  if (!review) return false;
+  let changeMap: ImportExtras['changeMap'] | null = null;
+  if (review.changeMapId) {
+    try {
+      const blob = await db.getBlob(review.changeMapId);
+      if (blob) {
+        const img = await blobToImageData(blob);
+        const data = new Uint8Array(img.width * img.height);
+        for (let i = 0; i < data.length; i++) data[i] = img.data[i * 4];
+        changeMap = { width: img.width, height: img.height, data };
+      }
+    } catch {
+      // Unreadable map: the boxes and checks still come back.
+    }
+  }
+  if (handoffSession().extras[plannedId]) return true; // a fresh import meanwhile
+  setExtras(plannedId, {
+    changeMap: changeMap ?? { width: 0, height: 0, data: new Uint8Array(0) },
+    blobs: review.blobs,
+    ...(review.alignNote ? { alignNote: review.alignNote } : {}),
+    ...(staged.checks?.unchanged ? { unchanged: true } : {}),
+    ...(staged.checks?.watermark ? { watermark: true } : {}),
+  });
+  return true;
+}
+
 /** Below this size of the photo pane, staging opens as a full-window overlay (phones, short laptop screens). */
 const MIN_INLINE = { width: 560, height: 520 };
 
@@ -219,8 +260,17 @@ function StagingContent({ photo, stagingRef }: { photo: Photo; stagingRef: Plann
   const extras = useHandoffSession((s) => s.extras[stagingRef.plannedId]);
   const [slider, setSlider] = useState(true);
   const [heat, setHeat] = useState(false);
+  const [confirmAccept, setConfirmAccept] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const staged = found?.planned.staged;
   const interior = useStore((s) => findPhoto(s.project, photo.id)?.space.kind === 'interior');
+
+  // Reviewed after a reload: bring the import's evidence (heatmap, outside areas) back from the saved record.
+  const stagedImage = staged?.imageId;
+  useEffect(() => {
+    if (!staged || extras) return;
+    void restoreExtras(stagingRef.plannedId, staged);
+  }, [stagingRef.plannedId, stagedImage]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // The item was accepted / rejected elsewhere (strip, PiP) or the run deleted.
   useEffect(() => {
@@ -242,10 +292,23 @@ function StagingContent({ photo, stagingRef }: { photo: Photo; stagingRef: Plann
   if (!found || !staged) return null;
   const { planned, generation } = found;
   const report = staged.source.alignment;
-  const summary = report ? alignmentSummary(report, extras?.blobs.length) : null;
+  const summary = report ? alignmentSummary(report, extras?.blobs.length ?? staged.review?.blobs.length) : null;
   const app = staged.source.app;
   const beforeId = (generation.baseVariationId ? findVariation(photo, generation.baseVariationId)?.imageId : undefined) ?? photo.imageId;
   const fixes = fixPromptsFor(app ?? 'chatgpt', interior, markerColorName(planned.handoff?.markerColor ?? ''));
+  // Persisted on the staged result (still flagged after a reload); the session copy for imports from before that.
+  const unchanged = !!(staged.checks?.unchanged ?? extras?.unchanged);
+  const watermark = !!(staged.checks?.watermark ?? extras?.watermark);
+  const alignNote = staged.review?.alignNote ?? extras?.alignNote;
+  const hasHeat = !!extras && extras.changeMap.width > 0;
+  // Why the alignment wasn't trusted (engine's note), after the usual advice.
+  const detail = summary && report && !report.aligned && alignNote ? `${summary.detail} Reason: ${alignNote.replace(/[.\s]+$/, '')}.` : summary?.detail;
+  // Warnings and alignment notes are never cut short on phones; the rest can be expanded.
+  const clampable = summary?.tone !== 'warning' && !alignNote;
+  const accept = () => (unchanged ? setConfirmAccept(true) : acceptStaged(stagingRef));
+  // A wider / curvier choice that ran past the area: the brief needs room, not a stricter prompt.
+  const grew = footprintHint(generation.brief, report, changesTouchArea(extras?.blobs ?? staged.review?.blobs, generation.target, photo) ?? true);
+  const suggestStricter = !!summary?.suggestStricter && !grew;
 
   return (
     <div className="flex h-full w-full flex-col bg-stage text-white">
@@ -264,7 +327,7 @@ function StagingContent({ photo, stagingRef }: { photo: Photo; stagingRef: Plann
           </h2>
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-1.5">
-          {report && <AlignmentBadge report={report} areas={extras?.blobs.length} tone="stage" />}
+          {report && <AlignmentBadge report={report} areas={extras?.blobs.length ?? staged.review?.blobs.length} tone="stage" />}
           <div className="flex gap-0.5 rounded-lg bg-white/10 p-0.5">
             <button
               type="button"
@@ -275,13 +338,21 @@ function StagingContent({ photo, stagingRef }: { photo: Photo; stagingRef: Plann
             >
               <Columns2 className="size-3.5" /> <span className="max-sm:sr-only">Before / after</span>
             </button>
-            {extras && (
+            {(hasHeat || report) && (
               <button
                 type="button"
-                aria-pressed={heat}
+                aria-pressed={hasHeat && heat}
+                disabled={!hasHeat}
                 onClick={() => setHeat((x) => !x)}
-                title="Where the model changed things outside the outline (all of it was put back from your photo)"
-                className={cn('inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-xs font-medium', heat ? 'bg-white text-black' : 'text-white/85 hover:bg-white/15')}
+                title={
+                  hasHeat
+                    ? 'Where the model changed things outside the outline (all of it was put back from your photo)'
+                    : 'The change map of this result is not available (it is kept with results imported from now on)'
+                }
+                className={cn(
+                  'inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-xs font-medium disabled:opacity-45',
+                  hasHeat && heat ? 'bg-white text-black' : 'text-white/85 enabled:hover:bg-white/15',
+                )}
               >
                 <Flame className="size-3.5" /> <span className="max-sm:sr-only">Changes outside</span>
               </button>
@@ -307,25 +378,69 @@ function StagingContent({ photo, stagingRef }: { photo: Photo; stagingRef: Plann
           afterThumbId={staged.thumbId}
           extras={extras}
           showSlider={slider}
-          showHeat={heat}
+          showHeat={heat && hasHeat}
           app={app}
         />
       </div>
 
       <div className="flex flex-col gap-2.5 px-4 pt-2.5 pb-3 sm:px-5">
+        {unchanged && (
+          <p className="flex items-start gap-2 rounded-lg bg-warning/25 px-3 py-2 text-xs leading-relaxed text-white" role="alert">
+            <ImageOff className="mt-px size-4 shrink-0 text-gold" />
+            <span>
+              <b className="font-semibold">{UNCHANGED_MESSAGE}</b> Bring back the new picture instead
+              {app === 'gemini' ? ' — in Gemini, open the edited image and use Download full size.' : ' — download or copy the edited image from the chat.'}
+            </span>
+          </p>
+        )}
         {summary && (
-          <p
-            className={cn('flex items-start gap-1.5 text-xs leading-relaxed max-sm:line-clamp-2', summary.tone === 'warning' ? 'text-gold' : 'text-white/70')}
-            title={summary.detail}
-          >
+          <p className={cn('flex items-start gap-1.5 text-xs leading-relaxed', summary.tone === 'warning' ? 'text-gold' : 'text-white/70')} title={detail}>
             {summary.tone === 'warning' && <ShieldAlert className="mt-px size-3.5 shrink-0" />}
-            {summary.detail}
+            <span className="min-w-0">
+              {/* Clamp an inner span (line-clamp conflicts with the paragraph's flex); phones can expand it. */}
+              <span className={cn(clampable && !expanded && 'max-sm:line-clamp-2')}>{detail}</span>
+              {clampable && (
+                <button
+                  type="button"
+                  onClick={() => setExpanded((x) => !x)}
+                  aria-expanded={expanded}
+                  className="font-medium text-white/85 underline-offset-2 hover:underline sm:hidden"
+                >
+                  {expanded ? 'Less' : 'More'}
+                </button>
+              )}
+            </span>
+          </p>
+        )}
+        {grew && (
+          <p className="flex items-start gap-1.5 text-xs leading-relaxed text-white/80" role="note">
+            <ShieldAlert className="mt-px size-3.5 shrink-0 text-gold" />
+            <span>
+              {grew.message}{' '}
+              <button
+                type="button"
+                onClick={() => {
+                  closeStaging();
+                  openElement(grew.elementId);
+                }}
+                className="font-semibold text-white underline-offset-2 hover:underline"
+              >
+                Open it in the brief
+              </button>
+            </span>
+          </p>
+        )}
+        {watermark && (
+          <p className="flex items-start gap-1.5 text-xs leading-relaxed text-white/70">
+            <ShieldAlert className="mt-px size-3.5 shrink-0 text-gold" />
+            The area reaches the bottom-right corner, so a Gemini sparkle watermark there stays in the result.
           </p>
         )}
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
-            onClick={() => acceptStaged(stagingRef)}
+            onClick={accept}
+            title={unchanged ? 'Nothing seems to have changed in the area — Mode asks before keeping it' : undefined}
             className="inline-flex h-10 items-center gap-2 rounded-xl bg-white px-4 text-sm font-semibold text-black shadow-lg hover:bg-white/90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
           >
             <Check className="size-4" /> Accept
@@ -335,7 +450,7 @@ function StagingContent({ photo, stagingRef }: { photo: Photo; stagingRef: Plann
             onClick={() => void retryStricter(stagingRef)}
             className={cn(
               'inline-flex h-10 items-center gap-2 rounded-xl px-3.5 text-sm font-medium',
-              summary?.suggestStricter ? 'bg-gold/90 text-black hover:bg-gold' : 'bg-white/10 text-white hover:bg-white/20',
+              suggestStricter ? 'bg-gold/90 text-black hover:bg-gold' : 'bg-white/10 text-white hover:bg-white/20',
             )}
             title="Discard this result and prepare the same variation with a stricter prompt (start a new chat)"
             aria-label="Retry with a stricter prompt"
@@ -362,6 +477,15 @@ function StagingContent({ photo, stagingRef }: { photo: Photo; stagingRef: Plann
             <SkipForward className="size-4" /> Skip
           </button>
         </div>
+        <ConfirmModal
+          open={confirmAccept}
+          onClose={() => setConfirmAccept(false)}
+          title="Keep an unchanged image?"
+          message={`${UNCHANGED_MESSAGE} Keep it as a variation anyway?`}
+          confirmLabel="Keep it anyway"
+          danger={false}
+          onConfirm={() => acceptStaged(stagingRef, { force: true })}
+        />
         {fixes.length > 0 && (
           <div className="flex min-w-0 items-center gap-2">
             <span className="shrink-0 text-[11px] text-white/55">Fix in the same chat:</span>

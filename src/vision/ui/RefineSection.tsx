@@ -4,16 +4,30 @@
  * exact masks, with per-area agreement), and "Map the scene without AI" when
  * Claude is off. One primary action, progress with the download size, clear
  * fallbacks when the browser can't run the models, and the SegFormer
- * license note.
+ * licence: an explicit opt-in before its first use (NVIDIA non-commercial
+ * weights), remembered on this device and changeable under "Models &
+ * licenses". Declined, everything still works with the Apache-2.0 models.
  */
-import { CircleAlert, Cpu, MousePointerClick, ScanSearch, WandSparkles, X } from 'lucide-react';
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { CircleAlert, Cpu, ExternalLink, MousePointerClick, ScanSearch, ShieldAlert, WandSparkles, X } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { findPhoto, isSketchZone, useStore } from '../../state/store';
 import { Badge, Button, Section, cn } from '../../ui/common';
 import { cancelVision, formatMB, MODELS, taskDownload, visionBackend, visionUnsupportedReason, type VisionStatus } from '../index';
+import { SEGFORMER_LICENSE, setSegformerChoice, type SegformerChoice } from '../license';
+import { modelBytes } from '../models';
 import { agreementLevel } from '../scoring';
-import { refreshCachedModels, useCachedModels, useVisionStatus } from './hooks';
-import { mapSceneOffline, sharpenableZones, sharpenOutlines, useVisionJobs, type VisionJob, type ZoneOutcome } from './jobs';
+import { refreshCachedModels, useCachedModels, useSegformerChoice, useVisionStatus } from './hooks';
+import {
+  dismissSegformerConsent,
+  mapSceneOffline,
+  resolveSegformerConsent,
+  sharpenableZones,
+  sharpenOutlines,
+  useVisionJobs,
+  type PendingConsent,
+  type VisionJob,
+  type ZoneOutcome,
+} from './jobs';
 import { startTapSelect } from './tapSelect';
 
 export function RefineSection({ photoId }: { photoId: string }) {
@@ -21,6 +35,8 @@ export function RefineSection({ photoId }: { photoId: string }) {
   const space = useStore((s) => findPhoto(s.project, photoId)?.space);
   const health = useStore((s) => s.health);
   const job = useVisionJobs((s) => s.job);
+  const consent = useVisionJobs((s) => (s.consent?.photoId === photoId ? s.consent : null));
+  const segformer = useSegformerChoice();
   const outcome = useVisionJobs((s) => s.outcomes[photoId]);
   const error = useVisionJobs((s) => s.errors[photoId]);
   const status = useVisionStatus();
@@ -62,6 +78,8 @@ export function RefineSection({ photoId }: { photoId: string }) {
         </Note>
       ) : myJob ? (
         <JobProgress job={myJob} status={status} />
+      ) : consent && !segformer ? (
+        <SegformerConsent consent={consent} cached={cached} />
       ) : (
         <>
           {scene && sharpenable.length > 0 && (
@@ -99,7 +117,7 @@ export function RefineSection({ photoId }: { photoId: string }) {
           )}
         </>
       )}
-      <LicenseNote />
+      <LicenseNote choice={segformer} />
     </Section>
   );
 }
@@ -294,12 +312,85 @@ function Note({ icon, children }: { icon: ReactNode; children: ReactNode }) {
   );
 }
 
-function LicenseNote() {
+/**
+ * The SegFormer licence, shown before its first use (C5): what the NVIDIA
+ * licence allows, what works without it, and an explicit choice. The parked
+ * action runs right after either answer.
+ */
+function SegformerConsent({ consent, cached }: { consent: PendingConsent; cached: Partial<Record<string, boolean>> | null }) {
+  const seg = MODELS.segformer;
+  const backend = visionBackend();
+  const size = cached?.segformer ? null : formatMB(modelBytes('segformer', backend?.backend ?? 'wasm', backend?.f16 ?? false));
+  const what = consent.action === 'map' ? 'map the scene' : 'sharpen the outlines';
+  // The action may have been parked from the photo ("Map on this device") with the
+  // question below the fold: bring the whole card into view and move focus to it
+  // (the card, not "Agree", so nothing nudges towards accepting the licence).
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const id = requestAnimationFrame(() => {
+      el.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' });
+      el.focus({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(id);
+  }, [consent.photoId, consent.action]);
+  return (
+    <div
+      ref={ref}
+      role="group"
+      aria-labelledby="mode-segformer-title"
+      tabIndex={-1}
+      className="flex flex-col gap-2.5 rounded-xl border border-warning/40 bg-warning/10 px-3 py-3 outline-none"
+    >
+      <div className="flex items-start gap-2">
+        <ShieldAlert className="mt-0.5 size-4 shrink-0 text-warning" aria-hidden />
+        <div className="min-w-0">
+          <p id="mode-segformer-title" className="text-sm font-medium text-text">
+            One question before the first download
+          </p>
+          <p className="mt-1 text-xs leading-relaxed text-text">
+            {seg.name} {seg.purpose}. Its weights are under the{' '}
+            <a href={SEGFORMER_LICENSE.url} target="_blank" rel="noreferrer" className="font-medium text-accent underline-offset-2 hover:underline">
+              {SEGFORMER_LICENSE.name}
+              <ExternalLink className="ml-0.5 inline size-3 align-[-1px]" aria-hidden />
+            </a>
+            : <strong className="font-semibold">{SEGFORMER_LICENSE.summary.replace(/\.$/, '')}</strong>.
+          </p>
+          <p className="mt-1 text-xs leading-relaxed text-muted">{SEGFORMER_LICENSE.detail}</p>
+          <p className="mt-1 text-xs leading-relaxed text-muted">{SEGFORMER_LICENSE.without}</p>
+        </div>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <Button size="sm" variant="primary" className="max-lg:h-9" onClick={() => resolveSegformerConsent('accepted')}>
+          Agree &amp; use SegFormer{size ? ` (+${size})` : ''}
+        </Button>
+        <Button size="sm" variant="secondary" className="max-lg:h-9" onClick={() => resolveSegformerConsent('declined')}>
+          Continue without it
+        </Button>
+        <Button size="sm" variant="ghost" className="max-lg:h-9" onClick={dismissSegformerConsent}>
+          Cancel
+        </Button>
+      </div>
+      <p className="text-[11px] leading-snug text-subtle">
+        Then Mode will {what}. Your answer is remembered on this device — change it any time under “Models &amp; licenses”.
+      </p>
+    </div>
+  );
+}
+
+const CHOICE_TEXT: Record<SegformerChoice | 'unset', string> = {
+  accepted: 'SegFormer in use (licence accepted)',
+  declined: 'SegFormer off — EdgeTAM + CLIPSeg only',
+  unset: 'SegFormer is non-commercial use only',
+};
+
+function LicenseNote({ choice }: { choice: SegformerChoice | null }) {
   const seg = MODELS.segformer;
   return (
     <details className="text-[11px] leading-snug text-subtle">
       <summary className="cursor-pointer select-none hover:text-muted">
-        Models &amp; licenses · <span className="text-muted">SegFormer is non-commercial use only</span>
+        Models &amp; licenses · <span className="text-muted">{CHOICE_TEXT[choice ?? 'unset']}</span>
       </summary>
       <ul className="mt-1.5 flex flex-col gap-1 pl-1">
         {Object.values(MODELS).map((m) => (
@@ -311,8 +402,23 @@ function LicenseNote() {
           </li>
         ))}
         <li>
-          {seg.name} weights are under NVIDIA’s license for non-commercial use — fine for redesigning your own home; don’t use them for paid work. Models
-          download from Hugging Face once and stay in this browser; photos never leave the device.
+          {seg.name}: {SEGFORMER_LICENSE.summary} {SEGFORMER_LICENSE.without} Models download from Hugging Face once and stay in this browser; photos
+          never leave the device.
+        </li>
+        <li className="flex flex-wrap items-center gap-x-2 gap-y-1 pt-0.5">
+          <span className="text-muted">
+            {choice === 'accepted' ? 'You accepted the SegFormer licence.' : choice === 'declined' ? 'You chose not to use SegFormer.' : 'You’ll be asked before SegFormer is first used.'}
+          </span>
+          {choice === 'accepted' && (
+            <button type="button" className="font-medium text-accent hover:underline" onClick={() => setSegformerChoice('declined')}>
+              Stop using it
+            </button>
+          )}
+          {choice === 'declined' && (
+            <button type="button" className="font-medium text-accent hover:underline" onClick={() => setSegformerChoice(null)}>
+              Ask me again
+            </button>
+          )}
         </li>
       </ul>
     </details>

@@ -23,6 +23,14 @@ describe('site formatting', () => {
     expect(formatDistanceKm(0.3)).toBe('<1 km');
   });
 
+  it('shows a frost-free spot as frost-free, not as missing records', () => {
+    const s = frostSummary({ station: 'HILO INTL AP, HI', distanceKm: 2.4, frostFree: true });
+    expect(s.frostFree).toBe(true);
+    expect(s.headline).toBe('Frost-free most years (HILO INTL AP, HI, 2 km)');
+    expect(s.sourceLine).toBe('NOAA 1991–2020 normals · HILO INTL AP, HI (2 km)');
+    expect(frostSummary({ station: 'MIAMI INTL AP, FL', distanceKm: 0.4 }).headline).toBe('Frost-free most years (MIAMI INTL AP, FL, <1 km)');
+  });
+
   it('lists soil facts in plain words', () => {
     expect(soilFacts({ mapUnit: 'Glenelg', drainage: 'well drained', ph: 5.62, clayPct: 18.4, hydroGroup: 'b' })).toEqual([
       { label: 'Drainage', value: 'Well drained' },

@@ -10,6 +10,7 @@ import {
   mentionsPlants,
   positionWords,
   promptContextFromScene,
+  referenceSentences,
   splitSentences,
   subjectPhrase,
   type PromptContext,
@@ -183,6 +184,58 @@ describe('buildHandoffPrompt — ChatGPT (OpenAI phrasing)', () => {
     expect(p).not.toMatch(/outline|marker/i);
     expect(p).toContain('CHANGE: Replace the concrete walkway');
   });
+
+  it('whole-image runs: "Retry with a stricter prompt" really changes the prompt (both apps, no outline wording)', () => {
+    for (const app of ['chatgpt', 'gemini'] as const) {
+      const whole = ctx({ app, markerColorName: '', areaText: '' });
+      const balanced = buildHandoffPrompt({ ...whole, strictness: 'balanced' });
+      const strict = buildHandoffPrompt({ ...whole, strictness: 'strict' });
+      expect(strict, app).not.toBe(balanced);
+      expect(strict).not.toMatch(/outline|marker|area/i);
+      // Packs saved before strictness was recorded are recognised by these leading phrases.
+      expect(strict).toMatch(/Change nothing beyond this request|Make exactly this change and nothing more/);
+      // Scope 'whole' through the scene context too.
+      const fromScene = promptContextFromScene(scene, brief({ scope: 'whole', targetZoneIds: ['walk'] }), ['walk'], { app, instruction: PATH_INSTRUCTION, ratio: '16:9', markerColorName: '', references: [] }, { frame: FRAME });
+      const sBalanced = buildHandoffPrompt({ ...fromScene, strictness: 'balanced' });
+      const sStrict = buildHandoffPrompt({ ...fromScene, strictness: 'strict' });
+      expect(sStrict).not.toBe(sBalanced);
+      expect(sStrict).not.toMatch(/outline/i);
+    }
+  });
+});
+
+describe('buildHandoffPrompt — references and the clean (unmarked) paste', () => {
+  it('the reference sentences the companion shows are exactly the ones in the prompt, in order', () => {
+    const roles = ['the stone in “Bluestone patio”', 'the planting in “Cottage border”'];
+    for (const app of ['chatgpt', 'gemini'] as const) {
+      const p = buildHandoffPrompt(ctx({ app, references: roles.map((role) => ({ role })) }));
+      const lines = referenceSentences(app, roles);
+      expect(lines).toHaveLength(2);
+      expect(lines[0]).toMatch(/^Image 2 /);
+      expect(lines[1]).toMatch(/^Image 3 /);
+      for (const l of lines) expect(p).toContain(l);
+      expect(p.indexOf(lines[0])).toBeLessThan(p.indexOf(lines[1]));
+      expect(p).not.toContain('Image 4');
+    }
+    // No references → no "Image 2".
+    expect(buildHandoffPrompt(ctx())).not.toContain('Image 2');
+    expect(referenceSentences('chatgpt', ['a', 'b', 'c', 'd'])).toHaveLength(3);
+  });
+
+  it('unmarked: names the area in words, never mentions an outline', () => {
+    for (const app of ['chatgpt', 'gemini'] as const) {
+      const p = buildHandoffPrompt(ctx({ app, unmarked: true, strictness: 'creative' }));
+      expect(p, app).not.toMatch(/outline|marker/i);
+      expect(p).toContain('the walkway in the lower center, from the driveway at left to the front door');
+      expect(p).toContain('the rest of the lawn');
+    }
+    const c = buildHandoffPrompt(ctx({ unmarked: true }));
+    expect(c).toContain('CHANGE — only the walkway in the lower center, from the driveway at left to the front door: Replace the concrete walkway');
+    expect(c).toContain('and everything else outside the walkway in the lower center');
+    const g = buildHandoffPrompt(ctx({ app: 'gemini', unmarked: true }));
+    expect(g.startsWith('Using the provided photo of my 1950s ranch house, change only the walkway in the lower center, from the driveway at left to the front door. Replace')).toBe(true);
+    expect(g).toContain('Keep everything else in the image exactly the same, preserving the original style, lighting and composition');
+  });
 });
 
 describe('buildHandoffPrompt — Gemini (semantic masking, narrative)', () => {
@@ -289,6 +342,17 @@ describe('promptContextFromScene', () => {
     const p = buildHandoffPrompt(c);
     expect(p).toContain('It must still lead from the driveway to the front door.');
     expect(p.length).toBeLessThanOrEqual(MAX_PROMPT_CHARS);
+  });
+
+  it('names the lawn beside a wider / curvier walk as part of the change (and stops keeping it)', () => {
+    const plain = promptContextFromScene(scene, brief({ targetZoneIds: ['walk'] }), ['walk'], extras, { frame: FRAME });
+    expect(plain.keep).toContain('the lawn outside the outline');
+    const c = promptContextFromScene(scene, brief({ targetZoneIds: ['walk'] }), ['walk'], extras, { frame: FRAME, roomZoneIds: ['lawn'] });
+    expect(c.areaText).toBe('the concrete walkway to front door in the lower center, and the lawn right beside it (re-lawn where the old walk no longer runs)');
+    expect(c.keep.join(' ')).not.toMatch(/lawn/);
+    expect(buildHandoffPrompt(c)).toContain('the lawn right beside it');
+    // Whole-image edits have no area words to extend.
+    expect(promptContextFromScene(scene, brief({ scope: 'whole' }), [], extras, { frame: FRAME, roomZoneIds: ['lawn'] }).areaText).toBe('');
   });
 
   it('keeps the driveway → door route when the change is elsewhere', () => {

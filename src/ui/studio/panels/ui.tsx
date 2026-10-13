@@ -371,8 +371,27 @@ export function useAiReady(): boolean {
 
 export const CLIMATE_JOB = 'climate';
 
-/** Projects whose climate prompt was dismissed (this session). */
+/** Projects whose climate prompt was dismissed: remembered per project in localStorage, in memory when storage is blocked. */
 const dismissedClimate = new Set<string>();
+const climateDismissKey = (projectId: string) => `mode.climateCallout.dismissed.${projectId}`;
+
+function climateDismissed(projectId: string): boolean {
+  if (dismissedClimate.has(projectId)) return true;
+  try {
+    return localStorage.getItem(climateDismissKey(projectId)) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function dismissClimate(projectId: string): void {
+  dismissedClimate.add(projectId);
+  try {
+    localStorage.setItem(climateDismissKey(projectId), '1');
+  } catch {
+    // storage blocked: remembered for this session only
+  }
+}
 
 /** Looks up the project's climate profile from its ZIP / zone and stores it. */
 export function lookUpClimate(): void {
@@ -396,32 +415,53 @@ export function lookUpClimate(): void {
 }
 
 /**
- * Exterior photos without a climate profile: plant feasibility needs one.
- * With a ZIP or zone on file the profile can be looked up right here,
- * otherwise Settings asks for the ZIP.
+ * Exterior photos without a climate profile. Only shown when there is
+ * something to do: the hardiness zone (from the ZIP table, or typed in
+ * Settings) already rates plant options, so with a zone on file it offers the
+ * AI climate summary (rainfall, frost dates, local notes) when Claude is
+ * available, and stays away when it isn't or NOAA frost dates are on file.
  */
 export function ClimateCallout({ setting, className }: { setting: 'interior' | 'exterior'; className?: string }) {
   const projectId = useStore((s) => s.project?.id);
   const location = useStore((s) => s.project?.location);
   const aiReady = useAiReady();
   const job = useAiJob(CLIMATE_JOB);
-  const [dismissed, setDismissed] = useState(() => !!projectId && dismissedClimate.has(projectId));
+  const [dismissed, setDismissed] = useState(() => !!projectId && climateDismissed(projectId));
   if (setting !== 'exterior' || !location || location.climate || dismissed) return null;
   if (job?.status === 'running') return <AiProgress job={job} hint="Hardiness zone, frost dates and rainfall for your area." className={className} />;
-  const hasPlace = !!(location.zip?.trim() || location.hardinessZone?.trim());
+  const zone = location.hardinessZone?.trim();
+  const zip = location.zip?.trim();
+  // Same "climate known" rule as the prompt dock: a zone already drives the plant ratings.
+  if (zone && (!aiReady || location.site?.frost)) return null;
+  const canLookUp = aiReady && !!(zip || zone);
+  let title: string;
+  let text: string;
+  if (zone) {
+    title = 'Check plants against your climate';
+    text = `Plant options are already rated for zone ${zone}. Look up a climate summary to add rainfall, frost dates and local notes (deer, soil).`;
+  } else if (zip && aiReady) {
+    title = 'Check plants against your climate';
+    text = `Mode knows your ZIP (${zip}) but not your climate yet. A climate profile lets every plant option show whether it will thrive here.`;
+  } else if (zip) {
+    title = 'Add your hardiness zone';
+    text = 'Type your hardiness zone in Settings so plant options are rated for it.';
+  } else {
+    title = 'Add your ZIP code for plants that thrive';
+    text = 'Plant options are rated for your hardiness zone, frost dates and rainfall — Mode needs your ZIP code to know them.';
+  }
   return (
     <div className={cn('flex flex-col gap-2', className)}>
       <AiJobStatus jobKey={CLIMATE_JOB} onRetry={lookUpClimate} />
       <Callout
         tone="accent"
         icon={<MapPin className="size-4" aria-hidden />}
-        title={hasPlace ? 'Check plants against your climate' : 'Add your ZIP code for plants that thrive'}
+        title={title}
         onDismiss={() => {
-          if (projectId) dismissedClimate.add(projectId);
+          if (projectId) dismissClimate(projectId);
           setDismissed(true);
         }}
         action={
-          hasPlace && aiReady ? (
+          canLookUp ? (
             <>
               <Button size="sm" className="max-lg:h-9" variant="primary" onClick={lookUpClimate}>
                 Look up climate
@@ -432,14 +472,12 @@ export function ClimateCallout({ setting, className }: { setting: 'interior' | '
             </>
           ) : (
             <Button size="sm" className="max-lg:h-9" variant="primary" onClick={() => openSettings('project')}>
-              {hasPlace ? 'Open project settings' : 'Add ZIP code'}
+              {zip ? 'Open project settings' : 'Add ZIP code'}
             </Button>
           )
         }
       >
-        {hasPlace
-          ? `Mode knows your ${location.zip?.trim() ? `ZIP (${location.zip.trim()})` : `zone (${location.hardinessZone?.trim()})`} but not your climate yet. A climate profile lets every plant option show whether it will thrive here.`
-          : 'Plant options are rated for your hardiness zone, frost dates and rainfall — Mode needs your ZIP code to know them.'}
+        {text}
       </Callout>
     </div>
   );

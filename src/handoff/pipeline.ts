@@ -18,7 +18,7 @@ import { growMask } from '../engine/mask';
 import type { ImageDataLike, Mask } from '../engine/types';
 import { alignFeatures, type AlignResult } from './alignCore';
 import { BAND_EDGE_THRESHOLD, compositeBand, distanceSquared, isWholeCoverage, markerMarginPhotoPx, maskCoverageShare } from './bands';
-import { applyChannelFit, fitChannels, IDENTITY_FIT, meanDeltaE, type ChannelFit } from './colorMatch';
+import { applyChannelFit, fitChannels, IDENTITY_FIT, meanDeltaE, medianDeltaE, type ChannelFit } from './colorMatch';
 import { outsideChanges } from './changeMap';
 import type { CvLike } from './cv';
 import {
@@ -40,6 +40,35 @@ export const ALIGN_EDGE = 1024;
 export const CHANGE_EDGE = 512;
 /** Margin (working px) masked around the target on the original for feature detection. */
 export const ALIGN_TARGET_MARGIN = 20;
+/** Wrong-image check: a median ΔE inside the target below this means "nothing changed there"… */
+export const UNCHANGED_DELTA_E = 3;
+/** …when it is also below this multiple of the median ΔE outside (the re-encoding / drift floor). */
+export const UNCHANGED_RATIO = 1.5;
+
+/**
+ * Did the returned image change the target at all? Gemini's "Download full
+ * size" sometimes saves the uploaded original or an older image; pasting
+ * the export back by mistake looks the same. Medians are of CIE76 ΔE
+ * between the starting image and the aligned, colour-corrected result.
+ */
+export interface InsideCheck {
+  /** Median ΔE inside the target (the whole frame for whole-image edits). */
+  medianInside: number;
+  /** Median ΔE on protected pixels outside the target (0 when there are none). */
+  medianOutside: number;
+  /** True when the area looks unchanged: medianInside < 3 and < 1.5 × medianOutside (whole-image edits: < 3). */
+  unchanged: boolean;
+}
+
+/** Below this median ΔE the area is pixel-identical (a bit-exact copy of the export came back). */
+const IDENTICAL_DELTA_E = 0.5;
+
+/** The wrong-image rule (see InsideCheck); `medianOutside` null = nothing outside to compare with. */
+export function looksUnchanged(medianInside: number, medianOutside: number | null): boolean {
+  if (!(medianInside < UNCHANGED_DELTA_E)) return false;
+  // A bit-exact copy has ΔE 0 inside and out: identical counts as unchanged too.
+  return medianOutside === null || medianInside < UNCHANGED_RATIO * medianOutside || medianInside < IDENTICAL_DELTA_E;
+}
 
 export interface ImportResult {
   /** Final image at photo size: original outside the target, the returned edit inside (aligned, color-corrected, feathered). */
@@ -55,6 +84,8 @@ export interface ImportResult {
   colorFit?: ChannelFit;
   /** Why feature alignment was not trusted ('' when aligned). */
   alignNote?: string;
+  /** Wrong-image check: did anything change inside the target? */
+  insideCheck?: InsideCheck;
 }
 
 export interface ImportJob {
@@ -68,6 +99,13 @@ export interface ImportJob {
   outH: number;
   /** The decoded image the user brought back. */
   returned: ImageDataLike;
+  /**
+   * Area the wrong-image check compares (photo size; default: the target).
+   * A target that includes room beside the element (a wider path may spill
+   * onto the lawn) passes the element's own area, so an unchanged lawn
+   * doesn't make a real edit look like the original came back.
+   */
+  inside?: Mask;
 }
 
 export type ImportStage = 'aligning' | 'compositing';
@@ -280,6 +318,19 @@ export function runImport(cv: CvLike | null, job: ImportJob, onStage?: (stage: I
     } else driftAfter = driftBefore;
   }
 
+  // 4b. Wrong-image check, on the aligned and corrected result (before compositing).
+  const insideMask = job.inside && job.inside.width === W && job.inside.height === H ? job.inside : target;
+  const insideC = regionMask(insideMask, crop);
+  const insideSamples = sampleIndices(n, (i) => valid.data[i] === 255 && (whole || insideC[i] >= 128), 40_000);
+  const outsideSamples = samples.length >= 500 ? sampleIndices(n, (i) => isProtected[i] === 255, 40_000) : null;
+  const medianInside = medianDeltaE(origC, corrected, insideSamples);
+  const medianOutside = outsideSamples ? medianDeltaE(origC, corrected, outsideSamples) : null;
+  const insideCheck: InsideCheck = {
+    medianInside: Math.round(medianInside * 100) / 100,
+    medianOutside: Math.round((medianOutside ?? 0) * 100) / 100,
+    unchanged: insideSamples.length >= 50 && looksUnchanged(medianInside, medianOutside),
+  };
+
   // 5. Feathered composite inside the band.
   const out = new Uint8ClampedArray(original.data);
   const cd = corrected.data;
@@ -359,5 +410,6 @@ export function runImport(cv: CvLike | null, job: ImportJob, onStage?: (stage: I
     transform: M,
     colorFit: fit,
     alignNote: align.accepted ? '' : align.reason,
+    insideCheck,
   };
 }

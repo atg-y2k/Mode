@@ -2,6 +2,10 @@
  * NOAA NCEI U.S. Climate Normals 1991–2020: frost (32 °F freeze) dates for
  * the nearest station that has freeze-probability normals.
  *
+ * The site profile reads them from the bundled station table first
+ * (freezeTable.ts, built from the NCEI archive by scripts/build-frost-data.mjs)
+ * and uses the services below only when that table can't be read.
+ *
  * Data (public domain, no key):
  * - Station inventory: inventory_30yr.txt (every 1991–2020 normals station
  *   with coordinates, ~1.3 MB fixed-width text). Fetched once and cached on
@@ -25,8 +29,9 @@
  *   freeDays     = PRBGSL FP50 (median freeze-free season length, days)
  * Special values (-9999 etc.) mean "not computable": either no freeze in most
  * years (season ≥ 365 days → a frost-free climate) or freezes possible in any
- * month (mountain tops). A frost-free nearest station means the spot has no
- * frost dates; a too-cold station is skipped in favour of the next one.
+ * month (mountain tops). A frost-free nearest station gives the spot a
+ * frost section without dates (`frostFree: true`); a too-cold station is
+ * skipped in favour of the next one.
  */
 import type { SiteProfile } from '../../shared/types';
 
@@ -158,10 +163,18 @@ function parseDays(raw: unknown): number | null {
   return Number.isFinite(n) && n >= 0 && n <= 366 ? Math.round(n) : null;
 }
 
-/** "ROCKVILLE 1 NE, MD US" → "ROCKVILLE 1 NE, MD". */
+/**
+ * "ROCKVILLE 1 NE, MD US" → "ROCKVILLE 1 NE, MD"; the FIPS code of a U.S.
+ * territory goes too ("TOA BAJA LEVITTOWN, PR RQ" → "…, PR"). Other
+ * countries keep theirs ("EGBERT 1 W, ON CA").
+ */
 export function formatStationName(raw: unknown): string | null {
   if (typeof raw !== 'string') return null;
-  const name = raw.trim().replace(/\s+/g, ' ').replace(/,? US$/, '');
+  const name = raw
+    .trim()
+    .replace(/\s+/g, ' ')
+    .replace(/,? US$/, '')
+    .replace(/(, [A-Z]{2}) (RQ|VQ|GQ|AQ|CQ)$/, '$1');
   return name || null;
 }
 
@@ -192,7 +205,7 @@ export function parseNormalsResponse(json: unknown): Map<string, FreezeRecord> {
 /**
  * Picks the station whose frost dates represent the spot: the nearest one
  * with freeze normals. Its dates are used; if it is frost-free (no freeze in
- * most years) the spot gets no frost dates; a station too cold to compute
+ * most years) the spot is frost-free (no dates); a station too cold to compute
  * dates (freezes in any month) is skipped. `candidates` must be nearest first
  * and `records` must cover every candidate passed (missing = no normals).
  */
@@ -210,11 +223,27 @@ export function chooseFrostStation(
   return { kind: 'none' };
 }
 
+/** "ROCKVILLE 1 NE, MD" from the data service, else the inventory name and state. */
+function stationLabel(station: NormalsStation, record: FreezeRecord | null): string {
+  if (record?.name) return record.name;
+  if (!station.name) return station.id;
+  return station.state ? `${station.name}, ${station.state}` : station.name;
+}
+
+/**
+ * SiteProfile.frost for a frost-free nearest station (no 32 °F freeze in a
+ * typical year: dates not computable, median freeze-free season 365 days).
+ * No dates: the spot has no frost season to plan around.
+ */
+export function frostFreeSection(choice: Extract<FrostChoice, { kind: 'frost-free' }>): NonNullable<SiteProfile['frost']> {
+  return { station: stationLabel(choice.station, choice.record), distanceKm: Math.round(choice.km * 10) / 10, frostFree: true };
+}
+
 /** SiteProfile.frost for a chosen station. */
 export function frostSection(choice: Extract<FrostChoice, { kind: 'dates' }>): NonNullable<SiteProfile['frost']> {
   const { station, km, record } = choice;
   const frost: NonNullable<SiteProfile['frost']> = {
-    station: record.name ?? (station.state ? `${station.name}, ${station.state}` : station.name),
+    station: stationLabel(station, record),
     distanceKm: Math.round(km * 10) / 10,
     lastSpring50: record.lastSpring50 as string,
     firstFall50: record.firstFall50 as string,

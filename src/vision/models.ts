@@ -95,7 +95,7 @@ export function formatMB(bytes: number): string {
   return mb >= 10 ? `${Math.round(mb)} MB` : `${mb.toFixed(1)} MB`;
 }
 
-/** Models each task needs. */
+/** Models each task needs (with SegFormer allowed). */
 export const TASK_MODELS = {
   refine: ['edgetam', 'segformer'],
   select: ['edgetam'],
@@ -103,3 +103,21 @@ export const TASK_MODELS = {
   mapInterior: ['segformer', 'edgetam'],
 } as const satisfies Record<string, readonly ModelKey[]>;
 export type VisionTask = keyof typeof TASK_MODELS;
+
+/**
+ * Models a task needs. Without SegFormer (its non-commercial licence was
+ * declined) sharpening runs on EdgeTAM alone and the offline map uses
+ * CLIPSeg for every class, indoors too.
+ */
+export function taskModels(task: VisionTask, semantic: boolean): ModelKey[] {
+  const models: ModelKey[] = [...TASK_MODELS[task]];
+  if (semantic) return models;
+  const out = models.filter((k) => k !== 'segformer');
+  if ((task === 'mapExterior' || task === 'mapInterior') && !out.includes('clipseg')) out.unshift('clipseg');
+  return out;
+}
+
+/** True when the task would use SegFormer if allowed (so its licence must be decided first). */
+export function taskUsesSegformer(task: VisionTask): boolean {
+  return (TASK_MODELS[task] as readonly ModelKey[]).includes('segformer');
+}

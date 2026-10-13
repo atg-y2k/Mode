@@ -6,7 +6,6 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { API_PATHS, ApiErrorBodySchema } from '../../shared/api';
 import { createApp } from '../app';
 import { testConfig } from '../config';
-import { acceptEventStreamToken, moveEventStreamToken } from './eventStreamToken';
 import { registerHandoffRoutes, type HandoffDeps } from './routes';
 import { JPEG_BYTES, PNG_BYTES, fakeWatchFactory, waitFor, type FakeFsWatcher } from './testing';
 import { DownloadsWatcher } from './watcher';
@@ -90,6 +89,29 @@ describe('watch status and on/off', () => {
     expect(fsw().closed).toBe(true);
   });
 
+  it('says how to grant access when macOS blocks the Downloads folder (EPERM)', async () => {
+    const blocked = new DownloadsWatcher({
+      dir,
+      watchFactory: factory,
+      platform: 'darwin',
+      probeDir: () => {
+        throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' });
+      },
+      log: () => undefined,
+    });
+    const app = new Hono();
+    registerHandoffRoutes(app, { watcher: blocked, accessTokenRequired: false, isLocalRequest: () => true, log: () => undefined });
+    const status = (await (await app.request(API_PATHS.handoffWatch)).json()) as Record<string, unknown>;
+    expect(status).toMatchObject({ available: false, on: false });
+    expect(status.reason).toMatch(/System Settings → Privacy & Security → Files & Folders/);
+    const res = await post(app, API_PATHS.handoffWatch, { on: true });
+    expect(res.status).toBe(409);
+    expect(ApiErrorBodySchema.parse(await res.json()).error.message).toMatch(/Files & Folders/);
+    expect(blocked.on).toBe(false);
+    expect(factory.instances).toHaveLength(0);
+    await blocked.close();
+  });
+
   it('validates the body and refuses other methods', async () => {
     const app = makeApp();
     const bad = await post(app, API_PATHS.handoffWatch, { on: 'yes' });
@@ -103,7 +125,9 @@ describe('watch status and on/off', () => {
   it('explains a missing Downloads folder', async () => {
     rmSync(dir, { recursive: true, force: true });
     const app = makeApp();
-    expect(await (await app.request(API_PATHS.handoffWatch)).json()).toEqual({ available: false, dir: null, on: false });
+    const status = (await (await app.request(API_PATHS.handoffWatch)).json()) as Record<string, unknown>;
+    expect(status).toMatchObject({ available: false, dir: null, on: false });
+    expect(status.reason).toMatch(/doesn't exist any more.*HANDOFF_WATCH_DIR/);
     const res = await post(app, API_PATHS.handoffWatch, { on: true });
     expect(res.status).toBe(409);
     expect(ApiErrorBodySchema.parse(await res.json()).error.message).toMatch(/HANDOFF_WATCH_DIR/);
@@ -111,7 +135,9 @@ describe('watch status and on/off', () => {
 
   it('keeps the watcher to this computer unless an access token guards the server', async () => {
     const remote = makeApp({ isLocalRequest: () => false });
-    expect(await (await remote.request(API_PATHS.handoffWatch)).json()).toEqual({ available: false, dir: null, on: false });
+    const remoteStatus = (await (await remote.request(API_PATHS.handoffWatch)).json()) as Record<string, unknown>;
+    expect(remoteStatus).toMatchObject({ available: false, dir: null, on: false });
+    expect(remoteStatus.reason).toMatch(/computer running Mode/);
     for (const res of [
       await post(remote, API_PATHS.handoffWatch, { on: true }),
       await remote.request(API_PATHS.handoffEvents),
@@ -256,43 +282,97 @@ describe('events stream and announced files', () => {
   });
 });
 
-describe('access token for the event stream', () => {
+describe('access token for the event stream (single-use tickets)', () => {
+  const TOKEN = 's3cret-token';
   function tokenApp() {
+    const lines: string[] = [];
+    let now = 1_000_000;
     const app = createApp({
-      config: testConfig({ accessToken: 's3cret-token' }),
+      config: testConfig({ accessToken: TOKEN }),
       claude: null,
       imageProvider: null,
-      log: () => undefined,
+      log: (line) => lines.push(line),
+      now: () => now,
       extraRoutes: (api) => {
         registerHandoffRoutes(api, { watcher, accessTokenRequired: true, log: () => undefined });
-        acceptEventStreamToken(api);
       },
     });
-    return app;
+    const ticket = async (headers: Record<string, string> = { 'x-mode-token': TOKEN }) => {
+      const res = await app.request(API_PATHS.handoffEventsTicket, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: '{}' });
+      return { res, ticket: res.ok ? ((await res.json()) as { ticket: string }).ticket : null };
+    };
+    return { app, lines, ticket, advance: (ms: number) => (now += ms) };
   }
 
-  it('accepts ?token= on the events endpoint only, compared by the host middleware', async () => {
-    const app = tokenApp();
-    const ok = await app.request(`${API_PATHS.handoffEvents}?token=s3cret-token`);
+  it('issues tickets only with the header, as unguessable, uncached strings', async () => {
+    const { ticket } = tokenApp();
+    expect((await ticket({})).res.status).toBe(401);
+    expect((await ticket({ 'x-mode-token': 'wrong' })).res.status).toBe(401);
+    const a = await ticket();
+    expect(a.res.status).toBe(200);
+    expect(a.res.headers.get('cache-control')).toBe('no-store');
+    expect(a.ticket).toMatch(/^[A-Za-z0-9_-]{43}$/); // 256 bits, base64url
+    const b = await ticket();
+    expect(b.ticket).not.toBe(a.ticket);
+  });
+
+  it('opens the stream once per ticket; reused, expired, unknown tickets and ?token= get 401', async () => {
+    const { app, ticket, advance } = tokenApp();
+    const { ticket: t1 } = await ticket();
+    const ok = await app.request(`${API_PATHS.handoffEvents}?ticket=${t1}`);
     expect(ok.status).toBe(200);
     expect(ok.headers.get('content-type')).toMatch(/text\/event-stream/);
     await ok.body?.cancel();
-    expect((await app.request(`${API_PATHS.handoffEvents}?token=wrong`)).status).toBe(401);
+    // Single use: the browser's own auto-reconnect replays the URL and is refused.
+    expect((await app.request(`${API_PATHS.handoffEvents}?ticket=${t1}`)).status).toBe(401);
+
+    const { ticket: t2 } = await ticket();
+    advance(60_001);
+    expect((await app.request(`${API_PATHS.handoffEvents}?ticket=${t2}`)).status).toBe(401);
+
+    expect((await app.request(`${API_PATHS.handoffEvents}?ticket=${'A'.repeat(43)}`)).status).toBe(401);
+    expect((await app.request(`${API_PATHS.handoffEvents}?ticket=`)).status).toBe(401);
     expect((await app.request(API_PATHS.handoffEvents)).status).toBe(401);
-    expect((await app.request(`${API_PATHS.handoffWatch}?token=s3cret-token`)).status).toBe(401);
-    expect((await app.request(API_PATHS.handoffWatch, { headers: { 'x-mode-token': 's3cret-token' } })).status).toBe(200);
+    // The long-lived token is never accepted in a URL.
+    expect((await app.request(`${API_PATHS.handoffEvents}?token=${TOKEN}`)).status).toBe(401);
+    expect((await app.request(`${API_PATHS.handoffWatch}?token=${TOKEN}`)).status).toBe(401);
+    // The header still works on the stream.
+    const header = await app.request(API_PATHS.handoffEvents, { headers: { 'x-mode-token': TOKEN } });
+    expect(header.status).toBe(200);
+    await header.body?.cancel();
   });
 
-  it('moves the token out of the URL and lets a header win', () => {
-    const moved = moveEventStreamToken(new Request(`http://localhost${API_PATHS.handoffEvents}?token=abc&since=4`));
-    expect(moved.headers.get('x-mode-token')).toBe('abc');
-    expect(new URL(moved.url).search).toBe('?since=4');
-    const header = moveEventStreamToken(
-      new Request(`http://localhost${API_PATHS.handoffEvents}?token=abc`, { headers: { 'x-mode-token': 'from-header' } }),
-    );
-    expect(header.headers.get('x-mode-token')).toBe('from-header');
-    const other = new Request(`http://localhost${API_PATHS.siteProfile}?token=abc`);
-    expect(moveEventStreamToken(other)).toBe(other);
+  it('only opens GET /api/handoff/events: other paths and methods refuse a ticket', async () => {
+    const { app, ticket } = tokenApp();
+    const { ticket: t } = await ticket();
+    expect((await app.request(`${API_PATHS.handoffWatch}?ticket=${t}`)).status).toBe(401);
+    expect((await app.request(`${API_PATHS.handoffFile}?id=${'a'.repeat(20)}&ticket=${t}`)).status).toBe(401);
+    expect((await app.request(`${API_PATHS.handoffEvents}?ticket=${t}`, { method: 'POST' })).status).toBe(401);
+    expect((await app.request(`${API_PATHS.handoffEventsTicket}?ticket=${t}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status).toBe(401);
+    // Still valid for the stream itself (unused so far).
+    const ok = await app.request(`${API_PATHS.handoffEvents}?ticket=${t}`);
+    expect(ok.status).toBe(200);
+    await ok.body?.cancel();
+  });
+
+  it('lets a header win, keeps ?since= working next to ?ticket= and keeps secrets out of the log', async () => {
+    const { app, lines, ticket } = tokenApp();
+    const { ticket: t } = await ticket();
+    // A header, when sent, is what counts (a wrong one is not rescued by a valid ticket).
+    expect((await app.request(`${API_PATHS.handoffEvents}?ticket=${t}`, { headers: { 'x-mode-token': 'nope' } })).status).toBe(401);
+    const replay = await app.request(`${API_PATHS.handoffEvents}?since=0&ticket=${t}`);
+    expect(replay.status).toBe(200);
+    await replay.body?.cancel();
+    expect(lines.length).toBeGreaterThan(0);
+    expect(lines.join('\n')).not.toContain(TOKEN);
+    expect(lines.join('\n')).not.toContain(t);
+  });
+
+  it('keeps at most 64 outstanding tickets (oldest evicted)', async () => {
+    const { app, ticket } = tokenApp();
+    const first = (await ticket()).ticket;
+    for (let i = 0; i < 64; i++) await ticket();
+    expect((await app.request(`${API_PATHS.handoffEvents}?ticket=${first}`)).status).toBe(401);
   });
 });
 

@@ -42,8 +42,10 @@ export type WorkerRequest =
   | { id: number; op: 'setImage'; photoId: string; width: number; height: number; data: Uint8ClampedArray }
   | { id: number; op: 'encode'; photoId: string }
   | { id: number; op: 'segment'; photoId: string; prompt: PromptInput; maxSize?: number; rank?: number }
-  | { id: number; op: 'refine'; photoId: string; zones: RefineZoneInput[]; context: RefineZoneInput[] }
-  | { id: number; op: 'offlineMap'; photoId: string; interior: boolean }
+  /** semantic: SegFormer may be used (its licence accepted); false = EdgeTAM only, validated by outline overlap. */
+  | { id: number; op: 'refine'; photoId: string; zones: RefineZoneInput[]; context: RefineZoneInput[]; semantic: boolean }
+  /** semantic false = map with CLIPSeg prompts only (no SegFormer). */
+  | { id: number; op: 'offlineMap'; photoId: string; interior: boolean; semantic: boolean }
   | { id: number; op: 'kindOf'; photoId: string; mask: Uint8Array; width: number; height: number; interior: boolean }
   | { id: number; op: 'forget'; photoId: string };
 
@@ -72,6 +74,8 @@ export interface OfflineMapResult {
   zones: OfflineZone[];
   category: SpaceType;
   usedClip: boolean;
+  /** False when the map came from CLIPSeg alone. */
+  usedSegformer: boolean;
 }
 
 export interface WorkerStatus {

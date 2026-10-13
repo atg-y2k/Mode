@@ -11,7 +11,6 @@ import { serve } from '@hono/node-server';
 import type { Context } from 'hono';
 import { createApp, type AppEnv } from './app';
 import { loadConfig } from './config';
-import { acceptEventStreamToken } from './handoff/eventStreamToken';
 import { createHandoffDepsFromEnv, registerHandoffRoutes } from './handoff/routes';
 import { registerSiteRoutes } from './site/routes';
 import { createStudioDepsFromEnv, registerStudioRoutes } from './studio/routes';
@@ -51,8 +50,10 @@ const app = createApp({
     });
     // Frost dates (NOAA), soil (USDA) and ecoregion (EPA), cached under .cache/site/.
     registerSiteRoutes(api, { log: ctx.log });
-    // EventSource can't send x-mode-token: the event stream takes ?token= instead.
-    acceptEventStreamToken(api);
+    // EventSource can't send x-mode-token: the client trades the header for a
+    // single-use, 60-second ticket (POST /api/handoff/events-ticket) and opens
+    // the hand-off event stream with ?ticket= (checked by createApp's auth
+    // middleware). The long-lived token never goes in a URL.
   },
 });
 
@@ -66,6 +67,9 @@ const server = serve(
       : 'off';
     console.log(`[mode] server listening on http://${host}:${info.port}`);
     console.log(`[mode] AI: ${ai} · image providers: ${images} · access token: ${config.accessToken ? 'required' : 'not required'}`);
+    if (Array.isArray(config.allowedHosts) && config.allowedHosts.length) {
+      console.log(`[mode] also answers to: ${config.allowedHosts.join(', ')} (MODE_ALLOWED_HOSTS)`);
+    }
     console.log(
       config.staticDir
         ? `[mode] serving the web app from ${config.staticDir}`

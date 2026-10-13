@@ -71,15 +71,22 @@ export function describeIdeaItem(id: string): void {
 /** Adds inspiration images (each downscaled, with a thumb and its colors); describes them with AI when it is on. */
 export async function addImageIdeas(files: File[], spaceIds: string[]): Promise<number> {
   let added = 0;
+  // Imports are slow: stop (instead of filling another project) when the user opens a different one meanwhile.
+  const pid = state().project?.id;
   const images = files.filter(isImageFile);
   if (images.length < files.length) state().notify('Only image files can go on the idea board.', 'info');
   for (const file of images) {
+    if (state().project?.id !== pid) break;
     try {
       const imported = await importImageFile(file, { maxSize: IDEA_IMAGE_MAX });
+      if (state().project?.id !== pid) break;
       const colors = await paletteOf(imported.thumb);
       const title = titleFromFileName(file.name);
       const id = await state().addIdeaItem({ kind: 'image', title, note: '', colors, spaceIds, active: true }, { image: imported.blob, thumb: imported.thumb });
-      if (!id) continue;
+      if (!id) {
+        if (state().project?.id !== pid) break;
+        continue;
+      }
       added++;
       autoTitles.set(id, title);
       if (aiUsable(aiAvailability(state().health))) describeIdeaItem(id);
@@ -87,7 +94,7 @@ export async function addImageIdeas(files: File[], spaceIds: string[]): Promise<
       state().notify(`${file.name}: ${errorText(err)}`, 'error');
     }
   }
-  if (added > 0) state().notify(added === 1 ? 'Added to your idea board.' : `${added} images added to your idea board.`, 'success');
+  if (added > 0 && state().project?.id === pid) state().notify(added === 1 ? 'Added to your idea board.' : `${added} images added to your idea board.`, 'success');
   return added;
 }
 
@@ -118,6 +125,7 @@ export async function addThemeIdea(theme: DesignTheme, spaceIds: string[]): Prom
  * description. Image problems don't block adding it.
  */
 export async function addProductIdea(product: ProductResult, spaceIds: string[], signal?: AbortSignal): Promise<string | null> {
+  const pid = state().project?.id;
   let blobs: { image: Blob; thumb: Blob } | undefined;
   let colors: string[] = [];
   if (product.imageUrl) {
@@ -131,7 +139,8 @@ export async function addProductIdea(product: ProductResult, spaceIds: string[],
       // Keep the product without a picture.
     }
   }
-  if (signal?.aborted) return null;
+  // Another project opened while the image downloaded: the product was meant for the previous one.
+  if (signal?.aborted || state().project?.id !== pid) return null;
   const item: Omit<IdeaItem, 'id' | 'createdAt'> = {
     kind: 'product',
     title: product.name.trim() || 'Store product',

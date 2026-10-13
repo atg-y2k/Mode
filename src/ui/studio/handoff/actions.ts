@@ -6,17 +6,19 @@
  */
 import type { Draft } from 'immer';
 import { newId } from '../../../../shared/ids';
-import type { Generation, HandoffApp, PlannedVariation, Variation } from '../../../../shared/types';
-import { importHandoffResult, type ImportProgress } from '../../../handoff';
+import type { Generation, HandoffApp, HandoffPack, HandoffPackGeometry, PlannedVariation, Variation } from '../../../../shared/types';
+import { importHandoffResult, targetTouchesWatermark, type ImportProgress } from '../../../handoff';
 import { imageDataToBlob } from '../../../lib/imageImport';
 import * as db from '../../../state/persistence';
 import { findPhoto, useStore } from '../../../state/store';
+import { firstPendingPlanned } from '../panels/historyTree';
 import { thumbnailBlob } from '../composite';
 import { errorMessage, retryRun } from '../generate';
-import { readHandoffLog, wasSent } from './log';
-import { dropPack, ensurePack, forgetRunCaches, lookupPlanned, runAssets, warmPack } from './pack';
+import { readHandoffLog, wasSent, type HandoffLogEntry } from './log';
+import { dropPack, ensurePack, lookupPlanned, runAssets, warmPack } from './pack';
 import { appLabel, assignTargets, isPending, projectPendingHandoffs, rollupStatus, sameRef, type PendingItem, type PlannedRef } from './planned';
 import { focusHandoff, handoffSession, setExtras, setHandoffSession, setItemError, setJob } from './session';
+import { runCoreMask } from './target';
 
 const store = () => useStore.getState();
 
@@ -59,6 +61,27 @@ export function openHandoff(ref: PlannedRef, opts: { open?: boolean } = {}): voi
   }
 }
 
+/**
+ * Opens the companion on a run's pending items (History → "Open hand-off",
+ * via the `mode:open-handoff` event): its first item still waiting for a
+ * hand-off, else the first one waiting in staging. False when the run is
+ * gone or has nothing pending.
+ */
+export function openRunHandoff(generationId: string): boolean {
+  const project = store().project;
+  for (const sp of project?.spaces ?? []) {
+    for (const ph of sp.photos) {
+      const g = ph.generations.find((x) => x.id === generationId);
+      if (!g) continue;
+      const plannedId = firstPendingPlanned(g);
+      if (!plannedId) return false;
+      openHandoff({ photoId: ph.id, generationId, plannedId });
+      return true;
+    }
+  }
+  return false;
+}
+
 export function openStaging(ref: PlannedRef): void {
   const s = store();
   if (s.selection.photoId !== ref.photoId) s.selectPhoto(ref.photoId);
@@ -91,8 +114,9 @@ export function retryPrepare(ref: PlannedRef): void {
 
 const MAX_IMPORT_BYTES = 40 * 1024 * 1024;
 
-const IMPORT_STAGES: Partial<Record<ImportProgress, string>> = {
-  loading: 'Reading the image…',
+/** Staged progress messages of an import (importHandoffResult's onProgress). */
+export const IMPORT_STAGES: Record<ImportProgress, string> = {
+  loading: 'Reading the image (the first import also loads the alignment engine)…',
   aligning: 'Lining the result up with your photo…',
   compositing: 'Protecting everything outside the outline…',
 };
@@ -101,10 +125,91 @@ function looksLikeImage(blob: Blob): boolean {
   return blob.type === '' || blob.type.startsWith('image/');
 }
 
+/** A pack whose outline no longer matches the run's target (prepared before the area changed). */
+export const OUTLINE_CHANGED_MESSAGE =
+  'The outlined area of this run changed since it was prepared. Prepare it again (the new photo will show the current outline) before bringing an image back.';
+
+class OutlineChangedError extends Error {}
+
+/** What an import needs from a pack: where the export came from and how it was framed. */
+type ImportGeometry = Pick<HandoffPack, 'app' | 'crop' | 'outW' | 'outH' | 'markerColor'>;
+
+/** Items being imported right now (the re-entrancy guard; the jobs map is only for the spinner). */
+const importing = new Set<string>();
+
+/** Whether the item was sent to an app other than `prev.app` after its waiting items were switched. */
+function sentAfterSwitch(log: readonly HandoffLogEntry[], plannedId: string, prev: HandoffPackGeometry): boolean {
+  return log.some((e) => e.plannedId === plannedId && e.app !== prev.app && e.at >= prev.switchedAt);
+}
+
+/** Aspect ratio of a returned image (null when it can't be read here). */
+async function imageAspect(blob: Blob): Promise<number | null> {
+  if (typeof createImageBitmap !== 'function') return null;
+  try {
+    const bitmap = await createImageBitmap(blob);
+    const aspect = bitmap.width / Math.max(1, bitmap.height);
+    bitmap.close();
+    return aspect;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The pack a returned image was made from. An item that was already sent
+ * when its waiting items moved to the other app keeps that pack's geometry
+ * (handoffPrev): the result comes from the old app — unless the item was
+ * sent to the new app too; then the image's aspect picks the closer export.
+ */
+async function packForImport(ref: PlannedRef, planned: PlannedVariation, blob: Blob): Promise<ImportGeometry> {
+  const prev = planned.handoffPrev;
+  if (prev && !sentAfterSwitch(readHandoffLog(), planned.id, prev)) return prev;
+  const current = planned.handoff ?? (await ensurePack(ref));
+  if (!prev) return current;
+  const aspect = await imageAspect(blob);
+  if (aspect === null) return current;
+  const off = (g: ImportGeometry) => Math.abs(Math.log(aspect / (g.outW / Math.max(1, g.outH))));
+  return off(prev) < off(current) ? prev : current;
+}
+
+/** Long edge of the persisted change map (the heatmap after a reload). */
+const CHANGE_MAP_EDGE = 256;
+
+/** The outside-change map as a small grayscale PNG for the blob store (null when it can't be encoded here). */
+async function changeMapPng(map: { width: number; height: number; data: Uint8Array }): Promise<Blob | null> {
+  if (map.width <= 0 || map.height <= 0) return null;
+  const k = Math.min(1, CHANGE_MAP_EDGE / Math.max(map.width, map.height));
+  const w = Math.max(1, Math.round(map.width * k));
+  const h = Math.max(1, Math.round(map.height * k));
+  const data = new Uint8ClampedArray(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    const sy = Math.min(map.height - 1, Math.floor(y / k));
+    for (let x = 0; x < w; x++) {
+      const v = map.data[sy * map.width + Math.min(map.width - 1, Math.floor(x / k))];
+      const o = (y * w + x) * 4;
+      data[o] = data[o + 1] = data[o + 2] = v;
+      data[o + 3] = 255;
+    }
+  }
+  try {
+    return await imageDataToBlob({ width: w, height: h, data }, 'image/png');
+  } catch {
+    return null;
+  }
+}
+
+/** Blob ids a staged result owns (image, thumb, change map). */
+export function stagedBlobIds(staged: PlannedVariation['staged']): string[] {
+  if (!staged) return [];
+  return [staged.imageId, staged.thumbId, ...(staged.review?.changeMapId ? [staged.review.changeMapId] : [])];
+}
+
 /**
  * Lines a returned image up with the photo and stages it on the item:
  * the composite (original outside the target) becomes the staged result,
- * replacing an earlier one. Returns false when it failed (shown on the item).
+ * replacing an earlier one. The target is the run's frozen one — the
+ * outline the user pasted — and the pack the one the image came from
+ * (packForImport). Returns false when it failed (shown on the item).
  */
 export async function importInto(ref: PlannedRef, blob: Blob, origin?: string): Promise<boolean> {
   const found = lookupPlanned(ref);
@@ -117,58 +222,100 @@ export async function importInto(ref: PlannedRef, blob: Blob, origin?: string): 
     store().notify('That image is too large to import (over 40 MB).', 'error');
     return false;
   }
-  if (handoffSession().jobs[ref.plannedId]?.kind === 'importing') {
+  // Checked and set before any await: a second paste / drop / Downloads file for this item waits its turn.
+  if (importing.has(ref.plannedId)) {
     store().notify(`Still lining up the previous image for “${found.planned.title}” — try again in a moment.`, 'info');
     return false;
   }
+  importing.add(ref.plannedId);
   setItemError(ref.plannedId, null);
-  setJob(ref.plannedId, { kind: 'importing', message: 'Lining the result up with your photo…' });
+  setJob(ref.plannedId, { kind: 'importing', message: IMPORT_STAGES.loading });
   let ids: string[] = [];
   try {
-    const pack = found.planned.handoff ?? (await ensurePack(ref));
-    setJob(ref.plannedId, { kind: 'importing', message: 'Lining the result up with your photo…' });
-    const { photo, generation } = found;
+    const pack = await packForImport(ref, found.planned, blob);
+    setJob(ref.plannedId, { kind: 'importing', message: IMPORT_STAGES.loading });
+    const { photo, generation } = lookupPlanned(ref) ?? found;
     const assets = await runAssets(photo, generation);
-    const result = await importHandoffResult(photo, assets.base, assets.target, pack, blob, undefined, (stage) =>
-      setJob(ref.plannedId, { kind: 'importing', message: IMPORT_STAGES[stage] ?? 'Lining the result up with your photo…' }),
+    // A pack drawn with an outline is never composited as a whole-image edit.
+    if (assets.wholeImage && pack.markerColor) throw new OutlineChangedError(OUTLINE_CHANGED_MESSAGE);
+    // With room beside a wider / curvier element, the wrong-image check looks at the element's own area.
+    const inside = await runCoreMask(photo, generation).catch(() => null);
+    const result = await importHandoffResult(
+      photo,
+      assets.base,
+      assets.target,
+      pack,
+      blob,
+      undefined,
+      (stage) => setJob(ref.plannedId, { kind: 'importing', message: IMPORT_STAGES[stage] ?? IMPORT_STAGES.aligning }),
+      { inside },
     );
     setJob(ref.plannedId, { kind: 'importing', message: 'Saving the result…' });
-    const [full, thumb] = await Promise.all([imageDataToBlob(result.composite, 'image/jpeg', 0.9), thumbnailBlob(result.composite)]);
+    const [full, thumb, map] = await Promise.all([
+      imageDataToBlob(result.composite, 'image/jpeg', 0.9),
+      thumbnailBlob(result.composite),
+      changeMapPng(result.outsideChangeMap),
+    ]);
     const imageId = newId('img');
     const thumbId = newId('img');
-    ids = [imageId, thumbId];
-    await Promise.all([db.putBlob(imageId, full), db.putBlob(thumbId, thumb)]);
+    const changeMapId = map ? newId('img') : undefined;
+    ids = [imageId, thumbId, ...(changeMapId ? [changeMapId] : [])];
+    await Promise.all([db.putBlob(imageId, full), db.putBlob(thumbId, thumb), ...(map && changeMapId ? [db.putBlob(changeMapId, map)] : [])]);
     const still = lookupPlanned(ref);
     if (!still || still.planned.status === 'done' || still.planned.status === 'rejected') {
       void db.deleteBlobs(ids);
       return false;
     }
+    const unchanged = !!result.insideCheck?.unchanged;
+    // Gemini's sparkle survives only where the composite keeps the returned pixels.
+    const watermark = pack.app === 'gemini' && (assets.wholeImage || targetTouchesWatermark(assets.target, pack.crop));
+    const alignNote = result.report.aligned ? '' : result.alignNote || '';
     const old = still.planned.staged;
     withPlanned(ref, (p) => {
       p.status = 'staged';
-      p.staged = { imageId, thumbId, source: { kind: 'handoff', app: pack.app, importedAt: Date.now(), alignment: result.report } };
+      p.staged = {
+        imageId,
+        thumbId,
+        source: { kind: 'handoff', app: pack.app, importedAt: Date.now(), alignment: result.report },
+        // Persisted: after a reload staging still flags a wrong image (and asks before keeping it) and shows the evidence.
+        checks: {
+          unchanged,
+          watermark,
+          ...(result.insideCheck ? { insideMedian: result.insideCheck.medianInside, outsideMedian: result.insideCheck.medianOutside } : {}),
+        },
+        review: { ...(changeMapId ? { changeMapId } : {}), blobs: result.outsideBlobs, ...(alignNote ? { alignNote } : {}) },
+      };
       delete p.error;
     });
-    if (old) void db.deleteBlobs([old.imageId, old.thumbId]);
-    setExtras(ref.plannedId, { changeMap: result.outsideChangeMap, blobs: result.outsideBlobs });
+    if (old) void db.deleteBlobs(stagedBlobIds(old));
+    setExtras(ref.plannedId, { changeMap: result.outsideChangeMap, blobs: result.outsideBlobs, alignNote, unchanged, watermark });
     openStaging(ref);
-    if (origin) store().notify(origin, 'info');
+    if (unchanged) store().notify(UNCHANGED_MESSAGE, 'error');
+    else if (origin) store().notify(origin, 'info');
     return true;
   } catch (err) {
     if (ids.length) void db.deleteBlobs(ids);
     const message = errorMessage(err);
+    // Prepared with an outline the run no longer has: "Try again" prepares it afresh.
+    if (err instanceof OutlineChangedError) dropPack(ref);
     setItemError(ref.plannedId, message);
     store().notify(`Couldn't import that image: ${message}`, 'error');
     return false;
   } finally {
+    importing.delete(ref.plannedId);
     setJob(ref.plannedId, null);
   }
 }
 
+/** Wrong-image check (Gemini's "Download full size" sometimes saves the uploaded original or an older image). */
+export const UNCHANGED_MESSAGE = 'This looks like your original or an older image — nothing changed in the area.';
+
 /**
  * Returned images from a paste / drop / file picker / Downloads: one image
- * goes to the active item (else the first waiting one); several are assigned
- * to the waiting items in order. Imports run one after another.
+ * goes to the active item (replacing its staged result), else the first
+ * waiting one; several fill the waiting items in order (the active item's
+ * run first) and never replace a result already back (assignTargets).
+ * Imports run one after another.
  * `preferWaiting`: skip an active item that is already back (staged).
  */
 export async function importBlobs(blobs: Blob[], origin?: string, opts: { preferWaiting?: boolean } = {}): Promise<number> {
@@ -202,12 +349,22 @@ export async function importBlobs(blobs: Blob[], origin?: string, opts: { prefer
 // Staging decisions
 // ---------------------------------------------------------------------------
 
-/** Accept: the staged result becomes a variation of the run (with its provenance) and is shown. */
-export function acceptStaged(ref: PlannedRef): void {
+/**
+ * Accept: the staged result becomes a variation of the run (with its
+ * provenance) and is shown; the item's hand-off exports are freed. A result
+ * flagged as unchanged (the original or an older image came back) is only
+ * kept with `force` (staging asks first). Returns whether it was accepted.
+ */
+export function acceptStaged(ref: PlannedRef, opts: { force?: boolean } = {}): boolean {
   const found = lookupPlanned(ref);
   const staged = found?.planned.staged;
-  if (!found || !staged || found.planned.status !== 'staged') return;
+  if (!found || !staged || found.planned.status !== 'staged') return false;
+  if (staged.checks?.unchanged && !opts.force) {
+    store().notify(`${UNCHANGED_MESSAGE} Confirm in the review to keep it anyway.`, 'error');
+    return false;
+  }
   const { photo, planned } = found;
+  const pack = planned.handoff;
   const variation: Variation = {
     id: newId('var'),
     imageId: staged.imageId,
@@ -228,12 +385,17 @@ export function acceptStaged(ref: PlannedRef): void {
     p.status = 'done';
     p.variationId = variation.id;
     delete p.staged;
+    delete p.handoff;
+    delete p.handoffPrev;
     delete p.error;
   });
+  // The exports were only for pasting; the variation keeps its provenance. The change map isn't kept either.
+  void db.deleteBlobs([...(pack ? [pack.cleanImageId, pack.markedImageId] : []), ...(staged.review?.changeMapId ? [staged.review.changeMapId] : [])]);
   setExtras(ref.plannedId, null);
   setHandoffSession({ staging: null });
   s.setStudio({ viewVariationId: variation.id, gridGenerationId: null });
   advanceAfter(ref, `“${variation.title}” added to your variations.`);
+  return true;
 }
 
 /** Moves the companion on to the next waiting item, or closes it when everything is back. */
@@ -266,24 +428,29 @@ export function rejectStaged(ref: PlannedRef): void {
   withPlanned(ref, (p) => {
     p.status = 'awaiting-handoff';
     delete p.staged;
+    // The next try goes to the item's current app.
+    delete p.handoffPrev;
   });
-  void db.deleteBlobs([staged.imageId, staged.thumbId]);
+  void db.deleteBlobs(stagedBlobIds(staged));
   setExtras(ref.plannedId, null);
   setHandoffSession({ staging: null });
   openHandoff(ref);
   store().notify('Result discarded. Try again in a new chat, or skip this variation.', 'info');
 }
 
-/** Skip: the user doesn't want this variation (staged result discarded). */
+/** Skip: the user doesn't want this variation (staged result and hand-off exports discarded). */
 export function skipPlanned(ref: PlannedRef): void {
   const found = lookupPlanned(ref);
   if (!found || !isPending(found.planned)) return;
   const staged = found.planned.staged;
+  const pack = found.planned.handoff;
   withPlanned(ref, (p) => {
     p.status = 'rejected';
     delete p.staged;
+    delete p.handoff;
+    delete p.handoffPrev;
   });
-  if (staged) void db.deleteBlobs([staged.imageId, staged.thumbId]);
+  void db.deleteBlobs([...stagedBlobIds(staged), ...(pack ? [pack.cleanImageId, pack.markedImageId] : [])]);
   setExtras(ref.plannedId, null);
   if (sameRef(handoffSession().staging, ref)) setHandoffSession({ staging: null });
   advanceAfter(ref, `Skipped “${found.planned.title}”.`);
@@ -297,17 +464,22 @@ export async function retryStricter(ref: PlannedRef): Promise<void> {
   const found = lookupPlanned(ref);
   if (!found) return;
   const staged = found.planned.staged;
+  const before = found.planned.handoff?.prompt;
   withPlanned(ref, (p) => {
     p.status = 'awaiting-handoff';
     delete p.staged;
+    delete p.handoffPrev;
   });
-  if (staged) void db.deleteBlobs([staged.imageId, staged.thumbId]);
+  void db.deleteBlobs(stagedBlobIds(staged));
   setExtras(ref.plannedId, null);
   setHandoffSession({ staging: null });
   focusHandoff(ref);
   try {
-    await ensurePack(ref, { strictness: 'strict' });
-    store().notify('Stricter prompt ready — start a new chat with it, then bring the result back.', 'success');
+    const pack = await ensurePack(ref, { strictness: 'strict' });
+    store().notify(
+      pack.prompt === before ? 'Ready to try again — start a new chat with the same prompt, then bring the result back.' : 'Stricter prompt ready — start a new chat with it, then bring the result back.',
+      'success',
+    );
   } catch (err) {
     store().notify(`Couldn't prepare the stricter prompt: ${errorMessage(err)}`, 'error');
   }
@@ -321,9 +493,29 @@ export async function retryStricter(ref: PlannedRef): Promise<void> {
 export function switchPendingApp(app: HandoffApp): number {
   const s = store();
   s.setStudio({ handoffApp: app });
+  const log = readHandoffLog();
   const moved = pendingItems().filter((i) => i.planned.status === 'awaiting-handoff' && i.planned.handoff?.app !== app);
-  // Prepared items are prepared again for the new app when opened (the companion does it for the active one).
-  for (const item of moved) if (item.planned.handoff) dropPack(item);
+  for (const item of moved) {
+    const pack = item.planned.handoff;
+    // Already pasted into the old app: its result may still come back from there — keep how that export was framed.
+    if (pack && log.some((e) => e.plannedId === item.plannedId && e.app === pack.app)) {
+      const prev: HandoffPackGeometry = {
+        app: pack.app,
+        crop: { ...pack.crop },
+        outW: pack.outW,
+        outH: pack.outH,
+        markerColor: pack.markerColor,
+        ...(pack.ratio ? { ratio: pack.ratio } : {}),
+        switchedAt: Date.now(),
+      };
+      store().updateGeneration(item.photoId, item.generationId, (g) => {
+        const p = g.planned?.find((x) => x.id === item.plannedId);
+        if (p) p.handoffPrev = prev;
+      });
+    }
+    // Prepared again for the new app when opened (the companion does it for the active one); also cancels a preparation in flight.
+    dropPack(item);
+  }
   relabelRuns(moved, app);
   if (moved.length > 0) s.notify(`${moved.length} waiting variation${moved.length === 1 ? '' : 's'} moved to ${appLabel(app)}.`, 'success');
   return moved.length;
@@ -353,50 +545,7 @@ export function unsentItems(): PendingItem[] {
 export function setDefaultHandoffApp(app: HandoffApp): void {
   store().setStudio({ renderMode: 'handoff', handoffApp: app });
   const moved = unsentItems().filter((i) => i.planned.handoff?.app !== app);
-  for (const item of moved) if (item.planned.handoff) dropPack(item);
+  // Also cancels a preparation still in flight for the old app.
+  for (const item of moved) dropPack(item);
   relabelRuns(moved, app);
-}
-
-/** Drops cached pixels and blobs of a deleted hand-off run. */
-export function cleanupRun(g: Generation): void {
-  forgetRunCaches(g.id);
-  const ids: string[] = [];
-  for (const p of g.planned ?? []) {
-    if (p.handoff) ids.push(p.handoff.cleanImageId, p.handoff.markedImageId);
-    if (p.staged) ids.push(p.staged.imageId, p.staged.thumbId);
-    setExtras(p.id, null);
-  }
-  const s = handoffSession();
-  const gone = (ref: PlannedRef | null) => !!ref && ref.generationId === g.id;
-  if (gone(s.active) || gone(s.staging)) setHandoffSession({ active: gone(s.active) ? null : s.active, staging: gone(s.staging) ? null : s.staging });
-  if (ids.length) void db.deleteBlobs(ids);
-}
-
-let gcInstalled = false;
-
-/**
- * Deleting a run (strip, History) removes its variations' blobs in the store;
- * this also removes its hand-off images (prepared exports, staged results).
- * Undo/redo never bring a deleted run back (runs are recorded without history).
- */
-export function installHandoffCleanup(): void {
-  if (gcInstalled) return;
-  gcInstalled = true;
-  useStore.subscribe((s, prev) => {
-    if (s.project?.id !== prev.project?.id) {
-      // Another project (or none): the session's items belong to the old one.
-      setHandoffSession({ active: null, staging: null, jobs: {}, extras: {}, errors: {}, clipboardOffer: false, companion: 'closed' });
-      return;
-    }
-    if (!prev.project || !s.project || s.project === prev.project) return;
-    const next = new Set<string>();
-    for (const sp of s.project.spaces) for (const ph of sp.photos) for (const g of ph.generations) next.add(g.id);
-    for (const sp of prev.project.spaces) {
-      for (const ph of sp.photos) {
-        // A deleted photo / space cleans up its own blobs (persistence.photoReferencedIds).
-        if (!findPhoto(s.project, ph.id)) continue;
-        for (const g of ph.generations) if (!next.has(g.id) && g.planned?.length) cleanupRun(g);
-      }
-    }
-  });
 }

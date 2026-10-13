@@ -1,7 +1,22 @@
 import { describe, expect, it } from 'vitest';
 import { emptyBrief, type DesignBrief, type SceneMap, type ScenePath, type SceneZone } from '../../../shared/types';
 import { createMask } from '../../engine/mask';
-import { blendRadii, briefTargetIds, maskForBrief, maskFromTargets, pathHalfWidthAt, rasterizePath } from './maskFromZones';
+import { newElementSpec } from '../../assets/design';
+import {
+  blendRadii,
+  briefTargetIds,
+  footprintRoom,
+  growChoice,
+  maskForBrief,
+  maskForRunTarget,
+  maskFromTargets,
+  pathHalfWidthAt,
+  rasterizePath,
+  runTargetLost,
+  sceneForRun,
+  snapshotRunTarget,
+  targetFingerprint,
+} from './maskFromZones';
 
 const W = 200;
 const H = 160;
@@ -169,5 +184,122 @@ describe('pathBandOutline', () => {
     expect(Math.max(...near) - Math.min(...near)).toBeCloseTo(30);
     expect(Math.max(...far) - Math.min(...far)).toBeLessThan(30);
     expect(pathBandOutline({ points: [{ x: 1, y: 1 }], widthPx: 10 }, H)).toEqual([]);
+  });
+});
+
+describe('run targets (frozen when a run starts)', () => {
+  const bed = square('bed', 20, 20, 40);
+  const brief: DesignBrief = { ...emptyBrief(), targetZoneIds: ['bed'] };
+
+  it('keep the run’s area when the scene is re-mapped, cleared or the zone deleted', () => {
+    const sc = scene([bed, square('lawn', 100, 100, 40, { kind: 'lawn' })]);
+    const target = snapshotRunTarget(brief, sc, { width: W, height: H })!;
+    expect(target.zones.map((z) => z.id)).toEqual(['bed']);
+    const before = maskForBrief({ width: W, height: H }, sc, brief)!;
+    const frozen = maskForRunTarget({ width: W, height: H }, target)!;
+    expect(Array.from(frozen.data)).toEqual(Array.from(before.data));
+    // Re-map with fresh ids: the live brief resolves nothing any more…
+    const remapped = scene([{ ...bed, id: 'bed-new' }]);
+    expect(maskForBrief({ width: W, height: H }, remapped, brief)).toBeNull();
+    // …the run keeps its own area.
+    expect(Array.from(maskForRunTarget({ width: W, height: H }, target)!.data)).toEqual(Array.from(before.data));
+  });
+
+  it('runs from older saves whose areas are gone are "lost" (never a whole-image edit)', () => {
+    const sc = scene([bed]);
+    expect(runTargetLost({ brief }, sc)).toBe(false);
+    expect(runTargetLost({ brief }, scene([{ ...bed, id: 'bed-new' }]))).toBe(true);
+    expect(runTargetLost({ brief }, undefined)).toBe(true);
+    // Not lost: a frozen snapshot, a whole-image brief, or a brief that never named areas.
+    expect(runTargetLost({ brief, target: { zones: [], paths: [] } }, undefined)).toBe(false);
+    expect(runTargetLost({ brief: { ...brief, scope: 'whole' } }, undefined)).toBe(false);
+    expect(runTargetLost({ brief: emptyBrief() }, undefined)).toBe(false);
+  });
+
+  it('the prompt scene puts the frozen zones back under their own ids and drops their re-mapped twins', () => {
+    const target = snapshotRunTarget(brief, scene([bed]))!;
+    const live = scene([{ ...bed, id: 'bed-new' }, square('lawn', 100, 100, 40, { kind: 'lawn', label: 'Lawn' })]);
+    const s = sceneForRun(live, { target })!;
+    expect(s.zones.map((z) => z.id).sort()).toEqual(['bed', 'lawn']);
+    expect(briefTargetIds(brief, s).zoneIds).toEqual(['bed']);
+  });
+
+  it('fingerprints change with the outline', () => {
+    const a = targetFingerprint(brief, scene([bed]));
+    expect(targetFingerprint(brief, scene([bed]))).toBe(a);
+    expect(targetFingerprint(brief, scene([square('bed', 22, 20, 40)]))).not.toBe(a);
+    expect(targetFingerprint(brief, scene([{ ...bed, maskId: 'msk' }]))).not.toBe(a);
+  });
+});
+
+describe('footprint room (a wider or curvier path needs ground beside the old one)', () => {
+  const PW = 400;
+  const PH = 300;
+  const size = { width: PW, height: PH };
+  const rect = (id: string, kind: SceneZone['kind'], x0: number, y0: number, x1: number, y1: number): SceneZone => ({
+    id,
+    kind,
+    label: id,
+    description: '',
+    polygon: [
+      { x: x0, y: y0 },
+      { x: x1, y: y0 },
+      { x: x1, y: y1 },
+      { x: x0, y: y1 },
+    ],
+    editable: true,
+  });
+  const walkScene = (): SceneMap => ({
+    ...scene([
+      rect('house', 'facade', 0, 0, PW, 120),
+      rect('steps', 'steps', 180, 120, 220, 150),
+      rect('walk', 'walkway', 185, 150, 215, PH),
+      rect('lawn', 'lawn', 0, 150, PW, PH),
+    ]),
+  });
+  const pathway = (choices?: Record<string, string[]>) => {
+    const el = newElementSpec('pathway', walkScene());
+    return { ...el, choices: { ...el.choices, ...choices } };
+  };
+
+  it('the default Pathway (gentle curve, 5 ft) may change the lawn about one walk width to each side — never the house or steps', () => {
+    const el = pathway();
+    expect(el.zoneIds).toEqual(['walk']);
+    expect(growChoice(el)).toBe(true);
+    const brief: DesignBrief = { ...emptyBrief(), elements: [el] };
+    const m = maskForBrief(size, walkScene(), brief)!;
+    expect(at(m, 200, 250)).toBe(255); // the walk
+    // Lawn about one walk width (30 px) to each side.
+    expect(at(m, 185 - 22, 250)).toBe(255);
+    expect(at(m, 215 + 22, 250)).toBeGreaterThan(200);
+    expect(at(m, 185 - 45, 250)).toBe(0);
+    expect(at(m, 120, 250)).toBe(0); // far lawn stays
+    expect(at(m, 60, 60)).toBe(0); // the house
+    expect(at(m, 200, 128)).toBe(0); // the steps
+    const room = footprintRoom(walkScene(), brief, size)!;
+    expect(room.empty).toBe(false);
+    expect(room.room?.zones.map((z) => z.id)).toEqual(['lawn']);
+  });
+
+  it('straight + keep-width: unchanged from the walk outline alone', () => {
+    const brief: DesignBrief = { ...emptyBrief(), elements: [pathway({ shape: ['straight'], width: ['keep-width'] })] };
+    expect(growChoice(brief.elements[0])).toBe(false);
+    const plain = maskFromTargets(PW, PH, [walkScene().zones[2]], [])!;
+    expect(Array.from(maskForBrief(size, walkScene(), brief)!.data)).toEqual(Array.from(plain.data));
+    expect(footprintRoom(walkScene(), brief, size)).toBeNull();
+  });
+
+  it('flags a grown choice with no ground beside it (the UI warns it will be clipped)', () => {
+    const noLawn = { ...walkScene(), zones: walkScene().zones.filter((z) => z.id !== 'lawn') };
+    const brief: DesignBrief = { ...emptyBrief(), elements: [{ ...pathway(), zoneIds: ['walk'] }] };
+    expect(footprintRoom(noLawn, brief, size)).toMatchObject({ empty: true, room: null });
+  });
+
+  it('is frozen with the run (a re-mapped lawn does not change it)', () => {
+    const brief: DesignBrief = { ...emptyBrief(), elements: [pathway()] };
+    const target = snapshotRunTarget(brief, walkScene(), size)!;
+    expect(target.room?.zones.map((z) => z.id)).toEqual(['lawn']);
+    const frozen = maskForRunTarget(size, target)!;
+    expect(Array.from(frozen.data)).toEqual(Array.from(maskForBrief(size, walkScene(), brief)!.data));
   });
 });

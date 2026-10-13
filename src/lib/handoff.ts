@@ -7,8 +7,10 @@
  * from localStorage 'mode.apiToken' goes in the `x-mode-token` header; failures
  * throw ApiError (code 'network' + status 0 when the server wasn't reached,
  * `aborted: true` when the caller cancelled). EventSource can't send headers,
- * so the event stream carries the token as `?token=` instead (the server
- * accepts that on this one endpoint).
+ * and the long-lived token must never travel in a URL (proxies and dev
+ * servers log URLs), so with a token set each event-stream connection first
+ * fetches a single-use, 60-second ticket (POST /api/handoff/events-ticket,
+ * with the header) and opens the stream with `?ticket=`.
  */
 import { API_PATHS, ApiErrorBodySchema } from '../../shared/api';
 import { API_TOKEN_HEADER, API_TOKEN_STORAGE_KEY, ApiError } from './api';
@@ -153,6 +155,25 @@ async function setWatching(on: boolean, opts: { keepalive?: boolean; signal?: Ab
   return { available: body?.available === true, on: body?.on === true };
 }
 
+/**
+ * A single-use ticket (valid for 60 s) that lets this browser open the event
+ * stream once: EventSource can't send the x-mode-token header.
+ */
+export async function fetchEventsTicket(signal?: AbortSignal): Promise<string> {
+  const res = await request(
+    API_PATHS.handoffEventsTicket,
+    { method: 'POST', json: {}, accept: 'application/json' },
+    HANDOFF_TIMEOUTS_MS.status,
+    'Connecting to the Downloads watcher',
+    signal,
+  );
+  const body = (await res.json()) as { ticket?: unknown } | null;
+  if (typeof body?.ticket !== 'string' || !body.ticket) {
+    throw new ApiError('network', "This Mode server doesn't have the hand-off helpers yet — update and restart it.", 404);
+  }
+  return body.ticket;
+}
+
 function parseFile(data: string): DownloadedFile | null {
   try {
     const o = JSON.parse(data) as Record<string, unknown>;
@@ -235,11 +256,42 @@ export function watchDownloads(onFile: (f: DownloadedFile) => void, onError?: (e
       });
   };
 
-  const connect = () => {
+  const lostConnection = () =>
+    new Error('Lost the connection to the Mode server, so the Downloads folder is no longer watched. Turn it on again once the server is running.');
+
+  const retryLater = () => {
+    const delay = Math.min(retryDelayMs * 2 ** manualRetries++, 30_000);
+    retryTimer = setTimeout(() => void connect(), delay);
+  };
+
+  /** A failed request while (re)connecting: keep trying while the server is down (within the window), give up on a refusal. */
+  const retryOrFail = (err: unknown) => {
+    if (stopped) return;
+    failingSince ??= Date.now();
+    if (Date.now() - failingSince > reconnectWindowMs) {
+      fail(lostConnection());
+      return;
+    }
+    // Server down or restarting (no answer, or a dev proxy's 5xx): keep trying; refusals end it.
+    if (err instanceof ApiError && err.code === 'network' && (err.status === 0 || err.status >= 500)) retryLater();
+    else fail(err instanceof Error ? err : new Error(String(err)));
+  };
+
+  const connect = async (): Promise<void> => {
     if (stopped) return;
     const params = new URLSearchParams();
-    const token = readToken();
-    if (token) params.set('token', token);
+    if (readToken()) {
+      // A fresh single-use ticket per connection (the token itself stays out of the URL).
+      let ticket: string;
+      try {
+        ticket = await fetchEventsTicket();
+      } catch (err) {
+        retryOrFail(err);
+        return;
+      }
+      if (stopped) return;
+      params.set('ticket', ticket);
+    }
     if (lastSeq >= 0) params.set('since', String(lastSeq));
     const query = params.toString();
     const es = new ES(query ? `${API_PATHS.handoffEvents}?${query}` : API_PATHS.handoffEvents);
@@ -269,11 +321,13 @@ export function watchDownloads(onFile: (f: DownloadedFile) => void, onError?: (e
       if (stopped || source !== es) return;
       failingSince ??= Date.now();
       if (Date.now() - failingSince > reconnectWindowMs) {
-        fail(new Error('Lost the connection to the Mode server, so the Downloads folder is no longer watched. Turn it on again once the server is running.'));
+        fail(lostConnection());
         return;
       }
-      // CONNECTING: the browser retries by itself. CLOSED: an HTTP error (or a
-      // non-stream answer) — find out why, then retry or give up.
+      // CONNECTING: the browser retries by itself (with a ticket that is used
+      // up, so a token-guarded server answers 401 and the stream goes CLOSED).
+      // CLOSED: an HTTP error (or a non-stream answer) — find out why, then
+      // re-create the stream with a fresh ticket, or give up.
       if (es.readyState !== ES.CLOSED) return;
       closeSource();
       handoffWatchStatus().then(
@@ -283,19 +337,9 @@ export function watchDownloads(onFile: (f: DownloadedFile) => void, onError?: (e
             fail(new Error('This computer has no Downloads folder to watch.'));
             return;
           }
-          const delay = Math.min(retryDelayMs * 2 ** manualRetries++, 30_000);
-          retryTimer = setTimeout(connect, delay);
+          retryLater();
         },
-        (err: unknown) => {
-          if (stopped) return;
-          // Server down or restarting (no answer, or a dev proxy's 5xx): keep trying within the window; refusals end it.
-          if (err instanceof ApiError && err.code === 'network' && (err.status === 0 || err.status >= 500)) {
-            const delay = Math.min(retryDelayMs * 2 ** manualRetries++, 30_000);
-            retryTimer = setTimeout(connect, delay);
-          } else {
-            fail(err instanceof Error ? err : new Error(String(err)));
-          }
-        },
+        retryOrFail,
       );
     };
   };
@@ -304,7 +348,7 @@ export function watchDownloads(onFile: (f: DownloadedFile) => void, onError?: (e
     (st) => {
       if (stopped) return;
       if (!st.available) fail(new Error('This computer has no Downloads folder to watch.'));
-      else connect();
+      else void connect();
     },
     (err: unknown) => fail(err instanceof Error ? err : new Error(String(err))),
   );

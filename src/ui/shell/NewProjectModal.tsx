@@ -190,8 +190,8 @@ function NewProjectForm() {
         {!aiEnabled && (
           <p className="flex items-start gap-2 rounded-lg bg-surface-2 px-3 py-2 text-xs text-muted">
             <Sparkles className="mt-0.5 size-3.5 shrink-0 text-accent" aria-hidden />
-            AI features are off on this server. You can still outline surfaces, try paint, materials, lighting and plants by hand in
-            Fine-tune.
+            Claude is off on this server. You can still map scenes on this device, get photoreal variations by hand-off to your ChatGPT or
+            Gemini app, and use the Fine-tune hand tools. Plans follow a simple template.
           </p>
         )}
       </form>

@@ -138,3 +138,24 @@ export function meanDeltaE(a: ImageDataLike, b: ImageDataLike, samples: Uint32Ar
   for (let k = 0; k < keep; k++) sum += values[k];
   return sum / keep;
 }
+
+/**
+ * Median CIE76 ΔE between `a` and `b` over pixel indices `samples` (0 when
+ * there are none). Robust to a minority of changed pixels — used to tell
+ * "nothing changed here" from a real edit.
+ */
+export function medianDeltaE(a: ImageDataLike, b: ImageDataLike, samples: Uint32Array): number {
+  if (!samples.length) return 0;
+  const la = new Float64Array(3);
+  const lb = new Float64Array(3);
+  const values = new Float32Array(samples.length);
+  for (let k = 0; k < samples.length; k++) {
+    const p = samples[k] * 4;
+    rgb8ToLabInto(a.data[p], a.data[p + 1], a.data[p + 2], la, 0);
+    rgb8ToLabInto(b.data[p], b.data[p + 1], b.data[p + 2], lb, 0);
+    values[k] = Math.hypot(la[0] - lb[0], la[1] - lb[1], la[2] - lb[2]);
+  }
+  values.sort();
+  const mid = values.length >> 1;
+  return values.length % 2 ? values[mid] : (values[mid - 1] + values[mid]) / 2;
+}

@@ -1,6 +1,6 @@
 import { deflateRawSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
-import { buildInvasives, buildZones, parseCsv, readZipEntry } from '../../scripts/build-site-data.mjs';
+import { buildInvasives, buildZones, parseCsv, parsePrismZipCsv, readZipEntry } from '../../scripts/build-site-data.mjs';
 
 /** Minimal ZIP archive writer (local headers + central directory) for the reader test. */
 function makeZip(files: { name: string; data: Buffer; deflate: boolean }[]): Buffer {
@@ -82,6 +82,19 @@ describe('build-site-data', () => {
     expect(out.count).toBe(2);
     expect(out.skipped).toBe(2);
     expect(out.source).toMatch(/not the official USDA map/);
+  });
+
+  it('adds zone-only rows for ZIPs only the PRISM ZIP tables list (C12)', () => {
+    const prism = parsePrismZipCsv(
+      'zipcode,zone,trange,zonetitle\r\n02455,6b,-5 to 0,6b: -5 to 0\r\n20817,7b,5 to 10,7b: 5 to 10\r\n1234,6a,x,x\r\n',
+      '\uFEFFzipcode,zone,trange,zonetitle\n99501,5a,-20 to -15,5a: -20 to -15\n02455,9a,,\n',
+    );
+    expect(prism).toEqual({ '02455': '6b', '20817': '7b', '01234': '6a', '99501': '5a' });
+    const out = buildZones({ zipcodes: { '20817': { zone: '7b', coordinates: { lat: 38.996842, lon: -77.13519 } } } }, prism);
+    expect(out.zips).toEqual({ '01234': ['6a'], '02455': ['6b'], '20817': ['7b', 38.997, -77.135], '99501': ['5a'] });
+    expect(out).toMatchObject({ count: 4, withCentroid: 1, zoneOnly: 3, zoneMismatch: 0 });
+    expect(out.source).toMatch(/PRISM ZIP-code tables; not the official USDA map/);
+    expect(() => parsePrismZipCsv('zip,zone\n1,2')).toThrow(/zipcode/);
   });
 
   it('keeps plants only, merges localities per name and collects synonyms', () => {

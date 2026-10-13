@@ -20,6 +20,7 @@ import {
   Download,
   ExternalLink,
   FolderDown,
+  ImagePlus,
   ImageUp,
   Loader2,
   PictureInPicture2,
@@ -30,24 +31,26 @@ import {
   Upload,
   X,
 } from 'lucide-react';
-import { useEffect, useRef, useState, type DragEvent, type MouseEvent, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type DragEvent, type MouseEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import type { HandoffPack } from '../../../../shared/types';
-import { CHATGPT_URL, chatgptDeepLink, GEMINI_APP_URL } from '../../../handoff';
+import { CHATGPT_URL, chatgptDeepLink, GEMINI_APP_URL, handoffDownloadName, warmUpAlignment } from '../../../handoff';
 import { downloadBlob } from '../../../lib/imageImport';
-import { useStore } from '../../../state/store';
+import { findPhoto, useStore } from '../../../state/store';
 import { cn } from '../../common';
 import { useBlobUrl, useElementSize } from '../hooks';
-import { importBlobs, openHandoff, openStaging, retryPrepare, skipPlanned, switchPendingApp } from './actions';
+import { OPEN_HANDOFF_EVENT, type OpenHandoffDetail } from '../panels/historyTree';
+import { importBlobs, openHandoff, openRunHandoff, openStaging, retryPrepare, skipPlanned, switchPendingApp } from './actions';
 import { AlignmentBadge, AppIcon, useFlash } from './bits';
 import { clipboardAvailable, eventWindow, openAppTab, writeImage, writeText } from './clipboard';
 import { BUSY_DAY, countToday, recordHandoff, useHandoffLog, usageHint } from './log';
 import { usePendingHandoffs } from './hooks';
 import { ClipboardOffer } from './ImportLayer';
-import { ensurePack, packBlob, packPng, warmPack } from './pack';
+import { ensurePack, lookupPlanned, packBlob, packPng, reprepareRun, targetOutlineChanged, warmPack, watermarkRisk } from './pack';
 import { appLabel, otherApp, sameRef, type PendingItem } from './planned';
 import { closeCompanionPip, openCompanionPip, pipSupported } from './pip';
-import { TEMPORARY_CHAT_KEY, setToggle, useToggle, WATCH_DOWNLOADS_KEY } from './prefs';
+import { GEMINI_PLAN_KEY, setPref, setToggle, TEMPORARY_CHAT_KEY, useGeminiPlan, usePasteImage, useToggle, WATCH_DOWNLOADS_KEY, type GeminiPlan } from './prefs';
+import { droppedReferenceCount, handoffReferences, type HandoffReference } from './references';
 import { handoffSession, setHandoffSession, useHandoffSession } from './session';
 import { dragLooksImportable, transferImages } from './sources';
 
@@ -197,31 +200,158 @@ function DownloadsWatch() {
 // Active item
 // ---------------------------------------------------------------------------
 
+/**
+ * Gemini plan warning (C1): Free accounts may only get the Lite image model,
+ * which isn't designed for editing photos — suggest ChatGPT. Nothing for a
+ * Google AI plan (its tip sits with the others).
+ */
+function GeminiPlanNote({ plan, dropped, waiting }: { plan: GeminiPlan | null; dropped: number; waiting: number }) {
+  if (plan === 'paid') return null;
+  return (
+    <div className="flex flex-col gap-1.5 rounded-lg bg-warning/10 px-2.5 py-2 text-[11px] leading-snug text-text" role="note">
+      <span className="flex items-start gap-1.5">
+        <TriangleAlert className="mt-px size-3.5 shrink-0 text-warning" />
+        <span>
+          <b className="font-semibold">{plan === 'free' ? 'Gemini Free' : 'On Gemini’s free plan'}, edits may be weak:</b> free accounts may only get the Lite image model, which isn’t
+          designed for editing photos{dropped > 0 ? ` (your ${dropped} reference image${dropped === 1 ? ' is' : 's are'} left out)` : ''}. ChatGPT usually does better.
+        </span>
+      </span>
+      <span className="flex flex-wrap gap-x-3 gap-y-1 pl-5">
+        {waiting > 0 && (
+          <button type="button" onClick={() => switchPendingApp('chatgpt')} className="font-semibold text-accent hover:underline">
+            Use ChatGPT instead
+          </button>
+        )}
+        <button type="button" onClick={() => setPref(GEMINI_PLAN_KEY, 'paid')} className="font-medium text-muted hover:text-text hover:underline">
+          I have a Google AI plan
+        </button>
+      </span>
+    </div>
+  );
+}
+
+/** H10: the area reaches the corner where Gemini stamps its sparkle, so the composite would keep it. */
+function WatermarkNote() {
+  return (
+    <p className="flex items-start gap-1.5 rounded-lg bg-warning/10 px-2.5 py-2 text-[11px] leading-snug text-text" role="note">
+      <TriangleAlert className="mt-px size-3.5 shrink-0 text-warning" />
+      <span>
+        The area reaches the <b className="font-semibold">bottom-right corner</b>, where Gemini stamps its sparkle — it would stay in the result. Turn it off in Gemini’s{' '}
+        <b className="font-semibold">Settings → Media watermark</b> (not offered in the EU or South Korea), or use ChatGPT.
+      </span>
+    </p>
+  );
+}
+
+/**
+ * Runs from older saves (no frozen outline): the scene's outline changed
+ * since this hand-off was prepared — imports still use the outline that was
+ * pasted; preparing again switches to the current one.
+ */
+function OutlineChangedNote({ item }: { item: PendingItem }) {
+  return (
+    <div className="flex flex-col gap-1.5 rounded-lg bg-warning/10 px-2.5 py-2 text-[11px] leading-snug text-text" role="note">
+      <span className="flex items-start gap-1.5">
+        <TriangleAlert className="mt-px size-3.5 shrink-0 text-warning" />
+        <span>
+          The scene outline changed since this hand-off was prepared — re-prepare? Results you bring back are still lined up with the outline you pasted.
+        </span>
+      </span>
+      <button type="button" onClick={() => reprepareRun(item.photoId, item.generationId)} className="self-start pl-5 font-semibold text-accent hover:underline">
+        Prepare it again with the current outline
+      </button>
+    </div>
+  );
+}
+
+/** One reference image: "Copy reference N" with the prompt's own sentence about it. */
+function ReferenceRow({ reference, index }: { reference: HandoffReference; index: number }) {
+  const [copied, flash] = useFlash();
+  const thumb = useBlobUrl(reference.imageId);
+  return (
+    <li className="flex items-start gap-2">
+      <div className="h-10 w-12 shrink-0 overflow-hidden rounded-md bg-surface-3">
+        {thumb.url && <img src={thumb.url} alt="" className="h-full w-full object-cover" draggable={false} />}
+      </div>
+      <div className="flex min-w-0 flex-1 flex-col gap-1">
+        <SmallButton
+          onClick={(e) => writeImage(eventWindow(e), packPng(reference.imageId)).then(flash, (err: Error) => notify(`Couldn't copy the image: ${err.message || 'clipboard refused'}.`, 'error'))}
+          icon={<ImagePlus className="size-3.5" />}
+          done={copied}
+          title={`${reference.title} — paste it after the photo, as Image ${reference.n}`}
+        >
+          {copied ? `Reference ${index + 1} copied` : `Copy reference ${index + 1}`}
+        </SmallButton>
+        <span className="text-[11px] leading-snug text-muted">{reference.sentence}</span>
+      </div>
+    </li>
+  );
+}
+
 function ActiveItem({ item, onSent }: { item: PendingItem; onSent: (sent: boolean) => void }) {
   const job = useHandoffSession((s) => s.jobs[item.plannedId]);
   const error = useHandoffSession((s) => s.errors[item.plannedId]);
   const studioApp = useStore((s) => s.studio.handoffApp);
+  const board = useStore((s) => s.project?.ideaBoard);
   const temporary = useToggle(TEMPORARY_CHAT_KEY);
+  const plan = useGeminiPlan();
+  const paste = usePasteImage();
   const [copiedPhoto, flashPhoto] = useFlash();
   const [copiedPrompt, flashPrompt] = useFlash();
   const [copiedMarked, flashMarked] = useFlash();
   const [copiedClean, flashClean] = useFlash();
   const [opened, setOpened] = useState(false);
   const [showPrompt, setShowPrompt] = useState(false);
+  const [cornerRisk, setCornerRisk] = useState(false);
   const { planned } = item;
   const pack: HandoffPack | undefined = planned.handoff;
   const app = pack?.app ?? studioApp;
   const markedThumb = useBlobUrl(pack?.markedImageId);
   const staged = planned.status === 'staged';
   const preparing = job?.kind === 'preparing' || (!pack && !error && !staged);
+  const waitingCount = usePendingHandoffs().filter((i) => i.planned.status === 'awaiting-handoff').length;
+  const outlineChanged = useStore((s) => {
+    const photo = findPhoto(s.project, item.photoId)?.photo;
+    const g = photo?.generations.find((x) => x.id === item.generationId);
+    return !!g && targetOutlineChanged(photo, g);
+  });
+
+  // Inspiration images that go along (Image 2, 3…): the brief's picks, none for Gemini without a Google AI plan.
+  const brief = item.generation.brief;
+  const references = useMemo(() => handoffReferences(board ?? [], brief, app, plan), [board, brief, app, plan]);
+  const dropped = useMemo(() => droppedReferenceCount(board ?? [], brief, app, plan), [board, brief, app, plan]);
+  const refsKey = references.map((r) => `${r.imageId}:${r.role}`).join('|');
+  // Only offer what the prompt really names (ensurePack rebuilds the prompt when the list changes).
+  const promptRefs = pack ? references.filter((r) => pack.prompt.includes(r.sentence)) : [];
+  const marked = paste === 'marked' || !pack?.markerColor;
+  const photoId = pack ? (paste === 'clean' ? pack.cleanImageId : pack.markedImageId) : undefined;
 
   // Prepare lazily when shown (also after a reload); warm the PNG so the copy click finds it ready.
+  // A change of the pasted image or of the references rebuilds the prompt (the images are reused).
   useEffect(() => {
     if (staged || error) return;
     void ensurePack(item)
       .then(warmPack)
       .catch(() => undefined); // shown as the item's error
-  }, [item.plannedId, pack?.cleanImageId, app, staged, error]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [item.plannedId, pack?.cleanImageId, app, staged, error, refsKey, paste, plan]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    for (const r of references) void packPng(r.imageId).catch(() => undefined);
+  }, [refsKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Gemini's sparkle sits bottom-right of what it returns: warn when the composite would keep that corner.
+  useEffect(() => {
+    let alive = true;
+    setCornerRisk(false);
+    const found = lookupPlanned(item);
+    if (!pack || pack.app !== 'gemini' || !found) return;
+    void watermarkRisk(found.photo, found.generation, pack)
+      .then((risk) => alive && setCornerRisk(risk))
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [item.plannedId, item.generationId, pack?.cleanImageId, pack?.app]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => setOpened(false), [item.plannedId, app]);
   useEffect(() => onSent(opened), [opened, onSent]);
@@ -233,7 +363,7 @@ function ActiveItem({ item, onSent }: { item: PendingItem; onSent: (sent: boolea
 
   /** Clipboard write first (synchronously, PNG as a promise), then the app tab — no await before write(). */
   const copyAndOpen = (e: MouseEvent<HTMLButtonElement>) => {
-    if (!pack) return;
+    if (!pack || !photoId) return;
     const win = eventWindow(e);
     if (!canCopy) {
       openAppTab(win, appUrl);
@@ -242,7 +372,7 @@ function ActiveItem({ item, onSent }: { item: PendingItem; onSent: (sent: boolea
       void download();
       return;
     }
-    const copy = writeImage(win, packPng(pack.markedImageId));
+    const copy = writeImage(win, packPng(photoId));
     openAppTab(win, appUrl);
     recordHandoff(app, planned.id);
     setOpened(true);
@@ -258,14 +388,87 @@ function ActiveItem({ item, onSent }: { item: PendingItem; onSent: (sent: boolea
     writeText(eventWindow(e), pack.prompt).then(flashPrompt, () => notify("Couldn't copy the prompt — select it below and copy it by hand.", 'error'));
   };
   const download = async () => {
-    if (!pack) return;
+    if (!pack || !photoId) return;
     try {
-      const blob = await packBlob(pack.markedImageId);
-      downloadBlob(blob, `mode-handoff-${planned.title.replace(/[^a-z0-9]+/gi, '-').toLowerCase().slice(0, 40) || 'photo'}.png`);
+      const blob = await packBlob(photoId);
+      downloadBlob(blob, handoffDownloadName(planned.title, blob.type === 'image/png' ? 'png' : 'jpg'));
     } catch (err) {
       notify((err as Error).message, 'error');
     }
   };
+
+  const photoWord = marked ? 'the marked photo' : 'the photo';
+  const steps: { title: ReactNode; done?: boolean; body?: ReactNode }[] = [];
+  steps.push({
+    done: opened,
+    title:
+      app === 'chatgpt'
+        ? deepLink
+          ? `Copy ${photoWord} and open a new ChatGPT chat — the prompt is already typed in.`
+          : `Copy ${photoWord} and open a new ChatGPT chat.`
+        : `Copy ${photoWord} and open a new Gemini chat.`,
+    body: (
+      <>
+        <button
+          type="button"
+          onClick={copyAndOpen}
+          disabled={!pack || preparing}
+          className="inline-flex h-10 items-center justify-center gap-2 rounded-xl bg-accent px-3 text-sm font-semibold text-accent-fg shadow-sm transition-colors hover:bg-accent-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:opacity-50"
+        >
+          {preparing ? <Loader2 className="size-4 animate-spin" /> : copiedPhoto ? <Check className="size-4" /> : <ClipboardCopy className="size-4" />}
+          {preparing ? 'Preparing the photo…' : `${canCopy ? 'Copy' : 'Save'} photo & open ${appLabel(app)}`}
+          {!preparing && <ExternalLink className="size-3.5 opacity-70" />}
+        </button>
+        {!canCopy && (
+          <span className="text-[11px] leading-snug text-warning">
+            Copying images needs https or localhost, so the photo is saved to your Downloads — attach it in {appLabel(app)} with + or drag it in.
+          </span>
+        )}
+        {app === 'chatgpt' && (
+          <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-muted">
+            <input type="checkbox" checked={temporary} onChange={(e) => setToggle(TEMPORARY_CHAT_KEY, e.target.checked)} className="accent-[var(--accent)]" />
+            Temporary chat (kept out of your ChatGPT history)
+          </label>
+        )}
+      </>
+    ),
+  });
+  const pastePhoto = 'Paste the photo into the message box (⌘V / Ctrl+V)';
+  if (promptRefs.length > 0) {
+    steps.push({
+      title: `${pastePhoto}, then add the reference image${promptRefs.length === 1 ? '' : 's'} after it, in order — the prompt calls ${promptRefs.length === 1 ? 'it Image 2' : `them Image 2–${promptRefs.length + 1}`}.`,
+      body: (
+        <ul className="flex flex-col gap-2">
+          {promptRefs.map((r, i) => (
+            <ReferenceRow key={r.itemId} reference={r} index={i} />
+          ))}
+        </ul>
+      ),
+    });
+  }
+  if (app === 'chatgpt' && deepLink) {
+    steps.push({
+      title: promptRefs.length ? 'Check the prompt is there and press Enter.' : `${pastePhoto} and press Enter.`,
+      body: <span className="text-[11px] text-muted">Prompt didn’t appear? Use Copy prompt below and paste it after the photo.</span>,
+    });
+  } else {
+    steps.push({
+      title: promptRefs.length
+        ? `Copy the prompt, paste it after the images and ${app === 'chatgpt' ? 'press Enter' : 'send'}.`
+        : `${pastePhoto}, then copy the prompt, paste it after the photo and ${app === 'chatgpt' ? 'press Enter' : 'send'}.`,
+      body: (
+        <SmallButton onClick={copyPrompt} icon={<Copy className="size-3.5" />} done={copiedPrompt}>
+          {copiedPrompt ? 'Prompt copied' : 'Copy prompt'}
+        </SmallButton>
+      ),
+    });
+  }
+  steps.push({
+    title:
+      app === 'gemini'
+        ? 'When the image is ready, click Download full size — never right-click → Save or Copy (that is a small preview) — then drop or paste it below.'
+        : 'When the image is ready, download it (or Copy image), then drop or paste it below.',
+  });
 
   return (
     <div className="flex flex-col gap-3">
@@ -312,86 +515,43 @@ function ActiveItem({ item, onSent }: { item: PendingItem; onSent: (sent: boolea
           </button>
         </div>
       ) : (
-        <ol className="flex flex-col gap-3">
-          <Step
-            n={1}
-            done={opened}
-            title={
-              app === 'chatgpt'
-                ? deepLink
-                  ? 'Copy the photo and open a new ChatGPT chat — the prompt is already typed in.'
-                  : 'Copy the photo and open a new ChatGPT chat.'
-                : 'Copy the photo and open a new Gemini chat.'
-            }
-          >
-            <button
-              type="button"
-              onClick={copyAndOpen}
-              disabled={!pack || preparing}
-              className="inline-flex h-10 items-center justify-center gap-2 rounded-xl bg-accent px-3 text-sm font-semibold text-accent-fg shadow-sm transition-colors hover:bg-accent-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:opacity-50"
-            >
-              {preparing ? <Loader2 className="size-4 animate-spin" /> : copiedPhoto ? <Check className="size-4" /> : <ClipboardCopy className="size-4" />}
-              {preparing ? 'Preparing the photo…' : `${canCopy ? 'Copy' : 'Save'} photo & open ${appLabel(app)}`}
-              {!preparing && <ExternalLink className="size-3.5 opacity-70" />}
-            </button>
-            {!canCopy && (
-              <span className="text-[11px] leading-snug text-warning">
-                Copying images needs https or localhost, so the photo is saved to your Downloads — attach it in {appLabel(app)} with + or drag it in.
-              </span>
-            )}
-            {app === 'chatgpt' && (
-              <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-muted">
-                <input type="checkbox" checked={temporary} onChange={(e) => setToggle(TEMPORARY_CHAT_KEY, e.target.checked)} className="accent-[var(--accent)]" />
-                Temporary chat (kept out of your ChatGPT history)
-              </label>
-            )}
-          </Step>
-          {app === 'chatgpt' ? (
-            deepLink ? (
-              <Step n={2} title={<>Paste the photo into the message box (⌘V / Ctrl+V) and press Enter.</>}>
-                <span className="text-[11px] text-muted">Prompt didn’t appear? Use Copy prompt below and paste it after the photo.</span>
+        <>
+          {outlineChanged && <OutlineChangedNote item={item} />}
+          {app === 'gemini' && <GeminiPlanNote plan={plan} dropped={dropped} waiting={waitingCount} />}
+          {cornerRisk && <WatermarkNote />}
+          <ol className="flex flex-col gap-3">
+            {steps.map((st, i) => (
+              <Step key={i} n={i + 1} done={st.done} title={st.title}>
+                {st.body}
               </Step>
-            ) : (
-              <Step n={2} title="Paste the photo, then copy the prompt and paste it after the photo. Press Enter.">
-                <SmallButton onClick={copyPrompt} icon={<Copy className="size-3.5" />} done={copiedPrompt}>
-                  {copiedPrompt ? 'Prompt copied' : 'Copy prompt'}
-                </SmallButton>
-              </Step>
-            )
-          ) : (
-            <Step n={2} title="Paste the photo, then copy the prompt, paste it after the photo and send.">
-              <SmallButton onClick={copyPrompt} icon={<Copy className="size-3.5" />} done={copiedPrompt}>
-                {copiedPrompt ? 'Prompt copied' : 'Copy prompt'}
-              </SmallButton>
-            </Step>
-          )}
-          <Step
-            n={3}
-            title={
-              app === 'gemini'
-                ? 'When the image is ready, use Download full size (right-click copy is only a small preview), then drop or paste it below.'
-                : 'When the image is ready, download it (or Copy image), then drop or paste it below.'
-            }
-          />
-        </ol>
+            ))}
+          </ol>
+        </>
       )}
 
       {pack && !staged && (
         <div className="flex flex-col gap-2">
           <div className="flex flex-wrap gap-1.5">
             {deepLink && (
-              // Without a prefill link the prompt button is already step 2.
+              // Without a prefill link the prompt button is already a step.
               <SmallButton onClick={copyPrompt} icon={<Copy className="size-3.5" />} done={copiedPrompt} title="The full prompt for this variation">
                 Copy prompt
               </SmallButton>
             )}
-            <SmallButton onClick={(e) => copyImage(e, pack.markedImageId, flashMarked)} icon={<ClipboardCopy className="size-3.5" />} done={copiedMarked} title="The photo with the area outlined">
-              Marked photo
+            {pack.markerColor && (
+              <SmallButton onClick={(e) => copyImage(e, pack.markedImageId, flashMarked)} icon={<ClipboardCopy className="size-3.5" />} done={copiedMarked} title="The photo with the area outlined">
+                Marked photo
+              </SmallButton>
+            )}
+            <SmallButton
+              onClick={(e) => copyImage(e, pack.cleanImageId, flashClean)}
+              icon={<ClipboardCopy className="size-3.5" />}
+              done={copiedClean}
+              title={pack.markerColor ? 'The same crop without the outline' : 'The photo to paste'}
+            >
+              {pack.markerColor ? 'Clean photo' : 'Photo'}
             </SmallButton>
-            <SmallButton onClick={(e) => copyImage(e, pack.cleanImageId, flashClean)} icon={<ClipboardCopy className="size-3.5" />} done={copiedClean} title="The same crop without the outline">
-              Clean photo
-            </SmallButton>
-            <SmallButton onClick={() => void download()} icon={<Download className="size-3.5" />} title="Save the marked photo to attach it as a file">
+            <SmallButton onClick={() => void download()} icon={<Download className="size-3.5" />} title={`Save ${photoWord} to attach it as a file`}>
               Download
             </SmallButton>
           </div>
@@ -413,10 +573,15 @@ function ActiveItem({ item, onSent }: { item: PendingItem; onSent: (sent: boolea
                 ? '· Compare run: start every option in a new chat from this same photo — never from another option’s result.'
                 : '· A new chat for each variation keeps results clean.'}
             </li>
-            {app === 'gemini' ? (
-              <li>· Pick a Pro / Thinking image model if you have one — not Flash-Lite.</li>
-            ) : (
-              <li>· Leave the outline in — the prompt tells ChatGPT to remove it.</li>
+            {pack.markerColor &&
+              (marked ? (
+                <li>· Leave the outline in — the prompt tells {appLabel(app)} to remove it, and Mode puts your photo back around the area.</li>
+              ) : (
+                <li>· You’re pasting the clean photo (Settings → Hand-off) — the prompt names the area in words.</li>
+              ))}
+            {app === 'chatgpt' && <li>· Optional: touch up the result in the same chat with ChatGPT’s Edit tools (Comment or Markup).</li>}
+            {app === 'gemini' && plan === 'paid' && (
+              <li>· Flash and Pro in the chat both make images with Nano Banana 2; for Nano Banana Pro, use More → Redo with Pro once the image appears.</li>
             )}
           </ul>
         </div>
@@ -575,6 +740,22 @@ export function CompanionDock() {
     [],
   );
 
+  // History → "Open hand-off" on a run: open the companion on its pending items (the panel's fallback is skipped).
+  useEffect(() => {
+    const onOpen = (e: Event) => {
+      const id = (e as CustomEvent<OpenHandoffDetail>).detail?.generationId;
+      if (id && openRunHandoff(id)) e.preventDefault();
+    };
+    window.addEventListener(OPEN_HANDOFF_EVENT, onOpen);
+    return () => window.removeEventListener(OPEN_HANDOFF_EVENT, onOpen);
+  }, []);
+
+  // The user will bring an image back soon: start loading the alignment engine (OpenCV) now.
+  const shown = items.length > 0 && (companion === 'open' || !!pip);
+  useEffect(() => {
+    if (shown) warmUpAlignment();
+  }, [shown]);
+
   // Opening a run side by side makes room: the card folds to its pill (opening a hand-off from the grid unfolds it).
   const gridId = useStore((s) => s.studio.gridGenerationId);
   useEffect(() => {
@@ -606,8 +787,10 @@ export function CompanionDock() {
       {items.length === 0 ? null : open ? (
         floating ? (
           createPortal(
+            // Capped below the 3.5rem top bar (+0.5rem gap) so Settings, undo and Fine-tune stay clickable:
+            // sm+ 1rem bottom + 3.5rem + 0.5rem; phones 4.5rem bottom-nav offset + 3.5rem + 0.5rem.
             card(
-              'fixed z-40 right-4 bottom-4 w-[22rem] max-h-[min(42rem,calc(100dvh-2rem))] max-sm:inset-x-2 max-sm:w-auto max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom))] max-sm:max-h-[calc(100dvh-6rem)]',
+              'fixed z-40 right-4 bottom-4 w-[22rem] max-h-[min(42rem,calc(100dvh-5rem))] max-sm:inset-x-2 max-sm:w-auto max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom))] max-sm:max-h-[calc(100dvh-8.5rem-env(safe-area-inset-bottom))]',
             ),
             document.body,
           )
@@ -665,8 +848,10 @@ function PipFrame() {
         if (e.currentTarget === e.target) setOver(false);
       }}
       onDrop={(e) => {
-        e.preventDefault();
         setOver(false);
+        // Already imported by a drop zone inside the frame (ResultDrop).
+        if (e.defaultPrevented) return;
+        e.preventDefault();
         void transferImages(e.dataTransfer)
           .then((blobs) => importBlobs(blobs))
           .catch((err: Error) => notify(err.message, 'error'));

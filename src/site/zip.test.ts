@@ -1,7 +1,7 @@
 import { readFileSync, statSync } from 'node:fs';
 import { afterEach, describe, expect, it } from 'vitest';
 import sample from './__fixtures__/zones.sample.json';
-import { localityForZip, lookupZip, normalizeZip, parsePhzmZip, parseZipTable, setZipTable, zipFromTable, type ZipTable } from './zip';
+import { hasZipCoords, localityForZip, lookupZip, normalizeZip, parsePhzmZip, parseZipTable, setZipTable, zipFromTable, type ZipTable } from './zip';
 
 const ZONES_PATH = new URL('../../public/data/zones.json', import.meta.url);
 
@@ -52,6 +52,17 @@ describe('lookupZip (fixture subset)', () => {
     expect(zipFromTable(t, '33333')?.zone).toBe('7a');
   });
 
+  it('reads zone-only rows (PRISM ZIPs without a centroid) as a zone without coordinates', async () => {
+    const t = { '02455': ['6b'], '20817': ['7b', 38.997, -77.135], '44444': ['zz'] } as unknown as ZipTable;
+    const info = zipFromTable(t, '02455');
+    expect(info).toEqual({ zip: '02455', zone: '6b', source: 'table' });
+    expect(hasZipCoords(info)).toBe(false);
+    expect(hasZipCoords(zipFromTable(t, '20817'))).toBe(true);
+    expect(zipFromTable(t, '44444')).toBeNull();
+    setZipTable(t);
+    expect(await lookupZip('02455')).toEqual({ zip: '02455', zone: '6b', source: 'table' });
+  });
+
   it('rejects a file without a zips table', () => {
     expect(() => parseZipTable({})).toThrow();
     expect(() => parseZipTable(null)).toThrow();
@@ -87,5 +98,24 @@ describe('bundled public/data/zones.json', () => {
     // Every row is well formed.
     const bad = zips.filter((z) => !zipFromTable(table, z));
     expect(bad).toEqual([]);
+  });
+
+  it('includes the PRISM ZIPs phzmapi drops as zone-only rows (C12), with the attribution', () => {
+    const json = JSON.parse(readFileSync(ZONES_PATH, 'utf8')) as { zips: ZipTable; source: string; zoneOnly: number; count: number };
+    const table = parseZipTable(json);
+    expect(json.count).toBe(40_502);
+    expect(json.zoneOnly).toBeGreaterThan(200);
+    expect(json.source).toMatch(/PRISM/);
+    for (const [zip, zone] of [
+      ['02455', '6b'],
+      ['06338', '6b'],
+      ['56901', '8a'],
+    ]) {
+      const info = zipFromTable(table, zip);
+      expect(info?.zone, zip).toBe(zone);
+      expect(hasZipCoords(info), zip).toBe(false);
+    }
+    const zoneOnly = Object.values(table).filter((r) => r.length === 1).length;
+    expect(zoneOnly).toBe(json.zoneOnly);
   });
 });

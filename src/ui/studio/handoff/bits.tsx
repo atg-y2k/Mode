@@ -5,7 +5,7 @@
  */
 import { BadgeCheck, Info, MessageCircle, ShieldCheck, Sparkle, TriangleAlert } from 'lucide-react';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import type { AlignmentReport, DesignBrief, HandoffApp, Photo, VariationSource } from '../../../../shared/types';
+import type { AlignmentReport, Generation, HandoffApp, Photo, VariationSource } from '../../../../shared/types';
 import type { Mask } from '../../../engine/types';
 import { findVariation } from '../../../state/store';
 import { cn } from '../../common';
@@ -99,16 +99,18 @@ export function useFlash(ms = 1800): [boolean, () => void] {
 /**
  * The starting image with everything that stays protected dimmed and the
  * area that may change outlined — the review step's "what changes" view.
+ * Shows the run's own target (frozen when it started, or the outline its
+ * hand-off was prepared with), the same mask the export and the import use.
  */
 export function TargetPreview({
   photo,
-  brief,
+  generation,
   baseVariationId,
   className,
   children,
 }: {
   photo: Photo;
-  brief: DesignBrief;
+  generation: Pick<Generation, 'id' | 'brief' | 'target' | 'handoffTarget'>;
   baseVariationId?: string;
   className?: string;
   children?: ReactNode;
@@ -118,18 +120,18 @@ export function TargetPreview({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [mask, setMask] = useState<{ mask: Mask; wholeImage: boolean } | null>(null);
 
-  // Recompute only when the outlines can differ (not on every document edit).
-  const zones = photo.scene?.zones;
-  const paths = photo.scene?.paths;
+  // Recompute only when the outlines can differ (not on every document edit); runs from older saves follow the live scene.
+  const zones = generation.target ? null : photo.scene?.zones;
+  const paths = generation.target ? null : photo.scene?.paths;
   useEffect(() => {
     let alive = true;
-    void targetMaskFor(photo, brief)
+    void targetMaskFor(photo, generation)
       .then((m) => alive && setMask(m))
       .catch(() => undefined);
     return () => {
       alive = false;
     };
-  }, [photo.id, brief, zones, paths]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [photo.id, generation.id, generation.brief, generation.target, generation.handoffTarget?.maskId, zones, paths]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const canvas = canvasRef.current;
