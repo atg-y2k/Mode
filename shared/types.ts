@@ -398,6 +398,8 @@ export interface SceneZone {
   source?: 'ai' | 'sketch';
   /** Estimated sun exposure for ground / planting zones (from orientation & shadows). */
   sun?: 'full-sun' | 'part-sun' | 'shade';
+  /** Estimated direct-sun hours on a mid-season day (SunCalc), when computed. */
+  sunHours?: number;
 }
 
 /** A route through the scene, e.g. "Driveway → front door". */
@@ -449,6 +451,9 @@ export interface SceneMap {
   lighting: string;
   /** Which way the main facade / windows face, inferred from shadows ("front faces roughly south-east"). */
   orientation: string;
+  /** Compass direction the photographed facade (or yard view) faces, degrees from north — from EXIF heading, the user's compass, or AI. */
+  facadeAzimuthDeg?: number;
+  facadeAzimuthSource?: 'photo' | 'user' | 'ai';
   architecture: ArchitectureAnalysis;
   zones: SceneZone[];
   paths: ScenePath[];
@@ -620,6 +625,13 @@ export interface DesignBrief {
   elements: ElementSpec[];
   /** How plants are shown: as planted, after ~3 years, or at mature size. */
   plantMaturity: 'new' | 'established' | 'mature';
+  /**
+   * How freely the image model may reinterpret the brief (borrowed from
+   * HomeDesigns "AI intervention" / DecorAI "Strict→Imaginative"):
+   * strict = only the requested change, exact; creative = may embellish within the targets.
+   * Undefined = 'balanced'.
+   */
+  strictness?: 'strict' | 'balanced' | 'creative';
   /** Idea board items to use as inspiration. */
   ideaItemIds: ID[];
   /** Zones allowed to change (union with the elements' zones). Empty + scope 'whole' = anything. */
@@ -685,6 +697,71 @@ export interface ElementGuidance {
   relateToArchitecture: string[];
 }
 
+/** Which consumer app a manual hand-off goes to. */
+export type HandoffApp = 'chatgpt' | 'gemini';
+
+/** How a returned image was lined up with the original (manual hand-offs and API results). */
+export interface AlignmentReport {
+  /** Feature matches that agreed with the fitted transform. */
+  inliers: number;
+  /** Mean reprojection error of the inliers, in original-photo px. */
+  residualPx: number;
+  /** Mean ΔE between original and result OUTSIDE the target, before / after color correction. */
+  driftBefore: number;
+  driftAfter: number;
+  /** Share (0..1) of protected pixels the model changed noticeably (ΔE > 10). */
+  outsideChanged: number;
+  /** True when alignment was trusted; false = used a plain resize (low confidence). */
+  aligned: boolean;
+}
+
+export interface VariationSource {
+  kind: 'api' | 'handoff';
+  app?: HandoffApp;
+  /** Model / provider name when known (API runs, or C2PA / user-entered for hand-offs). */
+  model?: string;
+  importedAt?: number;
+  alignment?: AlignmentReport;
+}
+
+/**
+ * The prepared hand-off for one planned variation: what the user pastes into
+ * ChatGPT / Gemini, and how to map the returned image back onto the photo.
+ */
+export interface HandoffPack {
+  app: HandoffApp;
+  /** Final text to paste (app-specific template filled from the plan). */
+  prompt: string;
+  /** Region of the ORIGINAL photo that was exported (photo px); full frame when it equals the photo. */
+  crop: { x: number; y: number; w: number; h: number };
+  /** Size of the exported image (after snapping to a supported aspect ratio and resizing). */
+  outW: number;
+  outH: number;
+  /** Selection-marker color drawn on the marked copy. */
+  markerColor: string;
+  /** Exported clean image / marked image in the blob store. */
+  cleanImageId: ID;
+  markedImageId: ID;
+  createdAt: number;
+}
+
+/** A variation the plan asked for, before / while it is rendered or handed off. Persisted so runs survive reloads. */
+export interface PlannedVariation {
+  id: ID;
+  title: string;
+  /** Model-neutral edit instruction from the plan. */
+  brief: string;
+  optionId?: string;
+  optionLabel?: string;
+  status: 'pending' | 'awaiting-handoff' | 'staged' | 'done' | 'failed' | 'rejected';
+  error?: string;
+  /** Set once accepted. */
+  variationId?: ID;
+  handoff?: HandoffPack;
+  /** A returned image waiting in staging (accept / reject / retry). */
+  staged?: { imageId: ID; thumbId: ID; source: VariationSource };
+}
+
 /** One generated image. */
 export interface Variation {
   id: ID;
@@ -701,6 +778,8 @@ export interface Variation {
   optionLabel?: string;
   favorite: boolean;
   createdAt: number;
+  /** Where the image came from (API render or a manual hand-off) and how it was aligned. */
+  source?: VariationSource;
 }
 
 /** One run: Claude's plan plus a batch of variations. */
@@ -721,8 +800,13 @@ export interface Generation {
   provider: string;
   model: string;
   variations: Variation[];
-  status: 'running' | 'done' | 'partial' | 'failed';
+  /** 'awaiting' = manual hand-offs are pending (the user renders them in ChatGPT / Gemini). */
+  status: 'running' | 'awaiting' | 'done' | 'partial' | 'failed';
   error?: string;
+  /** How this run renders: image API, or manual hand-off to a consumer app. */
+  renderMode?: 'api' | 'handoff';
+  /** Every variation the plan asked for, with its status (persisted; drives retry, hand-off and staging). */
+  planned?: PlannedVariation[];
 }
 
 export const RECOMMENDATION_CATEGORIES = [
@@ -785,6 +869,15 @@ export interface Calibration {
   lengthFt: number;
 }
 
+export interface PhotoCapture {
+  lat?: number;
+  lon?: number;
+  /** Compass direction the camera faced (EXIF GPSImgDirection), degrees from north. */
+  headingDeg?: number;
+  /** DateTimeOriginal, ms epoch. */
+  takenAt?: number;
+}
+
 export interface Photo {
   id: ID;
   name: string;
@@ -803,6 +896,8 @@ export interface Photo {
   scene?: SceneMap;
   /** The brief being composed in the Studio for this photo. */
   draft?: DesignBrief;
+  /** Read from the original file's EXIF before it was stripped (location stays on this device). */
+  capture?: PhotoCapture;
   /** Prompt runs, newest first. */
   generations: Generation[];
   /** Latest AI recommendations for this photo. */
@@ -837,13 +932,36 @@ export interface ClimateProfile {
   updatedAt: number;
 }
 
+/** Free government data about the property, fetched once and cached (see src/site). */
+export interface SiteProfile {
+  /** Where the coordinates came from. */
+  coordsSource: 'zip' | 'address' | 'photo-gps';
+  /** Nearest NOAA 1991–2020 normals station frost dates (month-day strings, e.g. "04-12"). */
+  frost?: { station: string; distanceKm: number; lastSpring50: string; lastSpring90?: string; firstFall50: string; firstFall10?: string; freeDays?: number };
+  /** USDA Soil Data Access summary for the point. */
+  soil?: { mapUnit: string; drainage?: string; ph?: number; clayPct?: number; hydroGroup?: string; disturbed?: boolean };
+  /** EPA Level III ecoregion name, when known. */
+  ecoregion?: string;
+  updatedAt: number;
+}
+
 export interface ProjectLocation {
   zip?: string;
   /** USDA hardiness zone like "7a". */
   hardinessZone?: string;
+  /** Where the zone came from: the bundled ZIP table (PRISM 2023), AI, or typed by the user. */
+  zoneSource?: 'zip-table' | 'ai' | 'user';
   /** Free text: climate, HOA rules, sun orientation… */
   notes?: string;
   climate?: ClimateProfile;
+  /** ZIP centroid or geocoded address (kept on this device). */
+  lat?: number;
+  lon?: number;
+  /** Optional street address for exact coordinates (kept on this device; never sent to AI prompts). */
+  address?: string;
+  /** Deer pressure for plant filtering (Rutgers-style A–D ratings guide the advice). */
+  deerPressure?: 'low' | 'medium' | 'high';
+  site?: SiteProfile;
 }
 
 export interface Project {

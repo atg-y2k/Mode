@@ -92,6 +92,14 @@ export interface StudioState {
   sketch: 'none' | 'path' | 'area';
   /** Variations per run (1..6). */
   variationCount: number;
+  /**
+   * How runs render: 'handoff' = the user pastes each prepared image + prompt into
+   * the ChatGPT or Gemini app (their subscription) and brings the result back;
+   * 'api' = an image API key configured on the server renders automatically.
+   */
+  renderMode: 'handoff' | 'api';
+  /** Consumer app for manual hand-offs. */
+  handoffApp: 'chatgpt' | 'gemini';
   /** Image provider for the next run (null = server default). */
   provider: ImageProviderId | null;
   quality: 'draft' | 'standard' | 'high';
@@ -320,17 +328,7 @@ export function isSketchZone(z: { source?: string; kind: string; label: string }
 
 /** Every blob id and mask id owned by a photo (for cleanup on delete). */
 export function photoRefs(photo: Photo): { blobIds: string[]; maskIds: string[] } {
-  const blobIds = [
-    photo.imageId,
-    photo.thumbId,
-    ...photo.designs.flatMap((d) => d.aiRenders.map((r) => r.imageId)),
-    ...photo.generations.flatMap((g) => g.variations.flatMap((v) => [v.imageId, v.thumbId])),
-  ];
-  const maskIds = [
-    ...photo.regions.map((r) => r.maskId),
-    ...(photo.scene?.zones.flatMap((z) => (z.maskId ? [z.maskId] : [])) ?? []),
-  ];
-  return { blobIds, maskIds };
+  return db.photoReferencedIds(photo);
 }
 
 /** Variation by id within a photo. */
@@ -502,6 +500,8 @@ export const useStore = create<AppState>()((set, get) => {
       focusZoneId: null,
       sketch: 'none',
       variationCount: 3,
+      renderMode: 'handoff',
+      handoffApp: 'chatgpt',
       provider: null,
       quality: 'standard',
       activeElementId: null,

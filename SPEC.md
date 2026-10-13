@@ -657,6 +657,161 @@ truly need a contract change, work around it locally and list it under
 
 ---------------------------------------------------------------------------
 
+## 5. Borrowed ideas (from the research on existing tools) — current phase
+
+Decisions: images are rendered by a **manual hand-off** to the user's ChatGPT
+or Gemini app (their subscription) by default; image API keys stay optional
+(`studio.renderMode` 'handoff' | 'api'). Claude (Anthropic API key) does the
+thinking. Never automate chatgpt.com / gemini.google.com (OpenAI terms ban
+programmatic extraction): Mode only prepares files/prompts and receives what
+the user brings back.
+
+### 5.1 Hand-off engine — `src/handoff/*` (contract: src/handoff/index.ts)
+Port of the pixel-perfect pattern (comfyui_qwen_edit_pixel_perfect, MIT):
+marked region + fixed hint text + feature alignment + restore outside.
+- prepareHandoff: crop-and-stitch for small targets (< ~35–40% of frame:
+  bbox + 30–50% context, ≥ 1/3 frame), full frame otherwise; snap to the
+  app's ratios by growing the crop; long edge 2048 (full) / 1536 (crop);
+  re-encode (strips EXIF/GPS); marked copy = outline only, auto color (least
+  present of magenta/cyan/lime) with 1 px dark halo, drawn just OUTSIDE the
+  composite feather band.
+- buildHandoffPrompt: ChatGPT template uses OpenAI's phrasing ("Edit the
+  attached photo (Image 1). It must stay the same photograph. CHANGE — only
+  inside the {color} outline ({area}): … KEEP EXACTLY AS IS: … Same camera
+  position, lens, perspective and framing; same {ratio} aspect ratio; do not
+  crop, zoom, rotate or extend. MATCH THE PHOTO: {light}; same white balance,
+  exposure, contrast, sharpness and grain… The {color} outline is only a
+  selection marker: remove it completely and do not add any border, edging or
+  line along it."); Gemini template opens with Google's sentence ("Using the
+  provided photo of my {style} house, change only {area}, which is marked with
+  a {color} outline. … Keep everything else in the image exactly the same,
+  preserving the original style, lighting and composition…") as a narrative
+  paragraph with positive exclusions. Name images by role (Image 2 = material
+  reference only — copy colour/texture, not layout). Strictness: strict =
+  "change nothing beyond the request", balanced = default, creative = "you
+  may refine details within the area". Plant maturity wording. ≤ ~1,800 chars.
+- FIX_PROMPTS: one-liners for common failures (extra/moved window or door,
+  cropped/zoomed frame, leftover marker line, colour cast, changed house
+  colour, invented neighbour house/trees).
+- chatgptDeepLink: `https://chatgpt.com/?prompt=…` (+ `temporary-chat=true`
+  option) — prefills without sending when opened from Mode; null if too long.
+- importHandoffResult in a Web Worker with OpenCV.js (@techstark/opencv-js,
+  lazy-loaded): initial mapping from the pack's crop/scale, ORB 1,500 at
+  1024 px with the target (+20 px) masked out on the original, BFMatcher
+  Hamming k=2 + 0.75 ratio, estimateAffine2D RANSAC 3 px (affine beats
+  homography here); accept ≥ 40 inliers & inlier ratio ≥ 0.3, else plain
+  mapping (aligned:false). Per-channel gain/offset fit outside the target
+  (robust: trim 10% residuals), applied to the returned image. Feathered
+  composite inside the target (grow 1–2% + feather). Outside change map:
+  Lab ΔE at ~512 px, blurred; outsideChanged = share of protected px with
+  ΔE > 10; blobs = connected components > 0.2% of frame. Tests in node with
+  synthetic images (known scale/shift/crop + colour cast).
+
+### 5.2 Hand-off in the Studio — `src/ui/studio/handoff/*` + edits to generate.ts, PromptDock, StudioView, VariationStrip, CompareGrid, VariationActions, runs.ts
+- generate.ts: renderMode 'handoff' → plan as today, then create the
+  Generation with renderMode 'handoff', status 'awaiting', and `planned`
+  items (status 'awaiting-handoff'); packs are prepared when the user opens a
+  hand-off (blobs stored, ids on planned[i].handoff). API mode also records
+  `planned` (fixes the retry-after-reload gap). Compare runs: one hand-off per
+  option, each from the ORIGINAL base (never chain), identical prompt except
+  the option sentence; advise a new chat per option.
+- **Review step** (ReimagineHome "confirmation"): before any run (both modes)
+  a modal shows the plan, each variation's exact text, the marked preview and
+  what stays protected; Edit / Send.
+- **Hand-off companion**: list of pending items; for the active one: step
+  checklist per app (ChatGPT: "Copy photo & open ChatGPT" — write the PNG to
+  the clipboard synchronously inside the click (no await before
+  clipboard.write; ClipboardItem with a Promise<Blob>), then window.open the
+  deep link; user pastes the photo and presses Enter. Gemini: "Copy photo &
+  open Gemini" then "Copy prompt"; tips: new chat, pick Pro / not Flash-Lite,
+  Download full size). Buttons: copy clean / marked / prompt again, open in
+  Document Picture-in-Picture when available (floating companion over the
+  ChatGPT/Gemini tab with a drop zone), else inline. Import: page-wide paste,
+  drag & drop (files → items → uri-list via fetchImageUrl), file picker,
+  `clipboardchange` banner ("Import copied image?") while pending, optional
+  Downloads watcher (src/lib/handoff.ts) toggle. Multi-file drop assigns
+  files to pending items in order.
+- **Staging** (InvokeAI): an imported result lands in staging: before/after
+  slider, alignment badge (aligned / drift ΔE / "model changed N areas
+  outside — protected"), heatmap toggle; Accept → Variation (source
+  {kind:'handoff', app, alignment}); Reject; "Retry with stricter prompt";
+  FIX_PROMPTS chips to copy for the same chat.
+- Queue: hand-offs can be done later ("2 now, rest later" naturally — pending
+  items persist); per-app hand-off log in localStorage with a soft hint
+  ("6 hand-offs to ChatGPT today"); when one app hits limits, one click to
+  switch the pending items to the other app.
+- PromptDock: render mode (Hand-off: ChatGPT / Gemini | API when providers
+  exist), strictness segmented (Strict / Balanced / Creative →
+  brief.strictness), the existing count/scope controls. No red "needs an
+  image provider" error in hand-off mode.
+- Variation tiles show their source (ChatGPT / Gemini / API) and alignment.
+
+### 5.3 Server extras — `server/handoff/*`, `server/site/*`, wiring in server/index.ts, `src/lib/handoff.ts`
+- Downloads watcher (chokidar, awaitWriteFinish, ignore .crdownload/.part/
+  .tmp; dir = HANDOFF_WATCH_DIR or ~/Downloads; only while a client asked to
+  watch; stops after 30 min idle) → SSE events; /api/handoff/file serves only
+  files it announced (opaque ids). /api/handoff/fetch-url: https only, SSRF
+  guard (reuse server/studio/ssrf.ts), image/* ≤ 15 MB, 401/403 → clear error.
+- /api/site/profile {lat, lon} → SiteProfile: NOAA NCEI 1991–2020 normals
+  (nearest station with freeze-probability fields — fetch & cache the
+  station inventory once on disk under .cache/), USDA Soil Data Access
+  (fixed SQL template by point: drainage class, pH, clay %, hydrologic group;
+  flag Udorthents/urban as disturbed). Cache per rounded coordinate. Degrade
+  gracefully (partial profile). Tests with fake fetch.
+
+### 5.4 Site data — `src/site/*`, `public/data/*`, `scripts/build-site-data.mjs`, + edits to store.addPhotos, shell NewProjectModal/SettingsModal, src/assets/design/feasibility.ts
+- scripts/build-site-data.mjs downloads phzmapi.org all.json → public/data/
+  zones.json (compact zip → [zone, lat, lon]) and US-RIIS v2.0 (plants only)
+  → public/data/invasives.json; commit the outputs with attribution
+  ("Derived from the USDA/OSU PRISM 2023 map; not the official USDA map";
+  "USGS US-RIIS v2.0, CC0").
+- lookupZip → zone + coords: New project & Settings fill the zone
+  automatically from the ZIP (zoneSource 'zip-table'; AI climate stays
+  optional). readPhotoCapture via exifr on import (store.addPhotos sets
+  photo.capture). SunCalc sunHours/sunPosition. invasiveStatus. plantLinkOuts
+  (NWF Native Plant Finder ?zip=, Audubon ?zipcode=, NC State Plant Toolbox
+  search, MoBot search, Rutgers deer list). fetchSiteProfile client.
+- Feasibility: deer pressure (location.deerPressure) and US-RIIS invasives
+  feed plantFeasibility reasons (keep it sync: invasives load once, cached).
+- Settings: deer pressure select; "Use exact address" (geocoded server-side
+  via the US Census geocoder through /api/site/profile? — keep simple: ZIP
+  centroid + photo GPS), site profile card (frost dates, soil) with source
+  lines.
+
+### 5.5 Vision — `src/vision/*` (worker + ui/RefineSection.tsx) + edits to Viewer.tsx, SketchLayer.tsx
+- Transformers.js (@huggingface/transformers) in a Web Worker; WebGPU when
+  available (fp16), else WASM. Models per contract doc; first-use download
+  with progress; license note for SegFormer (NVIDIA non-commercial).
+- RefineSection (mounted in the Scene panel): "Sharpen outlines on this
+  device (free)" → refineZones → store zone.maskId (runtime.setMask) +
+  polygon; shows per-zone agreement; "Map the scene without AI" →
+  offlineSceneMap when Claude is off.
+- Viewer: "Tap to select" sketch mode → segmentAt (click = positive,
+  Alt/right-click = negative) → creates or extends a user zone (source
+  'sketch') with the mask; hover preview when cheap.
+- Tests: pure helpers (prompt point sampling, IoU, mask→polygon, class
+  mapping) in node; model code verified in Chromium via Playwright.
+
+### 5.6 Studio UX — edits to src/ui/studio/panels/* (DesignPanel, ElementCard, ScenePanel, HistoryPanel, SuggestionsPanel)
+- Suggested-edit chips (ReimagineHome): from scene.opportunities and the
+  latest recommendations, shown atop the Design panel; one click adds the
+  element/prompt/targets to the brief.
+- Plant growth slider (iScape/PRO Landscape): plantMaturity as a 3-stop
+  slider "As planted · ~3 years · Mature" on planting elements and the brief.
+- Feasibility header (Neighborbrite) on every planting element: "Zone 7a ·
+  Part sun (5 h) · Deer: high" with a link to Settings when missing.
+- Sun & orientation card (iScape) in the Scene panel: facade direction from
+  photo heading (facadeAzimuthFromHeading) or a draggable compass; month +
+  time slider showing sun altitude/azimuth and which side is lit; per ground
+  zone estimated sun hours (sunHours) → "Update sun on zones" writes
+  zone.sun/sunHours; mount <RefineSection photoId/>.
+- Branching history (InvokeAI/Yardzen): HistoryPanel shows runs as a tree by
+  base (Original → variation → runs from it), "Branch from here" (= use as
+  base), favorites filter, provenance (ChatGPT / Gemini / API) and alignment
+  per variation.
+
+---------------------------------------------------------------------------
+
 ## 4. Quality bar
 - `npm run typecheck` clean, `npm test` green, `npm run build` succeeds.
 - No console errors in normal use. Handle empty/edge states gracefully

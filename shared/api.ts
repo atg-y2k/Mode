@@ -40,6 +40,18 @@ export const API_PATHS = {
   describeIdea: '/api/studio/describe-idea',
   plan: '/api/studio/plan',
   renderVariation: '/api/studio/render-variation',
+  // Manual hand-off helpers
+  /** GET → { available, dir }; POST { on: boolean } starts / stops watching the Downloads folder. */
+  handoffWatch: '/api/handoff/watch',
+  /** GET (Server-Sent Events): `file` events { id, name, size, mtime } for new images while watching. */
+  handoffEvents: '/api/handoff/events',
+  /** GET ?id=… → the detected image bytes. */
+  handoffFile: '/api/handoff/file',
+  /** POST { url } → image bytes (https only, SSRF-guarded) for images dragged in from another tab. */
+  handoffFetchUrl: '/api/handoff/fetch-url',
+  // Site data
+  /** POST { lat, lon } → SiteProfile (NOAA frost dates + USDA soil), cached. */
+  siteProfile: '/api/site/profile',
 } as const;
 
 /** Max size of JSON request bodies accepted by the server. */

@@ -20,6 +20,7 @@ import {
   type Design,
   type DesignBrief,
   type ElementDimension,
+  type Photo,
   type Project,
   type ProjectMeta,
   type SpaceType,
@@ -242,35 +243,58 @@ function visitBrief(brief: DesignBrief | undefined, v: RefVisitor): void {
  * with an identity visitor.
  */
 function visitRefs(project: Project, v: RefVisitor): void {
-  const swap = <T extends object, K extends keyof T>(obj: T, key: K, fn: (id: string) => string) => {
-    const cur = obj[key];
-    if (typeof cur !== 'string' || !cur) return;
-    const n = fn(cur);
-    if (n !== cur) obj[key] = n as T[K];
-  };
+  for (const space of project.spaces) for (const photo of space.photos) visitPhotoRefs(photo, v);
+  for (const item of project.ideaBoard) {
+    swapRef(item, 'imageId', v.blob);
+    swapRef(item, 'thumbId', v.blob);
+  }
+}
+
+function swapRef<T extends object, K extends keyof T>(obj: T, key: K, fn: (id: string) => string): void {
+  const cur = obj[key];
+  if (typeof cur !== 'string' || !cur) return;
+  const n = fn(cur);
+  if (n !== cur) obj[key] = n as T[K];
+}
+
+/** Visits every blob / mask id owned by one photo (image, thumb, masks, renders, variations, hand-off packs, staged results, brief visuals). */
+function visitPhotoRefs(photo: Photo, v: RefVisitor): void {
   const blob = (id: string) => v.blob(id);
   const mask = (id: string) => v.mask(id);
-  for (const space of project.spaces) {
-    for (const photo of space.photos) {
-      swap(photo, 'imageId', blob);
-      swap(photo, 'thumbId', blob);
-      for (const r of photo.regions) swap(r, 'maskId', mask);
-      for (const z of photo.scene?.zones ?? []) swap(z, 'maskId', mask);
-      for (const d of photo.designs) for (const r of d.aiRenders) swap(r, 'imageId', blob);
-      for (const g of photo.generations) {
-        for (const vr of g.variations) {
-          swap(vr, 'imageId', blob);
-          swap(vr, 'thumbId', blob);
-        }
-        visitBrief(g.brief, v);
-      }
-      visitBrief(photo.draft, v);
+  swapRef(photo, 'imageId', blob);
+  swapRef(photo, 'thumbId', blob);
+  for (const r of photo.regions) swapRef(r, 'maskId', mask);
+  for (const z of photo.scene?.zones ?? []) swapRef(z, 'maskId', mask);
+  for (const d of photo.designs) for (const r of d.aiRenders) swapRef(r, 'imageId', blob);
+  for (const g of photo.generations) {
+    for (const vr of g.variations) {
+      swapRef(vr, 'imageId', blob);
+      swapRef(vr, 'thumbId', blob);
     }
+    for (const pl of g.planned ?? []) {
+      if (pl.handoff) {
+        swapRef(pl.handoff, 'cleanImageId', blob);
+        swapRef(pl.handoff, 'markedImageId', blob);
+      }
+      if (pl.staged) {
+        swapRef(pl.staged, 'imageId', blob);
+        swapRef(pl.staged, 'thumbId', blob);
+      }
+    }
+    visitBrief(g.brief, v);
   }
-  for (const item of project.ideaBoard) {
-    swap(item, 'imageId', blob);
-    swap(item, 'thumbId', blob);
-  }
+  visitBrief(photo.draft, v);
+}
+
+/** Every blob id and mask id owned by one photo (for cleanup when the photo or its space is deleted). */
+export function photoReferencedIds(photo: Photo): { blobIds: string[]; maskIds: string[] } {
+  const blobIds = new Set<string>();
+  const maskIds = new Set<string>();
+  visitPhotoRefs(photo, {
+    blob: (id) => (blobIds.add(id), id),
+    mask: (id) => (maskIds.add(id), id),
+  });
+  return { blobIds: [...blobIds], maskIds: [...maskIds] };
 }
 
 /** Every blob id and mask id referenced by a project (photos, thumbs, renders, variations, idea images, region & zone masks). */
