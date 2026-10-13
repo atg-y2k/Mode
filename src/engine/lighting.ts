@@ -706,11 +706,12 @@ function lightPrims(l: PlacedLight, gain: number, W: number, H: number): Prim[] 
 
 /**
  * Accumulates one primitive over one row of sample points into `acc` (3
- * floats per sample) and widens `span` to the samples it touched. Samples sit
+ * floats per sample, starting at index `off`) and widens `span` to the
+ * samples it touched. Samples sit
  * at x = n·step + 0.5 (n = 0..maxN), row at `py`: step 1 is the full-resolution
  * pixel grid, larger steps the coarse grid of smooth shapes.
  */
-function accumulateRow(pr: Prim, py: number, acc: Float32Array, span: Int32Array, step: number, maxN: number): void {
+function accumulateRow(pr: Prim, py: number, acc: Float32Array, off: number, span: Int32Array, step: number, maxN: number): void {
   let lo = pr.x0;
   let hi = pr.x1;
   if (pr.kind === 0) {
@@ -754,7 +755,7 @@ function accumulateRow(pr: Prim, py: number, acc: Float32Array, span: Int32Array
         f *= t * t * (3 - 2 * t);
       }
     }
-    const j = n * 3;
+    const j = off + n * 3;
     acc[j] += f * r;
     acc[j + 1] += f * g;
     acc[j + 2] += f * b;
@@ -899,7 +900,7 @@ export function renderLights(img: ImageDataLike, lights: PlacedLight[], s: Light
       const rowOff = gy * GW * 3;
       for (const p of coarse) {
         if (py < p.y0 - S || py > p.y1 + S) continue;
-        accumulateRow(p, py, p.emissive ? cEmit.subarray(rowOff) : cIllum.subarray(rowOff), span, S, GW - 1);
+        accumulateRow(p, py, p.emissive ? cEmit : cIllum, rowOff, span, S, GW - 1);
       }
       cSpan[gy * 2] = span[0];
       cSpan[gy * 2 + 1] = span[1];
@@ -946,7 +947,7 @@ export function renderLights(img: ImageDataLike, lights: PlacedLight[], s: Light
     if (active.length && active.some((p) => p.y1 < y)) active = active.filter((p) => p.y1 >= y);
     fSpan[0] = W;
     fSpan[1] = -1;
-    for (const p of active) accumulateRow(p, y + 0.5, p.emissive ? fEmit : fIllum, fSpan, 1, W - 1);
+    for (const p of active) accumulateRow(p, y + 0.5, p.emissive ? fEmit : fIllum, 0, fSpan, 1, W - 1);
 
     // Coarse field: interpolate the two bracketing node rows into vRow (illum rgb, emit rgb per node).
     let cx0 = W;
