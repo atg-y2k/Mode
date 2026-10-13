@@ -1,28 +1,43 @@
 # Mode — Home Redesign Studio
 
-Upload photos of parts of your house (rooms, the front of the house, the yard)
-and see what they'd look like redesigned: new **paint colors**, **flooring,
-siding, tile and hardscape**, **lighting** (time of day and fixtures), and
-**landscaping** (plants, planters, outdoor furniture). Compare design options
-side by side, then turn the design into an **asset list** (shopping and
-materials list) that you can type in, import from a spreadsheet, or generate.
+Upload a photo of your house (the front, the yard, a room) and see how it
+could look: describe an idea, compose it from simple design elements, and
+compare photoreal variations side by side.
 
-Mode is local-first: projects, photos and lists stay in your browser
-(IndexedDB). The AI features are optional and only run when you ask for them.
+- **It understands the photo.** Mode categorizes each photo (front of house,
+  front yard, kitchen…) and maps it: facade, roof, front door, porch,
+  walkway, driveway, lawn, planting beds, the yard's border, trees / walls,
+  floor, cabinetry… It also describes the routes (for example from the
+  driveway to the front door), the sun exposure, and the house's
+  architectural style.
+- **You describe the rendition with design elements, not drag and drop.**
+  Add a *Pathway* and Mode asks you visual questions with swatches to compare,
+  such as stone size (large flagstone, medium pavers, small cobbles, pea
+  gravel), shape, width, edging and lighting. Other elements include border
+  edging, planting beds, lawn, patio, outdoor lighting, front door, exterior
+  paint, wall paint, flooring, interior lighting and cabinets. Add a free-text
+  prompt, pick the areas that may change, and generate.
+- **Compare and refine.** Generate several takes, or *compare* one question
+  (the path in four stone sizes, everything else unchanged) in a labeled
+  grid. From any result: *More like this*, *Refine*, *Use as base*, favorite,
+  before/after slider, download.
+- **Grounded in real architecture, themes and purpose.** A built-in design
+  knowledge base (architectural styles, design themes, and rules of thumb
+  such as a 4–5 ft entry walk that leads clearly to the door) shapes the
+  options, the AI's reasoning and its recommendations.
+- **Plants that will actually grow there.** Outdoor plant choices are checked
+  against your hardiness zone and climate (from your ZIP code), each spot's
+  sun, water needs and mature size, and you can render plants as newly
+  planted, established or mature.
+- **Idea board.** Collect inspiration images, notes, design themes and real
+  products (AI search of Home Depot, Lowe's and nurseries, or paste a link).
+  Generations and suggestions draw on it.
+- **Fine-tune.** A secondary mode with precise hand tools: outline surfaces,
+  exact paint colors, material textures, lighting and time of day, and
+  placing plants and fixtures.
 
-## Features
-
-| Area | What you can do |
-| --- | --- |
-| **Spaces & photos** | Organize the house into interior and exterior spaces, upload photos (phone camera works), several design options per photo (Option A / B / …). |
-| **Surfaces** | Outline walls, trim, cabinets, floors, siding, doors, lawns and beds with a smart brush, magic wand, polygon, lasso, brush and eraser. Masks are shared by every design option. |
-| **Paint** | Shading-preserving recolor with finishes (flat → gloss). Built-in palette of about 160 colors in curated collections, custom hex / brand / code entry, eyedropper, similar colors, colors already used in the project. |
-| **Materials** | Procedural textures for wood, tile, brick, pavers, flagstone, gravel, mulch, grass, stucco, siding, shingles, metal roofing, decking and more. Flat or perspective-plane mapping so floors and patios recede correctly. |
-| **Lighting** | Day, golden hour, dusk and night looks, exposure and warmth, plus placed lights (recessed, pendants, sconces, lanterns, path lights, uplights, spots, LED strips, string lights) with color temperature and reach. |
-| **Landscaping & objects** | A library of plants (zone, sun, water, mature size), fixtures, planters, furniture and hardscape objects to place, scale and layer. Add your own by uploading a photo (with background removal) or by generating one with AI. |
-| **Asset list** | Type items in, import CSV, or generate the list from your designs: paint gallons from wall area and coats, materials with waste, mulch in cubic yards, plants and fixtures with counts and cost estimates. Optional AI pass adds missing items and prices. Export as CSV or print. |
-| **AI (optional)** | Claude analyzes a photo, proposes complete design options you can apply in one click, and completes and prices the asset list. With an image provider configured you also get photoreal renders. |
-| **Compare & export** | Before/after slider, side-by-side view, PNG export, before/after image, project backup and restore. |
+Projects, photos and results stay in your browser (IndexedDB). AI requests go
+out only when you run them.
 
 ## Quick start
 
@@ -30,53 +45,38 @@ Requirements: Node.js 22 or newer.
 
 ```bash
 npm install
-npm run dev          # app on http://localhost:5173, API on :8787
+cp .env.example .env   # add your keys (see below)
+npm run dev            # app on http://localhost:5173, API on :8787
 ```
 
-Open the app on your phone over your LAN at `http://<your-computer-ip>:5173`.
+### Keys
 
-### Enable AI features (optional)
+| Variable | Used for |
+| --- | --- |
+| `ANTHROPIC_API_KEY` | Scene understanding, design planning, element options, recommendations, idea descriptions, product search (Claude). |
+| `OPENAI_API_KEY` | Photoreal variations with OpenAI's image model (`OPENAI_IMAGE_MODEL`, default `gpt-image-1`). |
+| `GEMINI_API_KEY` | Photoreal variations with Google Gemini (`GEMINI_IMAGE_MODEL`, default `gemini-2.5-flash-image`). |
+| `IMAGE_PROVIDER` | Default image provider (`openai` or `gemini`); you can switch per run in the app. |
 
-```bash
-cp .env.example .env
-# set ANTHROPIC_API_KEY=...            (photo analysis, design ideas, asset-list pricing, vector assets)
-# optional: IMAGE_PROVIDER=openai and OPENAI_API_KEY=...   (photoreal renders and photo assets)
-npm run dev
-```
-
-Everything except the AI buttons works without keys.
+Configure at least one image provider for photoreal variations. Fine-tune
+mode works without any keys.
 
 ### Production
 
 ```bash
 npm run build
-npm start            # one Node process serves the app and the API on $PORT (default 8787)
+npm start              # one Node process serves the app and the API on $PORT (default 8787)
 ```
 
 If you expose the server beyond your own network, set `MODE_ACCESS_TOKEN` and
 enter the same token under **Settings → Server access token**.
 
-## How to use it
-
-1. **Create a project** for your house and add spaces (Living room, Front of
-   house, Backyard, and so on).
-2. **Upload photos** of each space.
-3. **Outline surfaces** (Surfaces panel): add a surface such as *Wall* or
-   *Lawn*, then tap it with the smart brush or the magic wand and refine the
-   edges with the brush or eraser. Optionally calibrate the photo by drawing
-   a line of known length (a door is about 3 ft wide) to get real areas.
-4. **Design**: pick paint or materials for each surface, set the lighting
-   and place fixtures, and add plants and objects. Use **+** next to the
-   option tabs to try alternatives.
-5. **Asset list**: generate it from your designs, add your own items, export
-   it, and track status from idea to installed.
-
 ## Development
 
 ```bash
-npm run typecheck    # TypeScript
-npm test             # unit tests (vitest)
-npm run test:e2e     # browser smoke tests (Playwright)
+npm run typecheck      # TypeScript
+npm test               # unit tests (vitest)
+npm run test:e2e       # browser smoke tests (Playwright)
 ```
 
 Architecture and module contracts are documented in [SPEC.md](SPEC.md).
