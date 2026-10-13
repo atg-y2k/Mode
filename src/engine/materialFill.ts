@@ -14,11 +14,11 @@
  * shimmering into moiré.
  */
 import type { MaterialDef, MaterialTreatment, Photo, Pt, Quad, Region, SurfaceKind } from '../../shared/types';
-import { SRGB8_TO_LINEAR, linearToSrgb8 } from './color';
+import { SRGB8_TO_LINEAR } from './color';
 import { applyHomography, computeHomography, distance, invertMat3, isConvexQuad, pointInPolygon, type Mat3 } from './geometry';
 import type { RegionStats } from './recolor';
-import { accumAniso, accumTrilinear, buildMipChain, mapChain, type MipChain } from './tex/mip';
-import { hexToLinear } from './tex/surface';
+import { accumAniso, accumTrilinear, getMipChain, mapChain, type MipChain } from './tex/mip';
+import { encodeLinear, hexToLinear } from './tex/surface';
 import type { TextureTile } from './textures';
 import type { ImageDataLike, Mask } from './types';
 
@@ -41,7 +41,7 @@ export interface MaterialOptions {
 // Mip chains (cached per tile and tint)
 // ---------------------------------------------------------------------------
 
-const chains = new WeakMap<TextureTile, { base: MipChain; tinted: Map<string, MipChain> }>();
+const tintedChains = new WeakMap<MipChain, Map<string, MipChain>>();
 
 /** Share of the texture's own color variation kept under a tint. */
 const TINT_KEEP = 0.2;
@@ -52,31 +52,32 @@ const TINT_KEEP = 0.2;
  * dark structure (and a little of its own color variation) is kept.
  */
 function chainFor(tile: TextureTile, tint: string | undefined): MipChain {
-  let entry = chains.get(tile);
-  if (!entry) {
-    entry = { base: buildMipChain(tile), tinted: new Map() };
-    chains.set(tile, entry);
-  }
+  const base = getMipChain(tile);
   const t = tint ? hexToLinear(tint) : null;
-  if (!t) return entry.base;
+  if (!t) return base;
+  let tinted = tintedChains.get(base);
+  if (!tinted) {
+    tinted = new Map();
+    tintedChains.set(base, tinted);
+  }
   const key = tint!.toLowerCase();
-  let c = entry.tinted.get(key);
+  let c = tinted.get(key);
   if (!c) {
-    const m = entry.base.mean;
+    const m = base.mean;
     const ym = Math.max(1e-4, 0.2126 * m[0] + 0.7152 * m[1] + 0.0722 * m[2]);
     const yt = 0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2];
     const a0 = (t[0] / ym) * (1 - TINT_KEEP);
     const a1 = (t[1] / ym) * (1 - TINT_KEEP);
     const a2 = (t[2] / ym) * (1 - TINT_KEEP);
     const keep = (yt / ym) * TINT_KEEP;
-    c = mapChain(entry.base, (r, g, b, out, o) => {
+    c = mapChain(base, (r, g, b, out, o) => {
       const y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
       out[o] = a0 * y + keep * r;
       out[o + 1] = a1 * y + keep * g;
       out[o + 2] = a2 * y + keep * b;
     });
-    if (entry.tinted.size > 8) entry.tinted.delete(entry.tinted.keys().next().value!);
-    entry.tinted.set(key, c);
+    if (tinted.size > 8) tinted.delete(tinted.keys().next().value!);
+    tinted.set(key, c);
   }
   return c;
 }
@@ -172,10 +173,10 @@ function maskBox(mask: Mask, w: number, h: number): { x0: number; y0: number; x1
 // applyMaterial
 // ---------------------------------------------------------------------------
 
+const KNEE = 0.82;
 /** Rolls linear values above the knee off smoothly toward 1 instead of clipping flat. */
 function softClip(v: number): number {
-  if (v <= 0.82) return v;
-  return 0.82 + 0.18 * (1 - Math.exp(-(v - 0.82) / 0.18));
+  return KNEE + (1 - KNEE) * (1 - Math.exp(-(v - KNEE) / (1 - KNEE)));
 }
 
 /**
@@ -276,7 +277,7 @@ export function applyMaterial(
     }
   }
   if (!G) {
-    const ppi = map.kind === 'screen' && map.pxPerInch > 0 && Number.isFinite(map.pxPerInch) ? map.pxPerInch : 2;
+    const ppi = screenPpiOf(map);
     const rot = (((map.rotationDeg ?? 0) || 0) * Math.PI) / 180;
     const k = tile.pxPerInch / ppi;
     const cos = Math.cos(rot) * k;
@@ -340,14 +341,30 @@ export function applyMaterial(
       }
       const alpha = (m / 255) * strength;
       const q = (y * dw + x) * 4;
-      const R = linearToSrgb8(softClip(acc[0] * k));
-      const Gc = linearToSrgb8(softClip(acc[1] * k));
-      const B = linearToSrgb8(softClip(acc[2] * k));
+      const lr = acc[0] * k;
+      const lg = acc[1] * k;
+      const lb = acc[2] * k;
+      const R = encodeLinear(lr > KNEE ? softClip(lr) : lr);
+      const Gc = encodeLinear(lg > KNEE ? softClip(lg) : lg);
+      const B = encodeLinear(lb > KNEE ? softClip(lb) : lb);
       dd[q] = dd[q] + (R - dd[q]) * alpha;
       dd[q + 1] = dd[q + 1] + (Gc - dd[q + 1]) * alpha;
       dd[q + 2] = dd[q + 2] + (B - dd[q + 2]) * alpha;
     }
   }
+}
+
+/**
+ * Photo px per texture inch for flat mapping: the screen mapping's own
+ * value, or — for a plane whose quad is degenerate — its extent over its
+ * real width.
+ */
+function screenPpiOf(map: TextureMapping): number {
+  if (map.kind === 'screen') return map.pxPerInch > 0 && Number.isFinite(map.pxPerInch) ? map.pxPerInch : 2;
+  const xs = map.quad.map((p) => p.x);
+  const span = Math.max(...xs) - Math.min(...xs);
+  const ppi = span / map.widthIn;
+  return Number.isFinite(ppi) && ppi > 0.05 ? ppi : 2;
 }
 
 /**
@@ -499,7 +516,7 @@ export function mappingForRegion(
       const widthIn = (size.widthFt * 12) / scale;
       const heightIn = (size.heightFt * 12) / scale;
       const mapping: TextureMapping = { kind: 'plane', quad: plane.quad, widthIn, heightIn, rotationDeg };
-      return { mapping, tilePxPerInch: clampPpi(maxPlaneDensity(plane.quad, widthIn, heightIn)) };
+      return { mapping, tilePxPerInch: clampPpi(maxPlaneDensity(plane.quad, widthIn, heightIn, photo.width, photo.height)) };
     }
   }
   const basePpi = pxPerFtCal
@@ -571,31 +588,38 @@ function onPlane(p: Pt, q: Quad): boolean {
   return pointInPolygon(p, grown);
 }
 
-/** Largest photo-px-per-texture-inch over the quad's corners (the near side sets the tile resolution). */
-function maxPlaneDensity(q: Quad, widthIn: number, heightIn: number): number {
+/**
+ * Largest photo-px-per-texture-inch over the part of the quad inside the
+ * photo (the near side sets the tile resolution; corners dragged far off
+ * the image don't inflate it). Sampled on a 9×9 grid over the quad.
+ */
+function maxPlaneDensity(q: Quad, widthIn: number, heightIn: number, photoW: number, photoH: number): number {
   let H: Mat3;
   try {
     H = computeHomography(UNIT_SQUARE, q);
   } catch {
     return 4;
   }
-  let best = 0;
-  for (const [s, t] of [
-    [0, 0],
-    [1, 0],
-    [1, 1],
-    [0, 1],
-  ]) {
-    const w = H[6] * s + H[7] * t + H[8];
-    if (!(Math.abs(w) > 1e-12)) continue;
-    const x = (H[0] * s + H[1] * t + H[2]) / w;
-    const y = (H[3] * s + H[4] * t + H[5]) / w;
-    // ∂(x, y)/∂s and ∂(x, y)/∂t, per texture inch.
-    const dxs = (H[0] - x * H[6]) / w / widthIn;
-    const dys = (H[3] - y * H[6]) / w / widthIn;
-    const dxt = (H[1] - x * H[7]) / w / heightIn;
-    const dyt = (H[4] - y * H[7]) / w / heightIn;
-    best = Math.max(best, Math.hypot(dxs, dys), Math.hypot(dxt, dyt));
+  const N = 8;
+  let inside = 0;
+  let all = 0;
+  for (let j = 0; j <= N; j++) {
+    for (let i = 0; i <= N; i++) {
+      const s = i / N;
+      const t = j / N;
+      const w = H[6] * s + H[7] * t + H[8];
+      if (!(Math.abs(w) > 1e-12)) continue;
+      const x = (H[0] * s + H[1] * t + H[2]) / w;
+      const y = (H[3] * s + H[4] * t + H[5]) / w;
+      // |∂(x, y)/∂s| and |∂(x, y)/∂t| per texture inch.
+      const ds = Math.hypot(H[0] - x * H[6], H[3] - y * H[6]) / Math.abs(w) / widthIn;
+      const dt = Math.hypot(H[1] - x * H[7], H[4] - y * H[7]) / Math.abs(w) / heightIn;
+      const d = Math.max(ds, dt);
+      if (!Number.isFinite(d)) continue;
+      all = Math.max(all, d);
+      if (x >= -1 && y >= -1 && x <= photoW + 1 && y <= photoH + 1) inside = Math.max(inside, d);
+    }
   }
+  const best = inside > 0 ? inside : all;
   return best > 0 ? best : 4;
 }

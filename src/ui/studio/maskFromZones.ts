@@ -126,3 +126,32 @@ export function maskForBrief(
   const paths = scene.paths.filter((p) => pathIds.includes(p.id));
   return maskFromTargets(size.width, size.height, zones, paths, opts);
 }
+
+/**
+ * Outline (photo px) of the band a path covers — the same perspective taper
+ * as rasterizePath — for drawing the area a path change may touch.
+ */
+export function pathBandOutline(path: Pick<ScenePath, 'points' | 'widthPx'>, photoHeight: number, step = 24): Pt[] {
+  const src = path.points.filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+  if (src.length < 2) return [];
+  const pts: Pt[] = [src[0]];
+  for (let i = 1; i < src.length; i++) {
+    const a = src[i - 1];
+    const b = src[i];
+    const n = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / step));
+    for (let k = 1; k <= n; k++) pts.push({ x: a.x + ((b.x - a.x) * k) / n, y: a.y + ((b.y - a.y) * k) / n });
+  }
+  const left: Pt[] = [];
+  const right: Pt[] = [];
+  for (let i = 0; i < pts.length; i++) {
+    const prev = pts[Math.max(0, i - 1)];
+    const next = pts[Math.min(pts.length - 1, i + 1)];
+    const len = Math.hypot(next.x - prev.x, next.y - prev.y) || 1;
+    const nx = -(next.y - prev.y) / len;
+    const ny = (next.x - prev.x) / len;
+    const r = pathHalfWidthAt(path, pts[i].y, photoHeight);
+    left.push({ x: pts[i].x + nx * r, y: pts[i].y + ny * r });
+    right.push({ x: pts[i].x - nx * r, y: pts[i].y - ny * r });
+  }
+  return [...left, ...right.reverse()];
+}

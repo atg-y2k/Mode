@@ -16,7 +16,17 @@
  */
 import type { PlanRequest, PlanResult, RenderVariationRequest } from '../../../shared/api';
 import { newId } from '../../../shared/ids';
-import { SPACE_TYPE_LABELS, emptyBrief, type DesignBrief, type Generation, type IdeaItem, type Photo, type PlantNote, type SceneMap, type Variation } from '../../../shared/types';
+import {
+  SPACE_TYPE_LABELS,
+  emptyBrief,
+  type DesignBrief,
+  type Generation,
+  type IdeaItem,
+  type Photo,
+  type PlantNote,
+  type SceneMap,
+  type Variation,
+} from '../../../shared/types';
 import type { ImageDataLike, Mask } from '../../engine/types';
 import { ApiError, isAbortError } from '../../lib/api';
 import { blobToAIDataUrl, blobToDataUrl, blobToImageData, dataUrlToBlob, imageDataToBlob } from '../../lib/imageImport';
@@ -548,14 +558,20 @@ function plantNotesFrom(plan: PlanResult): PlantNote[] {
 function slotsFromPlan(plan: PlanResult, placeholders: RunSlot[], compare: ReturnType<typeof resolveCompare>): RunSlot[] {
   const planned = plan.variations.filter((v) => v.brief.trim());
   if (!compare) {
-    return planned.slice(0, placeholders.length).map((v, i) => ({ key: placeholders[i]?.key ?? `v${i + 1}`, title: v.title.trim() || `Variation ${i + 1}`, brief: v.brief, state: 'pending' }));
+    return planned
+      .slice(0, placeholders.length)
+      .map((v, i) => ({ key: placeholders[i]?.key ?? `v${i + 1}`, title: v.title.trim() || `Variation ${i + 1}`, brief: v.brief, state: 'pending' }));
   }
   const remaining = [...planned];
   const take = (pred: (v: (typeof planned)[number]) => boolean) => {
     const i = remaining.findIndex(pred);
     return i >= 0 ? remaining.splice(i, 1)[0] : undefined;
   };
-  const norm = (t: string) => t.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const norm = (t: string) =>
+    t
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim();
   const matched = compare.options.map((o) => take((v) => v.optionId === o.id));
   compare.options.forEach((o, i) => {
     matched[i] ??= take((v) => norm(v.title) === norm(o.label));
@@ -659,14 +675,26 @@ function abandon(ctx: RunContext): void {
 
 let watchingStore = false;
 
-/** Deleting a run (History, strip) or closing its project aborts its requests right away. */
+/**
+ * Deleting a run (History, strip) or closing its project aborts its requests
+ * right away. Undo / redo restore a project snapshot taken before the run
+ * started (runs are recorded without history), which would silently drop an
+ * in-flight run: it is put back instead, so the run keeps rendering.
+ */
 function watchForRemovedRuns(): void {
   if (watchingStore) return;
   watchingStore = true;
   useStore.subscribe((s, prev) => {
     if (s.project === prev.project) return;
-    for (const ctx of contexts.values()) {
-      if (ctx.active && !currentGeneration(ctx)) abandon(ctx);
+    const undoRedo = s.past.length !== prev.past.length && s.future.length !== prev.future.length;
+    for (const ctx of [...contexts.values()]) {
+      if (!ctx.active || currentGeneration(ctx)) continue;
+      const lost =
+        undoRedo && s.project?.id === ctx.projectId && findPhoto(s.project, ctx.photoId)
+          ? findPhoto(prev.project, ctx.photoId)?.photo.generations.find((g) => g.id === ctx.generationId)
+          : undefined;
+      if (lost) s.addGeneration(ctx.photoId, lost);
+      else abandon(ctx);
     }
   });
 }

@@ -287,6 +287,21 @@ describe('migrateProject', () => {
     expect(gens[1].error).toMatch(/Interrupted/);
   });
 
+  it('maps unknown space types by kind and drops null scenes / drafts', () => {
+    const p = project();
+    const odd = {
+      ...p,
+      name: '  ',
+      spaces: [{ ...p.spaces[0], type: 'gazebo', kind: 'exterior', photos: [{ ...p.spaces[0].photos[0], scene: null, draft: null }] }],
+    };
+    const m = migrateProject(odd);
+    expect(m.name).toBe('My home');
+    expect(m.spaces[0].type).toBe('other-exterior');
+    expect(m.spaces[0].kind).toBe('exterior');
+    expect('scene' in m.spaces[0].photos[0]).toBe(false);
+    expect('draft' in m.spaces[0].photos[0]).toBe(false);
+  });
+
   it('rejects non-projects', () => {
     expect(() => migrateProject(null)).toThrow();
     expect(() => migrateProject({ id: 'x' })).toThrow();

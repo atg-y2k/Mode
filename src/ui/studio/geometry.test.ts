@@ -85,8 +85,20 @@ describe('polygons', () => {
   it('area, bounds and distances', () => {
     expect(polygonArea(rect(0, 0, 4, 5))).toBe(20);
     expect(boundsOf(rect(2, 3, 4, 5))).toEqual({ x: 2, y: 3, width: 4, height: 5 });
-    expect(distToPolyline({ x: 5, y: 3 }, [{ x: 0, y: 0 }, { x: 10, y: 0 }])).toBe(3);
-    const mid = pointAlong([{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }], 0.75);
+    expect(
+      distToPolyline({ x: 5, y: 3 }, [
+        { x: 0, y: 0 },
+        { x: 10, y: 0 },
+      ]),
+    ).toBe(3);
+    const mid = pointAlong(
+      [
+        { x: 0, y: 0 },
+        { x: 10, y: 0 },
+        { x: 10, y: 10 },
+      ],
+      0.75,
+    );
     expect(mid.p).toEqual({ x: 10, y: 5 });
     expect(mid.angle).toBeCloseTo(Math.PI / 2);
   });
@@ -187,10 +199,27 @@ describe('freehand helpers', () => {
     const pts = Array.from({ length: 50 }, (_, i) => ({ x: i, y: i % 2 === 0 ? 0 : 0.2 }));
     const s = simplifyPolyline(pts, 1);
     expect(s).toHaveLength(2);
-    const corner = [{ x: 0, y: 0 }, { x: 5, y: 0.1 }, { x: 10, y: 0 }, { x: 10, y: 10 }];
+    const corner = [
+      { x: 0, y: 0 },
+      { x: 5, y: 0.1 },
+      { x: 10, y: 0 },
+      { x: 10, y: 10 },
+    ];
     expect(simplifyPolyline(corner, 1).map((p) => p.x)).toEqual([0, 10, 10]);
-    expect(nearEndIndex([{ x: 0, y: 5 }, { x: 0, y: 50 }, { x: 0, y: 20 }])).toBe(1);
-    const n = normalAt([{ x: 0, y: 0 }, { x: 10, y: 0 }], 0);
+    expect(
+      nearEndIndex([
+        { x: 0, y: 5 },
+        { x: 0, y: 50 },
+        { x: 0, y: 20 },
+      ]),
+    ).toBe(1);
+    const n = normalAt(
+      [
+        { x: 0, y: 0 },
+        { x: 10, y: 0 },
+      ],
+      0,
+    );
     expect(n.x).toBeCloseTo(0);
     expect(Math.abs(n.y)).toBeCloseTo(1);
   });

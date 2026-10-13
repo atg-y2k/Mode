@@ -6,7 +6,7 @@ import { addFbm, addStreaks, addWhiteNoise, cellsFor, fbmField } from './noise';
 import type { PatternFactory } from './plan';
 import { hash3 } from './rng';
 import { jointColor, jointWidth, paletteMean, pickTone, specRng } from './spec';
-import { clamp, mix3, scale3, smoothstep, type Surface, type Vec3 } from './surface';
+import { clamp, fastSin, mix3, scale3, smoothstep, type Surface, type Vec3 } from './surface';
 
 /** Signed distance (inches) to the nearest grid line of a `cell`-inch grid; negative inside the joint. */
 function gridEdge(xIn: number, yIn: number, cell: number, half: number): number {
@@ -175,8 +175,8 @@ export const carpet: PatternFactory = (spec) => {
 export const marble: PatternFactory = (spec) => {
   const unit = Math.max(spec.uw, spec.uh);
   const tiled = spec.joint !== null && spec.joint.widthIn > 0 && unit <= 48;
-  const n = tiled ? clamp(Math.round(48 / unit), 1, 8) : 1;
-  const span = tiled ? n * unit : 48;
+  const n = tiled ? clamp(Math.round(60 / unit), 1, 8) : 1;
+  const span = tiled ? n * unit : 72;
   return {
     spanX: span,
     spanY: span,
@@ -189,14 +189,14 @@ export const marble: PatternFactory = (spec) => {
       const vein = spec.palette.length > 1 ? spec.palette[1] : scale3(base, 0.45);
       const accent = spec.palette.length > 2 ? spec.palette[2] : mix3(base, vein, 0.35);
       // Smooth flow for the main veins, finer warp for ragged vein edges.
-      const warp = fbmField(w, h, cellsFor(w, 22 * sx), cellsFor(h, 22 * sy), 3, 0.45, spec.seed ^ 0xa01);
+      const warp = fbmField(w, h, cellsFor(w, 30 * sx), cellsFor(h, 30 * sy), 4, 0.5, spec.seed ^ 0xa01);
       const warp2 = fbmField(w, h, cellsFor(w, 4 * sx), cellsFor(h, 4 * sy), 4, 0.6, spec.seed ^ 0xa02);
       const fade = fbmField(w, h, cellsFor(w, 12 * sx), cellsFor(h, 12 * sy), 3, 0.5, spec.seed ^ 0xa03);
       const cloud = fbmField(w, h, cellsFor(w, 14 * sx), cellsFor(h, 14 * sy), 4, 0.55, spec.seed ^ 0xa05);
       // Integer cycles across the tile keep the sinusoid periodic.
-      const fxA = 1 + rng.int(2);
+      const fxA = 1;
       const fyA = rng.chance(0.5) ? 1 : -1;
-      const fxB = 2 + rng.int(3);
+      const fxB = 2 + rng.int(2);
       const fyB = rng.chance(0.5) ? 3 : -2;
       const phA = rng.next() * 6.283;
       const phB = rng.next() * 6.283;
@@ -228,8 +228,8 @@ export const marble: PatternFactory = (spec) => {
           const Y = (yy + 0.5) / h;
           const wa = warp[j];
           const w2 = warp2[j];
-          const a = Math.abs(Math.sin(TAU * (fxA * X + fyA * Y) + phA + wa * 2.8 + w2 * 0.22));
-          const b = Math.abs(Math.sin(TAU * (fxB * X + fyB * Y) + phB + wa * 2 + w2 * 0.35));
+          const a = Math.abs(fastSin(TAU * (fxA * X + fyA * Y) + phA + wa * 3.6 + w2 * 0.22));
+          const b = Math.abs(fastSin(TAU * (fxB * X + fyB * Y) + phB + wa * 2 + w2 * 0.35));
           const fd = fade[j];
           const along = clamp(0.6 + fd * 1.8, 0, 1);
           const wA = 0.025 + 0.04 * clamp(0.5 + fd * 1.5, 0, 1);

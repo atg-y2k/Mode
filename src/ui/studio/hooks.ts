@@ -20,6 +20,8 @@ interface UrlEntry {
 }
 
 const urls = new Map<string, UrlEntry>();
+/** Object URLs the browser has finished decoding (see useDecodedUrl). */
+const decoded = new Set<string>();
 const REVOKE_DELAY_MS = 5000;
 
 function acquire(id: string): UrlEntry {
@@ -53,7 +55,10 @@ function release(id: string): void {
   entry.revokeTimer = setTimeout(() => {
     if (entry.refs > 0) return;
     urls.delete(id);
-    if (entry.url) URL.revokeObjectURL(entry.url);
+    if (entry.url) {
+      decoded.delete(entry.url);
+      URL.revokeObjectURL(entry.url);
+    }
     else void entry.promise.then((u) => u && URL.revokeObjectURL(u));
   }, REVOKE_DELAY_MS);
 }
@@ -94,8 +99,6 @@ export function useBlobUrl(id: string | null | undefined): BlobUrl {
 // ---------------------------------------------------------------------------
 // Flash-free image swaps
 // ---------------------------------------------------------------------------
-
-const decoded = new Set<string>();
 
 /**
  * Returns `url` once the browser has decoded it, keeping the previously

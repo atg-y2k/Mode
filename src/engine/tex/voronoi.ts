@@ -55,9 +55,6 @@ export interface VoronoiMap {
   id: Int32Array;
   /** Distance to the cell boundary, inches (≥ 0). */
   edge: Float32Array;
-  /** Offset of the pixel from its site, inches. */
-  dx: Float32Array;
-  dy: Float32Array;
 }
 
 /**
@@ -77,8 +74,6 @@ export function voronoiMap(
   const n = w * h;
   const id = new Int32Array(n);
   const edge = new Float32Array(n);
-  const dxo = new Float32Array(n);
-  const dyo = new Float32Array(n);
   // The 3×3 candidate sites around the current cell, refreshed only when the
   // lookup point moves to another cell (consecutive pixels mostly share one).
   const cxs = new Float64Array(9);
@@ -144,11 +139,9 @@ export function voronoiMap(
       }
       id[i] = ids[best];
       edge[i] = e;
-      dxo[i] = px - bx;
-      dyo[i] = py - by;
     }
   }
-  return { id, edge, dx: dxo, dy: dyo };
+  return { id, edge };
 }
 
 export interface PebbleShapes {
@@ -160,6 +153,11 @@ export interface PebbleShapes {
   /** Dome height scale and base elevation per site, inches. */
   dome: Float32Array;
   z: Float32Array;
+  /**
+   * Profile exponent: 1 = ellipsoid; 2 or 3 = worn flat top with rounded
+   * edges (h ∝ √(1 − r^(2·flat))).
+   */
+  flat: number;
 }
 
 export interface PebbleMap {
@@ -169,6 +167,9 @@ export interface PebbleMap {
   height: Float32Array;
   /** Normalized radius 0 (centre) .. 1 (rim) on the visible pebble. */
   rr: Float32Array;
+  /** Analytic surface slopes of the visible pebble (0 in gaps). */
+  gx: Float32Array;
+  gy: Float32Array;
 }
 
 /**
@@ -183,6 +184,8 @@ export function pebbleMap(s: Surface, sites: VoronoiSites, sh: PebbleShapes): Pe
   const id = new Int32Array(n);
   const height = new Float32Array(n);
   const rrOut = new Float32Array(n);
+  const gxOut = new Float32Array(n);
+  const gyOut = new Float32Array(n);
   // Candidate pebbles of the 3×3 block around the current cell (cached per cell).
   const cxs = new Float64Array(9);
   const cys = new Float64Array(9);
@@ -190,6 +193,7 @@ export function pebbleMap(s: Surface, sites: VoronoiSites, sh: PebbleShapes): Pe
   let lastI = 0x7fffffff;
   let lastJ = 0x7fffffff;
   const { ia, ib, cos, sin, dome, z } = sh;
+  const flat = Math.max(1, sh.flat);
   for (let y = 0; y < h; y++) {
     const py = (y + 0.5) / sy;
     const cj = Math.floor(py / ch);
@@ -216,6 +220,8 @@ export function pebbleMap(s: Surface, sites: VoronoiSites, sh: PebbleShapes): Pe
       let best = -1;
       let bestH = -Infinity;
       let bestR2 = 1;
+      let bestPa = 0;
+      let bestPb = 0;
       for (let m = 0; m < 9; m++) {
         const k = ks[m];
         const dx = px - cxs[m];
@@ -224,18 +230,31 @@ export function pebbleMap(s: Surface, sites: VoronoiSites, sh: PebbleShapes): Pe
         const pb = (dy * cos[k] - dx * sin[k]) * ib[k];
         const r2 = pa * pa + pb * pb;
         if (r2 >= 1) continue;
-        const hh = z[k] + dome[k] * Math.sqrt(1 - r2);
+        const hh = z[k] + dome[k] * Math.sqrt(1 - (flat === 1 ? r2 : Math.pow(r2, flat)));
         if (hh > bestH) {
           bestH = hh;
           best = k;
           bestR2 = r2;
+          bestPa = pa;
+          bestPb = pb;
         }
       }
       const i = y * w + x;
       id[i] = best;
       height[i] = best >= 0 ? bestH : 0;
       rrOut[i] = Math.sqrt(bestR2);
+      if (best >= 0) {
+        // h = dome·√(1 − q), q = r2^flat → ∂h/∂x = −dome/(2√(1−q)) · flat·r2^(flat−1) · ∂r2/∂x
+        const k = best;
+        const q = flat === 1 ? bestR2 : Math.pow(bestR2, flat);
+        const dq = flat === 1 ? 1 : flat * Math.pow(bestR2, flat - 1);
+        const dh = (-dome[k] / (2 * Math.sqrt(Math.max(1e-4, 1 - q)))) * dq;
+        const a2 = 2 * bestPa * ia[k];
+        const b2 = 2 * bestPb * ib[k];
+        gxOut[i] = dh * (a2 * cos[k] - b2 * sin[k]);
+        gyOut[i] = dh * (a2 * sin[k] + b2 * cos[k]);
+      }
     }
   }
-  return { id, height, rr: rrOut };
+  return { id, height, rr: rrOut, gx: gxOut, gy: gyOut };
 }

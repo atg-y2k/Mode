@@ -53,10 +53,10 @@ const joinNonEmpty = (parts: (string | undefined | null | false)[], sep: string)
 export function sceneSummaryText(scene: SceneMap): string {
   const a = scene.architecture;
   const category = SPACE_TYPE_LABELS[scene.category] ?? scene.category;
-  const zoneLine = scene.zones
-    .map((z) => `${z.label} (${z.kind}${z.sun ? `, ${SUN_LABEL[z.sun]}` : ''}${z.editable ? '' : ', context'})`)
+  const zoneLine = scene.zones.map((z) => `${z.label} (${z.kind}${z.sun ? `, ${SUN_LABEL[z.sun]}` : ''}${z.editable ? '' : ', context'})`).join('; ');
+  const pathLine = scene.paths
+    .map((p) => `${p.label}${p.kind === 'existing' ? '' : ` [${p.kind}]`}${p.description ? ` — ${clip(p.description, 160)}` : ''}`)
     .join('; ');
-  const pathLine = scene.paths.map((p) => `${p.label}${p.kind === 'existing' ? '' : ` [${p.kind}]`}${p.description ? ` — ${clip(p.description, 160)}` : ''}`).join('; ');
   // Most important first, so truncation drops the least useful lines.
   const lines = [
     `Photo: ${category}. ${scene.summary}`,
@@ -121,7 +121,10 @@ export function ideaText(item: IdeaItem, getTheme: (id: string) => DesignTheme |
       const p = item.product;
       const seller = p ? ` from ${p.store}${p.brand ? ` (${p.brand})` : ''}` : '';
       return clip(
-        joinNonEmpty([`Product to use: ${item.title}${seller}`, p?.specs.length ? p.specs.join(', ') : '', item.aiDescription, note && `Homeowner: ${note}`], '. '),
+        joinNonEmpty(
+          [`Product to use: ${item.title}${seller}`, p?.specs.length ? p.specs.join(', ') : '', item.aiDescription, note && `Homeowner: ${note}`],
+          '. ',
+        ),
         LIMITS.idea,
       );
     }
@@ -204,7 +207,10 @@ export function elementFeasibilityContext(
 }
 
 function describeContext(ctx: FeasibilityContext): string {
-  return joinNonEmpty([ctx.zoneLabel ? `USDA ${ctx.zoneLabel}` : ctx.zone !== undefined ? `USDA ${ctx.zone}` : 'zone unknown', ctx.sun && SUN_LABEL[ctx.sun]], ', ');
+  return joinNonEmpty(
+    [ctx.zoneLabel ? `USDA ${ctx.zoneLabel}` : ctx.zone !== undefined ? `USDA ${ctx.zone}` : 'zone unknown', ctx.sun && SUN_LABEL[ctx.sun]],
+    ', ',
+  );
 }
 
 /** "Plant check for this spot (USDA 7a, part sun): Pollinator mix — caution: …". Empty when nothing is rated. */
@@ -224,7 +230,10 @@ function guidanceText(types: readonly ElementType[], knowledge: Pick<PlanKnowled
     if (type === 'custom') continue;
     const g = knowledge.guidanceFor(type);
     if (!g) continue;
-    const rules = g.rulesOfThumb.slice(0, 3).join('; ');
+    const rules = g.rulesOfThumb
+      .slice(0, 3)
+      .map((r) => r.trim().replace(/[.;\s]+$/, ''))
+      .join('; ');
     lines.push(`- ${knowledge.getElementDef(type).label}: ${g.purpose}${rules ? ` Rules of thumb: ${rules}.` : ''}`);
   }
   return lines.length ? `Design intent of the requested elements:\n${lines.join('\n')}` : '';
@@ -317,10 +326,7 @@ export function buildPlanRequest(input: PlanInput, knowledge: PlanKnowledge): Pl
       const pairs = isCompared ? [...chosenPairs, ...compare.options.map((option) => ({ dimension: compare.dimension, option }))] : chosenPairs;
       plantCheck = plantCheckText(rateOptions(el, pairs, ctx, knowledge), ctx);
     }
-    const where = [
-      ...el.zoneIds.map((id) => zoneById.get(id)?.label),
-      ...el.pathIds.map((id) => pathById.get(id)?.label),
-    ].filter((l): l is string => !!l);
+    const where = [...el.zoneIds.map((id) => zoneById.get(id)?.label), ...el.pathIds.map((id) => pathById.get(id)?.label)].filter((l): l is string => !!l);
     return {
       type: el.type,
       label: el.label.trim() || knowledge.getElementDef(el.type).label,
@@ -371,7 +377,12 @@ export function buildPlanRequest(input: PlanInput, knowledge: PlanKnowledge): Pl
  * instruction with the sibling's option wording swapped for this option's
  * (or the option's wording appended when the sibling doesn't quote it).
  */
-export function swapOptionInBrief(siblingBrief: string, sibling: Pick<ElementOption, 'promptText'> | undefined, option: Pick<ElementOption, 'promptText'>, dimensionLabel: string): string {
+export function swapOptionInBrief(
+  siblingBrief: string,
+  sibling: Pick<ElementOption, 'promptText'> | undefined,
+  option: Pick<ElementOption, 'promptText'>,
+  dimensionLabel: string,
+): string {
   if (sibling && sibling.promptText && siblingBrief.includes(sibling.promptText)) return siblingBrief.split(sibling.promptText).join(option.promptText);
   return `${siblingBrief.trim()} For the ${dimensionLabel.toLowerCase()}, use ${option.promptText} instead.`;
 }

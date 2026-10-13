@@ -282,10 +282,11 @@ export function placeLabel(target: Rect, label: Size, stage: Size, opts: { gap?:
     { x: margin, y: maxY },
     { x: maxX, y: maxY },
   ];
-  const scored = [
-    ...sides.map((c) => ({ p: { x: fitX(c.x), y: fitY(c.y) }, corner: 0 })),
-    ...corners.map((p) => ({ p, corner: 1 })),
-  ].map((s) => ({ ...s, cover: cover(s.p), far: Math.hypot(s.p.x + label.width / 2 - fx, s.p.y + label.height / 2 - fy) }));
+  const scored = [...sides.map((c) => ({ p: { x: fitX(c.x), y: fitY(c.y) }, corner: 0 })), ...corners.map((p) => ({ p, corner: 1 }))].map((s) => ({
+    ...s,
+    cover: cover(s.p),
+    far: Math.hypot(s.p.x + label.width / 2 - fx, s.p.y + label.height / 2 - fy),
+  }));
   scored.sort((a, b) => a.cover - b.cover || (a.cover === 0 ? a.corner - b.corner : 0) || b.far - a.far);
   return scored[0].p;
 }

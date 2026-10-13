@@ -39,26 +39,6 @@ function makeCourse(rng: Rng, span: number, mean: number, spread: number, base: 
   return { starts: order.map((o) => o.st), widths: order.map((o) => o.wv), base };
 }
 
-/** Index of the unit covering x in a course (scanline pointer helper). */
-function unitAt(c: Course, xIn: number): number {
-  const s = c.starts;
-  let lo = 0;
-  let hi = s.length - 1;
-  if (xIn < s[0]) return s.length - 1;
-  while (lo < hi) {
-    const mid = (lo + hi + 1) >> 1;
-    if (s[mid] <= xIn) lo = mid;
-    else hi = mid - 1;
-  }
-  return lo;
-}
-
-/** Distance (inches) from x to the nearest unit boundary in a course. */
-function boundaryDist(c: Course, k: number, xIn: number, span: number): { u: number; d: number } {
-  let u = xIn - c.starts[k];
-  if (u < 0) u += span;
-  return { u, d: Math.min(u, c.widths[k] - u) };
-}
 
 interface CoursedOptions {
   exposure: number;
@@ -109,13 +89,23 @@ function coursed(spec: NormSpec, o: CoursedOptions) {
         const v = yIn - r * e;
         const c = courses[r];
         const above = courses[(r - 1 + o.rows) % o.rows];
+        const cs = c.starts;
+        const as = above.starts;
+        // Scanline pointers: last unit starting at or before x (units before
+        // the first start belong to the last unit, which wraps around).
+        let pk = -1;
+        let pa = -1;
         for (let x = 0; x < w; x++) {
           const xIn = (x + 0.5) / sx;
-          const k = unitAt(c, xIn);
-          const { u, d } = boundaryDist(c, k, xIn, o.span);
+          while (pk + 1 < cs.length && xIn >= cs[pk + 1]) pk++;
+          while (pa + 1 < as.length && xIn >= as[pa + 1]) pa++;
+          const k = pk < 0 ? cs.length - 1 : pk;
+          const ka = pa < 0 ? as.length - 1 : pa;
+          let u = xIn - cs[k];
+          if (u < 0) u += o.span;
+          const d = Math.min(u, c.widths[k] - u);
           const id = c.base + k;
           // Butt edge of the unit above at this x (it overlaps the top of this course).
-          const ka = unitAt(above, xIn);
           const buttAbove = butt[above.base + ka];
           const vb = v - buttAbove;
           const i = y * w + x;
@@ -127,9 +117,11 @@ function coursed(spec: NormSpec, o: CoursedOptions) {
             // Still on the unit above (its butt hangs lower here).
             const ida = above.base + ka;
             t = tones[ida];
-            const ua = boundaryDist(above, ka, xIn, o.span);
-            kShade = o.shade(s, i, ida, ua.u, e + v, above.widths[ka]);
-            gcov = clamp((ua.d - o.gap / 2) * ppi + 0.5, 0, 1);
+            let ua = xIn - as[ka];
+            if (ua < 0) ua += o.span;
+            const da = Math.min(ua, above.widths[ka] - ua);
+            kShade = o.shade(s, i, ida, ua, e + v, above.widths[ka]);
+            gcov = clamp((da - o.gap / 2) * ppi + 0.5, 0, 1);
             hgt = o.thickness;
           } else {
             t = tones[id];
@@ -161,12 +153,14 @@ export const roofShingles: PatternFactory = (spec) => {
   const big = Math.max(spec.uw, spec.uh);
   const tab = clamp(big > 10 ? big : 12, 6, 40);
   const threeTab = spec.variation <= 0.2;
-  const span = threeTab ? tab * clamp(Math.round(48 / tab), 2, 8) : 48;
-  const rows = clamp(Math.ceil(36 / exposure / 2) * 2, 4, 16);
+  // Roofs are seen from afar, where a small repeat is obvious: use a wide tile.
+  const span = threeTab ? tab * clamp(Math.round(72 / tab), 2, 12) : 96;
+  const rows = clamp(Math.ceil(64 / exposure / 2) * 2, 4, 24);
   let granules: Float32Array | null = null;
   let mottle: Float32Array | null = null;
   const bands: number[] = [];
   const cuts: number[] = [];
+  const cutDark: number[] = [];
   return coursed(spec, {
     exposure,
     span,
@@ -184,9 +178,10 @@ export const roofShingles: PatternFactory = (spec) => {
     tone: (rng) => {
       // Architectural (laminated) tabs: the darker under-layer shows through a
       // cut-out at the end of each tab, and some tabs are a shade darker.
-      bands.push(!threeTab && rng.chance(0.35) ? rng.range(0.1, 0.22) : 0);
-      cuts.push(threeTab ? 0 : rng.range(1.2, 3.6));
-      return blendTone(rng, spec, threeTab ? 0.2 : 0.55, threeTab ? 0.03 : 0.07);
+      bands.push(!threeTab && rng.chance(0.3) ? rng.range(0.05, 0.13) : 0);
+      cuts.push(threeTab ? 0 : rng.chance(0.75) ? rng.range(0.8, 4) : 0);
+      cutDark.push(rng.range(0.15, 0.32));
+      return blendTone(rng, spec, threeTab ? 0.2 : 0.4, threeTab ? 0.03 : 0.05);
     },
     shade: (s, i, unit, u, v, width) => {
       if (!granules) {
@@ -202,7 +197,7 @@ export const roofShingles: PatternFactory = (spec) => {
       if (cut > 0) {
         const ppi = (s.sx + s.sy) / 2;
         const inCut = clamp((u - (width - cut)) * ppi + 0.5, 0, 1) * clamp((v - exposure * 0.32) * ppi + 0.5, 0, 1);
-        k *= 1 - 0.42 * inCut;
+        k *= 1 - cutDark[unit] * inCut;
       }
       return k;
     },

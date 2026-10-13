@@ -21,8 +21,9 @@ import { downloadBlob } from '../../lib/imageImport';
 import * as db from '../../state/persistence';
 import { findPhoto, useStore } from '../../state/store';
 import { polygonArea } from './geometry';
-import { cancelRun, errorMessage, isRunActive, startRun, type StartRunOptions } from './generate';
-import { compareContext } from './tiles';
+import { cancelRun, errorMessage, generationOfVariation, isRunActive, startRun, type StartRunOptions } from './generate';
+import { getRunInfo } from './runs';
+import { compareContext, runVariations } from './tiles';
 
 const store = () => useStore.getState();
 
@@ -53,26 +54,26 @@ function toggle(list: Draft<string[]>, id: string): boolean {
 }
 
 /**
- * Click on a zone: toggles it in the open element's "where" when an element
- * is open in the Design panel, else in the brief's target areas.
+ * Click on a zone: an untouched area joins the brief's target areas; a
+ * targeted one (directly or through an element) is left as is again —
+ * removed from the targets and from every element's "where".
  */
 export function toggleZoneTarget(photo: Photo, zoneId: string): void {
   const s = store();
   const zone = photo.scene?.zones.find((z) => z.id === zoneId);
   if (!zone) return;
-  const el = activeElement(photo, s.studio.activeElementId);
-  let added = false;
-  s.updateDraft(photo.id, (d) => {
-    const target = el ? d.elements.find((e) => e.id === el.id) : undefined;
-    if (target) added = toggle(target.zoneIds, zoneId);
-    else {
-      added = toggle(d.targetZoneIds, zoneId);
-      // Un-targeting an area also takes it out of elements that used it,
-      // so the area really stops changing.
-      if (!added) for (const e of d.elements) e.zoneIds = e.zoneIds.filter((id) => id !== zoneId);
-    }
-  }, {});
-  if (!zone.editable && added) s.notify(`“${zone.label}” is usually left as is — it will change only if your brief asks for it.`, 'info');
+  const targeted = targetedZoneIds(photo.draft).has(zoneId);
+  s.updateDraft(
+    photo.id,
+    (d) => {
+      if (targeted) {
+        d.targetZoneIds = d.targetZoneIds.filter((id) => id !== zoneId);
+        for (const e of d.elements) e.zoneIds = e.zoneIds.filter((id) => id !== zoneId);
+      } else d.targetZoneIds.push(zoneId);
+    },
+    {},
+  );
+  if (!zone.editable && !targeted) s.notify(`“${zone.label}” is usually left as is — it will change only if your brief asks for it.`, 'info');
 }
 
 /**
@@ -85,10 +86,14 @@ export function activatePath(photo: Photo, space: Space | undefined, pathId: str
   if (!path) return;
   const el = activeElement(photo, s.studio.activeElementId);
   if (el) {
-    s.updateDraft(photo.id, (d) => {
-      const target = d.elements.find((e) => e.id === el.id);
-      if (target) toggle(target.pathIds, pathId);
-    }, {});
+    s.updateDraft(
+      photo.id,
+      (d) => {
+        const target = d.elements.find((e) => e.id === el.id);
+        if (target) toggle(target.pathIds, pathId);
+      },
+      {},
+    );
     return;
   }
   const using = photo.draft?.elements.find((e) => e.pathIds.includes(pathId));
@@ -110,10 +115,14 @@ function addPathwayFor(photo: Photo, space: Space | undefined, pathId: string): 
   const s = store();
   const existing = photo.draft?.elements.find((e) => e.type === 'pathway');
   if (existing) {
-    s.updateDraft(photo.id, (d) => {
-      const target = d.elements.find((e) => e.id === existing.id);
-      if (target && !target.pathIds.includes(pathId)) target.pathIds.push(pathId);
-    }, {});
+    s.updateDraft(
+      photo.id,
+      (d) => {
+        const target = d.elements.find((e) => e.id === existing.id);
+        if (target && !target.pathIds.includes(pathId)) target.pathIds.push(pathId);
+      },
+      {},
+    );
     openElement(existing.id);
     return;
   }
@@ -169,7 +178,7 @@ function clockwise(points: Pt[]): Pt[] {
   return a < 0 ? [...points].reverse() : points;
 }
 
-/** A drawn area becomes a zone ("Sketched area") targeted by the open element or the brief. */
+/** A drawn area becomes a zone ("Sketched area") that the brief targets. */
 export function addSketchedArea(photo: Photo, space: Space | undefined, polygon: Pt[]): string | null {
   if (polygon.length < 3 || polygonArea(polygon) < 16) return null;
   const s = store();
@@ -177,16 +186,22 @@ export function addSketchedArea(photo: Photo, space: Space | undefined, polygon:
   const id = newId('zone');
   const labels = findPhoto(s.project, photo.id)?.photo.scene?.zones.map((z) => z.label) ?? [];
   const label = nextLabel('Sketched area', labels);
-  s.updateScene(photo.id, (scene) => {
-    scene.zones.push({ id, kind: 'other', label, description: 'Area outlined by the homeowner on the photo', polygon: clockwise(polygon.map((p) => ({ x: Math.round(p.x * 10) / 10, y: Math.round(p.y * 10) / 10 }))), editable: true });
-  }, {});
-  const el = activeElement(findPhoto(store().project, photo.id)?.photo, s.studio.activeElementId);
-  s.updateDraft(photo.id, (d) => {
-    const target = el ? d.elements.find((e) => e.id === el.id) : undefined;
-    if (target) target.zoneIds.push(id);
-    else d.targetZoneIds.push(id);
-  }, {});
-  s.notify(el ? `${label} added to ${el.label}.` : `${label} added to the areas that may change.`, 'success');
+  s.updateScene(
+    photo.id,
+    (scene) => {
+      scene.zones.push({
+        id,
+        kind: 'other',
+        label,
+        description: 'Area outlined by the homeowner on the photo',
+        polygon: clockwise(polygon.map((p) => ({ x: Math.round(p.x * 10) / 10, y: Math.round(p.y * 10) / 10 }))),
+        editable: true,
+      });
+    },
+    {},
+  );
+  s.updateDraft(photo.id, (d) => void d.targetZoneIds.push(id), {});
+  s.notify(`${label} added to the areas that may change.`, 'success');
   return id;
 }
 
@@ -198,45 +213,65 @@ export function addSketchedPath(photo: Photo, space: Space | undefined, points: 
   const id = newId('path');
   const labels = findPhoto(s.project, photo.id)?.photo.scene?.paths.map((p) => p.label) ?? [];
   const label = nextLabel('Sketched path', labels);
-  s.updateScene(photo.id, (scene) => {
-    scene.paths.push({
-      id,
-      label,
-      from: '',
-      to: '',
-      description: '',
-      points: points.map((p) => ({ x: Math.round(p.x * 10) / 10, y: Math.round(p.y * 10) / 10 })),
-      widthPx: Math.max(4, Math.round(widthPx)),
-      kind: 'sketch',
-    });
-  }, {});
+  s.updateScene(
+    photo.id,
+    (scene) => {
+      scene.paths.push({
+        id,
+        label,
+        from: '',
+        to: '',
+        description: '',
+        points: points.map((p) => ({ x: Math.round(p.x * 10) / 10, y: Math.round(p.y * 10) / 10 })),
+        widthPx: Math.max(4, Math.round(widthPx)),
+        kind: 'sketch',
+      });
+    },
+    {},
+  );
   const fresh = findPhoto(store().project, photo.id)?.photo ?? photo;
   activatePath(fresh, space, id);
   return id;
 }
 
 export function setPathWidth(photoId: string, pathId: string, widthPx: number): void {
-  store().updateScene(photoId, (scene) => {
-    const p = scene.paths.find((x) => x.id === pathId);
-    if (p) p.widthPx = Math.max(4, Math.round(widthPx));
-  }, { coalesce: `path-width:${pathId}` });
+  store().updateScene(
+    photoId,
+    (scene) => {
+      const p = scene.paths.find((x) => x.id === pathId);
+      if (p) p.widthPx = Math.max(4, Math.round(widthPx));
+    },
+    { coalesce: `path-width:${pathId}` },
+  );
 }
 
 export function movePathPoint(photoId: string, pathId: string, index: number, pt: Pt): void {
-  store().updateScene(photoId, (scene) => {
-    const p = scene.paths.find((x) => x.id === pathId);
-    if (p && p.points[index]) p.points[index] = { x: Math.round(pt.x * 10) / 10, y: Math.round(pt.y * 10) / 10 };
-  }, { coalesce: `path-point:${pathId}:${index}` });
+  store().updateScene(
+    photoId,
+    (scene) => {
+      const p = scene.paths.find((x) => x.id === pathId);
+      if (p && p.points[index]) p.points[index] = { x: Math.round(pt.x * 10) / 10, y: Math.round(pt.y * 10) / 10 };
+    },
+    { coalesce: `path-point:${pathId}:${index}` },
+  );
 }
 
 export function deleteScenePath(photo: Photo, pathId: string): void {
   const s = store();
-  s.updateScene(photo.id, (scene) => {
-    scene.paths = scene.paths.filter((p) => p.id !== pathId);
-  }, {});
-  s.updateDraft(photo.id, (d) => {
-    for (const e of d.elements) e.pathIds = e.pathIds.filter((id) => id !== pathId);
-  }, {});
+  s.updateScene(
+    photo.id,
+    (scene) => {
+      scene.paths = scene.paths.filter((p) => p.id !== pathId);
+    },
+    {},
+  );
+  s.updateDraft(
+    photo.id,
+    (d) => {
+      for (const e of d.elements) e.pathIds = e.pathIds.filter((id) => id !== pathId);
+    },
+    {},
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -259,15 +294,19 @@ export function chooseCompareOption(photo: Photo, g: Generation, v: Variation): 
   const optionId = v.optionId;
   const inDraft = photo.draft?.elements.find((e) => e.id === elementId);
   if (inDraft) {
-    s.updateDraft(photo.id, (d) => {
-      const el = d.elements.find((e) => e.id === elementId);
-      if (!el) return;
-      el.choices[dimensionId] = [optionId];
-      // Tailored options may only live in the run's snapshot: bring the option along.
-      const dim = el.dimensions.find((x) => x.id === dimensionId);
-      const option = ctx.options.find((o) => o.id === optionId);
-      if (dim && option && !dim.options.some((o) => o.id === optionId)) dim.options.push(structuredClone(option));
-    }, {});
+    s.updateDraft(
+      photo.id,
+      (d) => {
+        const el = d.elements.find((e) => e.id === elementId);
+        if (!el) return;
+        el.choices[dimensionId] = [optionId];
+        // Tailored options may only live in the run's snapshot: bring the option along.
+        const dim = el.dimensions.find((x) => x.id === dimensionId);
+        const option = ctx.options.find((o) => o.id === optionId);
+        if (dim && option && !dim.options.some((o) => o.id === optionId)) dim.options.push(structuredClone(option));
+      },
+      {},
+    );
     s.notify(`${ctx.dimensionLabel}: ${v.optionLabel ?? 'option'} chosen for ${inDraft.label}.`, 'success');
   } else {
     s.notify(`${ctx.elementLabel} is no longer in the brief — showing the variation.`, 'info');
@@ -276,7 +315,12 @@ export function chooseCompareOption(photo: Photo, g: Generation, v: Variation): 
 }
 
 function safeName(text: string): string {
-  return text.replace(/[^a-z0-9-_]+/gi, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'variation';
+  return (
+    text
+      .replace(/[^a-z0-9-_]+/gi, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 60) || 'variation'
+  );
 }
 
 export async function downloadVariation(v: Variation): Promise<void> {
@@ -313,4 +357,25 @@ export async function runOrNotify(opts: StartRunOptions): Promise<string | null>
 /** Short label of a photo's setting for prompts and microcopy. */
 export function spaceLabel(space: Space | undefined): string {
   return space ? SPACE_TYPE_LABELS[space.type] : 'Photo';
+}
+
+/** The run the viewer is "in": the open grid's run, else the shown variation's, else the newest with results. */
+export function currentRun(photo: Photo, viewVariationId: string | null, gridGenerationId: string | null): Generation | undefined {
+  return (
+    (gridGenerationId ? photo.generations.find((g) => g.id === gridGenerationId) : undefined) ??
+    generationOfVariation(photo, viewVariationId) ??
+    photo.generations.find((g) => g.variations.length > 0)
+  );
+}
+
+/** ←/→: the previous / next variation of the current run (from the original: its first / last). */
+export function stepVariation(photo: Photo, dir: 1 | -1): void {
+  const { viewVariationId, gridGenerationId } = store().studio;
+  const run = currentRun(photo, viewVariationId, gridGenerationId);
+  if (!run) return;
+  const list = runVariations(run, getRunInfo(run.id));
+  if (list.length === 0) return;
+  const i = list.findIndex((v) => v.id === viewVariationId);
+  const next = i < 0 ? (dir > 0 ? 0 : list.length - 1) : Math.min(list.length - 1, Math.max(0, i + dir));
+  if (next !== i) viewVariation(list[next].id);
 }

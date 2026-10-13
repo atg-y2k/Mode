@@ -21,6 +21,9 @@ export interface MipChain {
   levels: MipLevel[];
   /** Mean linear color of the whole tile. */
   mean: [number, number, number];
+  /** Level-0 size (the repeat period in texels). */
+  w0: number;
+  h0: number;
 }
 
 /** Resamples one axis by an exact box filter with wrap-around (periodic). */
@@ -98,6 +101,18 @@ function boxResample(
   return out;
 }
 
+const cached = new WeakMap<ImageDataLike, MipChain>();
+
+/** buildMipChain memoized per tile object (tiles are immutable once generated). */
+export function getMipChain(tile: ImageDataLike): MipChain {
+  let c = cached.get(tile);
+  if (!c) {
+    c = buildMipChain(tile);
+    cached.set(tile, c);
+  }
+  return c;
+}
+
 /** Builds the pyramid down to 1×1 (the last level is the tile's mean color). */
 export function buildMipChain(tile: ImageDataLike): MipChain {
   const w0 = Math.max(1, tile.width);
@@ -121,7 +136,7 @@ export function buildMipChain(tile: ImageDataLike): MipChain {
     levels.push(cur);
   }
   const top = levels[levels.length - 1].data;
-  return { levels, mean: [top[0], top[1], top[2]] };
+  return { levels, mean: [top[0], top[1], top[2]], w0, h0 };
 }
 
 /** Applies a per-texel linear color transform to every level (it commutes with box filtering). */
@@ -132,12 +147,13 @@ export function mapChain(chain: MipChain, f: (r: number, g: number, b: number, o
     return { ...l, data };
   });
   const top = levels[levels.length - 1].data;
-  return { levels, mean: [top[0], top[1], top[2]] };
+  return { levels, mean: [top[0], top[1], top[2]], w0: chain.w0, h0: chain.h0 };
 }
 
 /**
  * Adds `wt` × the bilinear, wrap-around sample of `l` at level-0 texel
- * coordinates (u, v) into acc[0..2].
+ * coordinates (u, v) into acc[0..2]. (u, v) must already be wrapped into
+ * the level-0 period [0, w0) × [0, h0) (see accumTrilinear).
  */
 export function accumBilinear(l: MipLevel, u: number, v: number, wt: number, acc: Float64Array): void {
   const x = u * l.kx - 0.5;
@@ -148,10 +164,12 @@ export function accumBilinear(l: MipLevel, u: number, v: number, wt: number, acc
   const ty = y - fy;
   const w = l.w;
   const h = l.h;
-  let x0 = fx % w;
+  let x0 = fx;
   if (x0 < 0) x0 += w;
-  let y0 = fy % h;
+  else if (x0 >= w) x0 -= w;
+  let y0 = fy;
   if (y0 < 0) y0 += h;
+  else if (y0 >= h) y0 -= h;
   const x1 = x0 + 1 === w ? 0 : x0 + 1;
   const y1 = y0 + 1 === h ? 0 : y0 + 1;
   const d = l.data;
@@ -168,10 +186,19 @@ export function accumBilinear(l: MipLevel, u: number, v: number, wt: number, acc
   acc[2] += d[a + 2] * w00 + d[b + 2] * w10 + d[c + 2] * w01 + d[e + 2] * w11;
 }
 
-/** Trilinear sample at level-of-detail `lod` (log2 of texels per pixel), accumulated with weight `wt`. */
+/**
+ * Trilinear sample at level-of-detail `lod` (log2 of texels per pixel),
+ * accumulated with weight `wt`. (u, v) are level-0 texel coordinates, any range.
+ */
 export function accumTrilinear(chain: MipChain, u: number, v: number, lod: number, wt: number, acc: Float64Array): void {
   const levels = chain.levels;
   const max = levels.length - 1;
+  const w0 = chain.w0;
+  const h0 = chain.h0;
+  u -= Math.floor(u / w0) * w0;
+  v -= Math.floor(v / h0) * h0;
+  if (u >= w0) u = 0;
+  if (v >= h0) v = 0;
   if (!(lod > 0)) {
     accumBilinear(levels[0], u, v, wt, acc);
     return;

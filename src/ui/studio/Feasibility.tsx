@@ -81,7 +81,7 @@ export function PlantNoteChips({ notes, tone = 'surface', max = 6 }: { notes: re
 }
 
 /** Compact "🌿 4 plants" chip summarizing a run's plant feasibility; hover lists every plant. */
-export function PlantSummaryChip({ notes }: { notes: readonly PlantNote[] }) {
+export function PlantSummaryChip({ notes, compact }: { notes: readonly PlantNote[]; compact?: boolean }) {
   if (notes.length === 0) return null;
   const worst = worstRating(notes.map((n) => n.rating)) ?? 'good';
   const issues = notes.filter((n) => n.rating !== 'good').length;
@@ -91,7 +91,7 @@ export function PlantSummaryChip({ notes }: { notes: readonly PlantNote[] }) {
         <span className={cn('inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[11px] font-medium', CHIP_SURFACE[worst])}>
           <Leaf className="size-3" />
           {notes.length}
-          {issues > 0 && <span className="opacity-80">· {issues} to check</span>}
+          {issues > 0 && <span className="opacity-80">{compact ? `· ${issues}!` : `· ${issues} to check`}</span>}
         </span>
       }
       content={

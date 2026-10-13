@@ -30,14 +30,14 @@ interface Axis {
 }
 
 /** Per-pixel lattice index / fraction / quintic fade along one axis. */
-function axis(size: number, cells: number, offsetPx = 0): Axis {
+function axis(size: number, cells: number): Axis {
   const i0 = new Int32Array(size);
   const i1 = new Int32Array(size);
   const t = new Float32Array(size);
   const f = new Float32Array(size);
   const k = cells / size;
   for (let p = 0; p < size; p++) {
-    let c = (p + 0.5 + offsetPx) * k;
+    let c = (p + 0.5) * k;
     c -= Math.floor(c / cells) * cells;
     const i = Math.floor(c);
     const fr = c - i;
@@ -102,34 +102,6 @@ export function addNoise(
   }
 }
 
-/**
- * Like addNoise but evaluated on a coarser grid (factor dx × dy) and
- * bilinearly upsampled with wrap-around: exact enough for smooth, low
- * frequency fields and many times cheaper.
- */
-function addNoiseCoarse(
-  out: Float32Array,
-  w: number,
-  h: number,
-  cx: number,
-  cy: number,
-  seed: number,
-  amp: number,
-  mode: 'signed' | 'abs',
-  dx: number,
-  dy: number,
-): void {
-  if (dx <= 1 && dy <= 1) {
-    addNoise(out, w, h, cx, cy, seed, amp, mode);
-    return;
-  }
-  const cw = Math.max(1, Math.ceil(w / dx));
-  const ch = Math.max(1, Math.ceil(h / dy));
-  const small = new Float32Array(cw * ch);
-  addNoise(small, cw, ch, cx, cy, seed, amp, mode);
-  upsampleAdd(small, cw, ch, out, w, h);
-}
-
 /** Adds the periodic bilinear upsampling of `src` (sw×sh) into `out` (w×h). */
 function upsampleAdd(src: Float32Array, sw: number, sh: number, out: Float32Array, w: number, h: number): void {
   const kx = sw / w;
@@ -169,6 +141,10 @@ function upsampleAdd(src: Float32Array, sw: number, sh: number, out: Float32Arra
  * Octaves whose cells would be smaller than ~1.5 px are skipped (they would
  * only alias). The sum is normalized so the result stays in about [-amp, amp]
  * ('abs' mode: [0, amp], a turbulence field).
+ *
+ * Smooth octaves are evaluated on coarser grids (cells ≥ ~6 grid samples)
+ * and accumulated coarse-to-fine — each grid is bilinearly upsampled into the
+ * next finer one — so a whole field costs about one full-resolution pass.
  */
 export function addFbm(
   out: Float32Array,
@@ -191,16 +167,35 @@ export function addFbm(
   a = amp / total;
   let fx = Math.max(1, Math.round(cx));
   let fy = Math.max(1, Math.round(cy));
+  // Group octaves by grid decimation (a power of two, ≤ 8).
+  const groups = new Map<number, { fx: number; fy: number; seed: number; amp: number }[]>();
   for (let o = 0; o < octaves; o++) {
     if (o > 0 && (w / fx < 1.5 || h / fy < 1.5)) break;
-    // Smooth octaves (cells many px wide) are evaluated coarsely and upsampled.
-    const dx = Math.max(1, Math.min(8, Math.floor(w / fx / 6)));
-    const dy = Math.max(1, Math.min(8, Math.floor(h / fy / 6)));
-    addNoiseCoarse(out, w, h, fx, fy, (seed + Math.imul(o + 1, 0x9e3779b1)) | 0, a, mode, dx, dy);
+    const cell = Math.min(w / fx, h / fy);
+    let d = 1;
+    while (d < 8 && cell / (d * 2) >= 6) d *= 2;
+    let g = groups.get(d);
+    if (!g) groups.set(d, (g = []));
+    g.push({ fx, fy, seed: (seed + Math.imul(o + 1, 0x9e3779b1)) | 0, amp: a });
     a *= gain;
     fx *= 2;
     fy *= 2;
   }
+  const ds = [...groups.keys()].sort((p, q) => q - p);
+  let acc: Float32Array | null = null;
+  let aw = 0;
+  let ah = 0;
+  for (const d of ds) {
+    const gw = d === 1 ? w : Math.max(1, Math.ceil(w / d));
+    const gh = d === 1 ? h : Math.max(1, Math.ceil(h / d));
+    const buf = d === 1 ? out : new Float32Array(gw * gh);
+    if (acc) upsampleAdd(acc, aw, ah, buf, gw, gh);
+    for (const oc of groups.get(d)!) addNoise(buf, gw, gh, oc.fx, oc.fy, oc.seed, oc.amp, mode);
+    acc = buf;
+    aw = gw;
+    ah = gh;
+  }
+  if (acc && acc !== out) upsampleAdd(acc, aw, ah, out, w, h);
 }
 
 /** New field filled with fBm (see addFbm). */
@@ -319,25 +314,4 @@ export function blurWrap(src: Float32Array, w: number, h: number, rx: number, ry
     }
   }
   return a;
-}
-
-/** Bilinear lookup in a periodic field at fractional pixel coordinates. */
-export function sampleWrap(f: Float32Array, w: number, h: number, x: number, y: number): number {
-  x -= 0.5;
-  y -= 0.5;
-  const fx = Math.floor(x);
-  const fy = Math.floor(y);
-  const tx = x - fx;
-  const ty = y - fy;
-  let x0 = fx % w;
-  if (x0 < 0) x0 += w;
-  let y0 = fy % h;
-  if (y0 < 0) y0 += h;
-  const x1 = x0 + 1 === w ? 0 : x0 + 1;
-  const y1 = y0 + 1 === h ? 0 : y0 + 1;
-  const a = f[y0 * w + x0];
-  const b = f[y0 * w + x1];
-  const c = f[y1 * w + x0];
-  const d = f[y1 * w + x1];
-  return a + (b - a) * tx + (c - a + (a - b - c + d) * tx) * ty;
 }

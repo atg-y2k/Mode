@@ -55,13 +55,23 @@ const at = (m: { width: number; data: Uint8Array }, x: number, y: number) => m.d
 
 describe('briefTargetIds', () => {
   it('unions brief targets with element zones/paths and drops unknown ids', () => {
-    const sc = scene([square('a', 0, 0, 10), square('b', 20, 0, 10)], [path('p', [{ x: 0, y: 0 }, { x: 5, y: 5 }], 4)]);
+    const sc = scene(
+      [square('a', 0, 0, 10), square('b', 20, 0, 10)],
+      [
+        path(
+          'p',
+          [
+            { x: 0, y: 0 },
+            { x: 5, y: 5 },
+          ],
+          4,
+        ),
+      ],
+    );
     const brief: DesignBrief = {
       ...emptyBrief(),
       targetZoneIds: ['a', 'gone'],
-      elements: [
-        { id: 'e', type: 'pathway', label: 'Walk', zoneIds: ['b', 'a'], pathIds: ['p', 'nope'], dimensions: [], choices: {}, note: '' },
-      ],
+      elements: [{ id: 'e', type: 'pathway', label: 'Walk', zoneIds: ['b', 'a'], pathIds: ['p', 'nope'], dimensions: [], choices: {}, note: '' }],
     };
     expect(briefTargetIds(brief, sc)).toEqual({ zoneIds: ['a', 'b'], pathIds: ['p'] });
     expect(briefTargetIds(brief, undefined)).toEqual({ zoneIds: [], pathIds: [] });
@@ -102,7 +112,14 @@ describe('maskFromTargets', () => {
   });
 
   it('buffers paths, wider at the near (lower) end', () => {
-    const p = path('walk', [{ x: 100, y: 150 }, { x: 100, y: 60 }], 30);
+    const p = path(
+      'walk',
+      [
+        { x: 100, y: 150 },
+        { x: 100, y: 60 },
+      ],
+      30,
+    );
     expect(pathHalfWidthAt(p, 150, H)).toBeCloseTo(15);
     expect(pathHalfWidthAt(p, 60, H)).toBeLessThan(15);
     const m = createMask(W, H);
@@ -130,5 +147,27 @@ describe('maskForBrief', () => {
     const m = maskForBrief({ width: W, height: H }, sc, { ...emptyBrief(), targetZoneIds: ['a'] })!;
     expect(m.width).toBe(W);
     expect(at(m, 80, 70)).toBe(255);
+  });
+});
+
+describe('pathBandOutline', () => {
+  it('outlines a band that tapers toward the far end', async () => {
+    const { pathBandOutline } = await import('./maskFromZones');
+    const outline = pathBandOutline(
+      {
+        points: [
+          { x: 100, y: 150 },
+          { x: 100, y: 60 },
+        ],
+        widthPx: 30,
+      },
+      H,
+    );
+    expect(outline.length).toBeGreaterThan(4);
+    const near = outline.filter((p) => Math.abs(p.y - 150) < 0.01).map((p) => p.x);
+    const far = outline.filter((p) => Math.abs(p.y - 60) < 0.01).map((p) => p.x);
+    expect(Math.max(...near) - Math.min(...near)).toBeCloseTo(30);
+    expect(Math.max(...far) - Math.min(...far)).toBeLessThan(30);
+    expect(pathBandOutline({ points: [{ x: 1, y: 1 }], widthPx: 10 }, H)).toEqual([]);
   });
 });

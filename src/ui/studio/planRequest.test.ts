@@ -117,11 +117,29 @@ const knowledge: PlanKnowledge = {
   getElementDef: (type) => (type === 'pathway' ? pathwayDef : { ...pathwayDef, type, label: 'Planting bed', dimensions: [] }),
   guidanceFor: (type) =>
     type === 'pathway'
-      ? { type, purpose: 'Lead guests clearly to the door.', rulesOfThumb: ['Primary walks 4–5 ft wide', 'Avoid zig-zags', 'Landing at the door', 'Fourth rule'], relateToArchitecture: [] }
+      ? {
+          type,
+          purpose: 'Lead guests clearly to the door.',
+          rulesOfThumb: ['Primary walks 4–5 ft wide', 'Avoid zig-zags', 'Landing at the door', 'Fourth rule'],
+          relateToArchitecture: [],
+        }
       : undefined,
   getTheme: (id) =>
     id === 'cottage'
-      ? { id, name: 'Cottage garden', setting: 'exterior', purpose: 'Abundant, romantic planting', description: '', principles: [], palette: [], materials: [], plants: [], lighting: [], suits: [], promptHint: 'loose layered cottage planting' }
+      ? {
+          id,
+          name: 'Cottage garden',
+          setting: 'exterior',
+          purpose: 'Abundant, romantic planting',
+          description: '',
+          principles: [],
+          palette: [],
+          materials: [],
+          plants: [],
+          lighting: [],
+          suits: [],
+          promptHint: 'loose layered cottage planting',
+        }
       : undefined,
   optionFeasibility: (_type, _dim, optionId, ctx) => {
     calls.push(ctx);
@@ -178,7 +196,10 @@ describe('buildPlanRequest', () => {
     scene,
     setting: 'exterior' as const,
     spaceLabel: 'Front yard',
-    ideas: [idea({ kind: 'theme', themeId: 'cottage', title: 'Cottage' }), idea({ kind: 'image', title: 'Stone walk', aiDescription: 'Bluestone walk', note: 'love the edging', colors: ['#aabbcc'] })],
+    ideas: [
+      idea({ kind: 'theme', themeId: 'cottage', title: 'Cottage' }),
+      idea({ kind: 'image', title: 'Stone walk', aiDescription: 'Bluestone walk', note: 'love the edging', colors: ['#aabbcc'] }),
+    ],
     location,
     count: 9,
   };
@@ -225,7 +246,11 @@ describe('buildPlanRequest', () => {
 
   it('compare runs drop the compared dimension from the choices and list the options', () => {
     const b = brief();
-    const compare = resolveCompare(b, { elementId: 'el-walk', dimensionId: 'stone-size', optionIds: ['large', 'small', 'large', 'nope', 'gravel'] }, knowledge)!;
+    const compare = resolveCompare(
+      b,
+      { elementId: 'el-walk', dimensionId: 'stone-size', optionIds: ['large', 'small', 'large', 'nope', 'gravel'] },
+      knowledge,
+    )!;
     expect(compare.options.map((o) => o.id)).toEqual(['large', 'small', 'gravel']);
     const req = buildPlanRequest({ ...base, brief: b, compare }, knowledge);
     expect(() => PlanRequestSchema.parse(req)).not.toThrow();
@@ -246,7 +271,10 @@ describe('buildPlanRequest', () => {
   });
 
   it('skips plant checks and climate indoors and handles a missing scene', () => {
-    const req = buildPlanRequest({ ...base, scene: undefined, setting: 'interior', brief: brief(), refine: { title: 'V1', brief: 'Edit…', feedback: null } }, knowledge);
+    const req = buildPlanRequest(
+      { ...base, scene: undefined, setting: 'interior', brief: brief(), refine: { title: 'V1', brief: 'Edit…', feedback: null } },
+      knowledge,
+    );
     expect(() => PlanRequestSchema.parse(req)).not.toThrow();
     expect(req.climate).toBeNull();
     expect(req.brief.elements[0].note).toBe('keep the oak');
@@ -277,9 +305,9 @@ describe('helpers', () => {
   it('climateText falls back to the hardiness zone', () => {
     expect(climateText({ hardinessZone: '6b' })).toMatch(/6b/);
     expect(climateText({})).toBeNull();
-    expect(
-      climateText({ climate: { hardinessZone: '8a', summary: 'Hot summers.', notes: ['clay soil'], source: 'ai', updatedAt: 0 } }),
-    ).toMatch(/8a.*Hot summers.*clay soil/);
+    expect(climateText({ climate: { hardinessZone: '8a', summary: 'Hot summers.', notes: ['clay soil'], source: 'ai', updatedAt: 0 } })).toMatch(
+      /8a.*Hot summers.*clay soil/,
+    );
   });
 
   it('pathDescription describes routes', () => {
@@ -287,9 +315,16 @@ describe('helpers', () => {
   });
 
   it('swapOptionInBrief replaces the sibling wording', () => {
-    expect(swapOptionInBrief('Lay large 18-24 in flagstones to the door.', { promptText: 'large 18-24 in flagstones' }, { promptText: 'small 4 in cobbles' }, 'Stone size')).toBe(
-      'Lay small 4 in cobbles to the door.',
+    expect(
+      swapOptionInBrief(
+        'Lay large 18-24 in flagstones to the door.',
+        { promptText: 'large 18-24 in flagstones' },
+        { promptText: 'small 4 in cobbles' },
+        'Stone size',
+      ),
+    ).toBe('Lay small 4 in cobbles to the door.');
+    expect(swapOptionInBrief('Lay a path.', undefined, { promptText: 'pea gravel' }, 'Stone size')).toBe(
+      'Lay a path. For the stone size, use pea gravel instead.',
     );
-    expect(swapOptionInBrief('Lay a path.', undefined, { promptText: 'pea gravel' }, 'Stone size')).toBe('Lay a path. For the stone size, use pea gravel instead.');
   });
 });

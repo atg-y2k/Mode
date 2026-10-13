@@ -24,11 +24,6 @@ export function hash3(a: number, b: number, c: number): number {
   return h >>> 0;
 }
 
-/** hash3 mapped to [0, 1). */
-export function hashUnit(a: number, b: number, c: number): number {
-  return hash3(a, b, c) / 4294967296;
-}
-
 /** Seeded PRNG (mulberry32) with a few convenience draws. */
 export class Rng {
   private state: number;

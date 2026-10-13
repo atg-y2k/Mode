@@ -364,7 +364,8 @@ export function migrateProject(raw: unknown): Project {
   const now = Date.now();
   const p = structuredClone(raw) as Loose;
   const spaces = arr<Loose>(p.spaces).filter(isObj).map((sp) => {
-    const type = ((SPACE_TYPES as readonly string[]).includes(str(sp.type, '')) ? sp.type : 'other-interior') as SpaceType;
+    const known = (SPACE_TYPES as readonly string[]).includes(str(sp.type, ''));
+    const type = (known ? sp.type : sp.kind === 'exterior' ? 'other-exterior' : 'other-interior') as SpaceType;
     const photos = arr<Loose>(sp.photos).filter(isObj).map((ph) => {
       let designs = arr(ph.designs).map((d, i) => migrateDesign(d, i, now));
       if (!designs.length) designs = [migrateDesign({ name: 'Option A' }, 0, now)];
@@ -382,15 +383,16 @@ export function migrateProject(raw: unknown): Project {
       const scene = isObj(ph.scene)
         ? { ...ph.scene, zones: arr(ph.scene.zones).filter(isObj).map((z) => ({ ...z, polygon: arr(z.polygon) })), paths: arr(ph.scene.paths).filter(isObj), keep: arr(ph.scene.keep), opportunities: arr(ph.scene.opportunities) }
         : undefined;
+      const { scene: _scene, draft: _draft, ...rest } = ph;
       return {
-        ...ph,
+        ...rest,
         name: str(ph.name, 'Photo'),
         createdAt: num(ph.createdAt, now),
         regions: arr<Loose>(ph.regions).filter((r) => isObj(r) && typeof r.maskId === 'string'),
         designs,
         activeDesignId,
         generations,
-        ...(ph.draft !== undefined ? { draft: migrateBrief(ph.draft) } : {}),
+        ...(isObj(ph.draft) ? { draft: migrateBrief(ph.draft) } : {}),
         ...(scene ? { scene } : {}),
       };
     });
@@ -411,7 +413,7 @@ export function migrateProject(raw: unknown): Project {
     ...p,
     id: p.id as string,
     version: 1,
-    name: str(p.name, '').trim() || 'My home',
+    name: str(p.name, '').trim() ? (p.name as string) : 'My home',
     createdAt: num(p.createdAt, now),
     updatedAt: num(p.updatedAt, now),
     location: isObj(p.location) ? p.location : {},

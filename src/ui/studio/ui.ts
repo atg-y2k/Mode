@@ -1,7 +1,7 @@
 /**
  * Viewer-local UI state shared by the Studio components (not part of the
  * document, not persisted): before/after slider, the sketched path being
- * adjusted, the refine prompt target, and the delete confirmation.
+ * adjusted, the info card's detail state, and the delete confirmation.
  */
 import { create } from 'zustand';
 
@@ -12,8 +12,8 @@ export interface StudioUIState {
   sliderPos: number;
   /** Sketched path whose width / points are being adjusted. */
   editingPathId: string | null;
-  /** Variation whose "Refine" input is open. */
-  refineId: string | null;
+  /** The viewer's info card shows the plan, plants and instruction. */
+  infoExpanded: boolean;
   /** Pending destructive action awaiting confirmation. */
   confirm: { kind: 'variation' | 'run'; photoId: string; id: string; title: string } | null;
 }
@@ -22,7 +22,7 @@ export const useStudioUI = create<StudioUIState>()(() => ({
   slider: false,
   sliderPos: 0.5,
   editingPathId: null,
-  refineId: null,
+  infoExpanded: false,
   confirm: null,
 }));
 

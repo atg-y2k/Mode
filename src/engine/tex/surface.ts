@@ -19,6 +19,13 @@ export interface Surface {
   readonly rgb: Float32Array;
   /** Relief in inches (0 = face of the material, negative = recessed joints). */
   readonly height: Float32Array;
+  /**
+   * Optional analytic relief slopes (∂height/∂x, ∂height/∂y in inches per
+   * inch). When set, bump lighting uses them instead of differencing the
+   * height map — for overlapping elements whose silhouettes are steps.
+   */
+  gradX?: Float32Array;
+  gradY?: Float32Array;
 }
 
 export function createSurface(w: number, h: number, sx: number, sy: number): Surface {
@@ -33,10 +40,6 @@ export function hexToLinear(hex: string): Vec3 | null {
   if (!n) return null;
   const v = parseInt(n.slice(1), 16);
   return [SRGB8_TO_LINEAR[(v >> 16) & 255], SRGB8_TO_LINEAR[(v >> 8) & 255], SRGB8_TO_LINEAR[v & 255]];
-}
-
-export function luminance(c: Vec3): number {
-  return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
 }
 
 export function mix3(a: Vec3, b: Vec3, t: number): Vec3 {
@@ -56,6 +59,22 @@ export function smoothstep(e0: number, e1: number, x: number): number {
   if (x >= e1) return 1;
   const t = (x - e0) / (e1 - e0);
   return t * t * (3 - 2 * t);
+}
+
+const TAU = Math.PI * 2;
+const SIN_N = 2048;
+const SIN_LUT: Float32Array = (() => {
+  const t = new Float32Array(SIN_N + 1);
+  for (let i = 0; i <= SIN_N; i++) t[i] = Math.sin((i / SIN_N) * TAU);
+  return t;
+})();
+
+/** Table sine (error < 2e-6), several times cheaper than Math.sin in per-pixel loops. */
+export function fastSin(x: number): number {
+  const t = x * (SIN_N / TAU);
+  const f = Math.floor(t);
+  const i = f & (SIN_N - 1);
+  return SIN_LUT[i] + (SIN_LUT[i + 1] - SIN_LUT[i]) * (t - f);
 }
 
 /** Wraps an integer coordinate into [0, n). */
@@ -113,6 +132,8 @@ export function encodeLinear(v: number): number {
  */
 export function finishSurface(s: Surface, opts: FinishOptions = {}): Uint8ClampedArray {
   const { w, h, sx, sy, rgb, height } = s;
+  const gradX = s.gradX && s.gradY ? s.gradX : null;
+  const gradY = s.gradX && s.gradY ? s.gradY : null;
   const n = w * h;
   const out = new Uint8ClampedArray(n * 4);
   const bump = opts.bump ?? 1;
@@ -138,8 +159,8 @@ export function finishSurface(s: Surface, opts: FinishOptions = {}): Uint8Clampe
       for (let x = 0; x < w; x++) {
         const l = x === 0 ? w - 1 : x - 1;
         const r = x === w - 1 ? 0 : x + 1;
-        let gx = (height[row + r] - height[row + l]) * kx;
-        let gy = (height[dn + x] - height[up + x]) * ky;
+        let gx = gradX ? gradX[row + x] * bump : (height[row + r] - height[row + l]) * kx;
+        let gy = gradY ? gradY[row + x] * bump : (height[dn + x] - height[up + x]) * ky;
         const g2 = gx * gx + gy * gy;
         if (g2 > ms2) {
           const f = ms / Math.sqrt(g2);

@@ -10,7 +10,7 @@
  * the tile repeats without seams.
  */
 import type { TextureSpec } from '../../shared/types';
-import { accumTrilinear, buildMipChain } from './tex/mip';
+import { accumTrilinear, getMipChain } from './tex/mip';
 import { PATTERNS } from './tex/registry';
 import { normalizeSpec } from './tex/spec';
 import { createSurface, downsampleRgba, finishSurface } from './tex/surface';
@@ -101,6 +101,7 @@ function specKey(spec: TextureSpec): string {
  * callers map with the returned tile's own pxPerInch, so scale stays exact.
  */
 export function getTexture(spec: TextureSpec, pxPerInch: number): TextureTile {
+  if (!(Number.isFinite(pxPerInch) && pxPerInch > 0)) pxPerInch = 8;
   const key = specKey(spec);
   for (let i = cache.length - 1; i >= 0; i--) {
     const e = cache[i];
@@ -130,15 +131,22 @@ export function clearTextureCache(): void {
 // Swatches
 // ---------------------------------------------------------------------------
 
+/** Patterns whose unit is a grain (pebble, blade, chip, tuft) rather than a laid element. */
+const FINE_GRAINED = new Set<TextureSpec['pattern']>(['gravel', 'grass', 'mulch', 'carpet', 'terrazzo', 'stucco']);
+
 /**
- * Default span of a swatch: about three repeating units, but at least a foot
- * (so gravel, grass or carpet read as a surface, not a macro shot) and at
- * most 8 ft.
+ * Default span of a swatch: about three repeating units — at least 18 in
+ * (12 in for fine-grained materials like gravel, grass or carpet, so they
+ * read as a surface, not a macro shot) and at most 8 ft. Jointless slabs
+ * (marble, concrete) show a 3 ft section.
  */
 export function defaultSwatchSpan(spec: TextureSpec): number {
   const uw = Number.isFinite(spec.unitWidthIn) && spec.unitWidthIn > 0 ? spec.unitWidthIn : 12;
   const uh = Number.isFinite(spec.unitHeightIn) && spec.unitHeightIn > 0 ? spec.unitHeightIn : 12;
-  return Math.min(96, Math.max(12, 3 * Math.max(uw, uh)));
+  const jointless = !spec.joint || !(spec.joint.widthIn > 0);
+  if ((spec.pattern === 'marble' || spec.pattern === 'concrete') && jointless) return 36;
+  const min = FINE_GRAINED.has(spec.pattern) ? 12 : 18;
+  return Math.min(96, Math.max(min, 3 * Math.max(uw, uh)));
 }
 
 /**
@@ -151,7 +159,7 @@ export function textureSwatch(spec: TextureSpec, sizePx: number, spanIn?: number
   const span = spanIn !== undefined && Number.isFinite(spanIn) && spanIn > 0 ? spanIn : defaultSwatchSpan(spec);
   const ppi = size / span;
   const tile = getTexture(spec, ppi * 2);
-  const chain = buildMipChain(tile);
+  const chain = getMipChain(tile);
   const texelsPerPx = tile.pxPerInch / ppi;
   const lod = texelsPerPx > 1 ? Math.log2(texelsPerPx) : 0;
   const data = new Uint8ClampedArray(size * size * 4);

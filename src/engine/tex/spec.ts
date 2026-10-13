@@ -136,7 +136,16 @@ export function pickTone(rng: Rng, spec: NormSpec, opts: ToneOptions = {}): Vec3
   const pal = spec.palette;
   const v = 0.12 + 0.88 * spec.variation;
   let c = pal[rng.int(pal.length)];
-  if (pal.length > 1) c = mix3(c, pal[rng.int(pal.length)], rng.next() * (opts.blend ?? 0.45) * v);
+  if (pal.length > 1) {
+    // Blend only between similar entries: a black-and-white palette means
+    // black and white elements, not gray ones.
+    const o = pal[rng.int(pal.length)];
+    const d0 = Math.sqrt(c[0]) - Math.sqrt(o[0]);
+    const d1 = Math.sqrt(c[1]) - Math.sqrt(o[1]);
+    const d2 = Math.sqrt(c[2]) - Math.sqrt(o[2]);
+    const similar = Math.exp(-(d0 * d0 + d1 * d1 + d2 * d2) / 0.04);
+    c = mix3(c, o, rng.next() * (opts.blend ?? 0.45) * v * similar);
+  }
   const l = Math.exp(rng.normal() * (opts.light ?? 0.22) * v);
   // Hue jitter scaled by saturation, so whites and grays don't pick up tints.
   const mx = Math.max(c[0], c[1], c[2]);

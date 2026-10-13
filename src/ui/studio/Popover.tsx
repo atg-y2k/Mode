@@ -114,7 +114,17 @@ export function Popover({
 }
 
 /** A trigger that shows `content` in a floating card while hovered or focused. */
-export function HoverCard({ trigger, content, className, prefer = 'top' }: { trigger: ReactNode; content: ReactNode; className?: string; prefer?: 'top' | 'bottom' }) {
+export function HoverCard({
+  trigger,
+  content,
+  className,
+  prefer = 'top',
+}: {
+  trigger: ReactNode;
+  content: ReactNode;
+  className?: string;
+  prefer?: 'top' | 'bottom';
+}) {
   const ref = useRef<HTMLSpanElement>(null);
   const [open, setOpen] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -126,9 +136,12 @@ export function HoverCard({ trigger, content, className, prefer = 'top' }: { tri
     if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(() => setOpen(false), 80);
   };
-  useEffect(() => () => {
-    if (timer.current) clearTimeout(timer.current);
-  }, []);
+  useEffect(
+    () => () => {
+      if (timer.current) clearTimeout(timer.current);
+    },
+    [],
+  );
   return (
     <>
       <span

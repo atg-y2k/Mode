@@ -7,7 +7,7 @@
  */
 import type { Rng } from './rng';
 import { pickTone, type NormSpec } from './spec';
-import { clamp, smoothstep, type Vec3 } from './surface';
+import { clamp, fastSin, smoothstep, type Vec3 } from './surface';
 
 export interface Grain {
   color: Vec3;
@@ -46,22 +46,6 @@ export function makeGrain(rng: Rng, spec: NormSpec, boardW: number, len: number,
         ? { u: rng.range(4, len - 4), v: rng.range(0.25, 0.75) * boardW, ru: rng.range(0.3, 0.6), rv: rng.range(0.18, 0.34) }
         : null,
   };
-}
-
-const TAU = Math.PI * 2;
-const SIN_N = 2048;
-const SIN_LUT: Float32Array = (() => {
-  const t = new Float32Array(SIN_N + 1);
-  for (let i = 0; i <= SIN_N; i++) t[i] = Math.sin((i / SIN_N) * TAU);
-  return t;
-})();
-
-/** Table sine (error < 2e-6), several times cheaper than Math.sin in per-pixel loops. */
-export function fastSin(x: number): number {
-  const t = x * (SIN_N / TAU);
-  const f = Math.floor(t);
-  const i = f & (SIN_N - 1);
-  return SIN_LUT[i] + (SIN_LUT[i + 1] - SIN_LUT[i]) * (t - f);
 }
 
 /** Small integer hash → [-1, 1). */

@@ -170,155 +170,75 @@ export const stonePavers: PatternFactory = (spec) => {
 };
 
 // ---------------------------------------------------------------------------
-// Voronoi stones: flagstone, cobblestone, gravel
+// Flagstone: irregular slabs from a warped power-diagram Voronoi
 // ---------------------------------------------------------------------------
-
-interface VoronoiStoneOptions {
-  /** Cell size, inches. */
-  cell: number;
-  /** Cells across the tile (x, y). */
-  gx: number;
-  gy: number;
-  jitter: number;
-  weight: number;
-  stagger: boolean;
-  joint: number;
-  jointColor: Vec3;
-  /** Edge irregularity (warp amplitude, inches) and its feature size. */
-  warp: number;
-  warpScale: number;
-  /** Relief: rounded profile radius and height (inches), surface roughness. */
-  round: number;
-  dome: number;
-  rough: number;
-  roughScale: number;
-  /** Color: per-stone tone options, mottling and speckle. */
-  toneLight: number;
-  toneHue: number;
-  mottle: number;
-  speckle: number;
-  ao: number;
-  /**
-   * Pebbles: > 0 rounds each stone into an ellipse of about this fraction of
-   * the cell (random size, aspect and orientation) inside its Voronoi cell.
-   */
-  pebble: number;
-  /** Joint width variation along the edges (0..1). */
-  jointVar: number;
-}
-
-function voronoiStones(spec: NormSpec, o: VoronoiStoneOptions) {
-  return {
-    spanX: o.gx * o.cell,
-    spanY: o.gy * o.cell,
-    minFeatureIn: o.cell / 6,
-    render(s: Surface) {
-      const rng = specRng(spec, 30);
-      const sites = makeSites(rng, o.gx, o.gy, o.cell, o.cell, o.jitter, o.weight, o.stagger);
-      const { w, h, sx, sy, rgb, height } = s;
-      const n = o.gx * o.gy;
-      let wx: Float32Array | undefined;
-      let wy: Float32Array | undefined;
-      if (o.warp > 0) {
-        const cx = cellsFor(w, o.warpScale * sx);
-        const cy = cellsFor(h, o.warpScale * sy);
-        wx = fbmField(w, h, cx, cy, 3, 0.5, spec.seed ^ 0x301);
-        wy = fbmField(w, h, cx, cy, 3, 0.5, spec.seed ^ 0x302);
-        for (let i = 0; i < wx.length; i++) {
-          wx[i] *= o.warp;
-          wy[i] *= o.warp;
-        }
-      }
-      const map = voronoiMap(s, sites, wx, wy);
-      const tones: Vec3[] = [];
-      const lift: number[] = [];
-      // Pebble ellipse per site: inverse radii along its axes and orientation.
-      const ea = new Float32Array(n);
-      const eb = new Float32Array(n);
-      const ec = new Float32Array(n);
-      const es = new Float32Array(n);
-      for (let k = 0; k < n; k++) {
-        tones.push(pickTone(rng, spec, { light: o.toneLight, hue: o.toneHue, blend: 0.7 }));
-        lift.push(rng.range(-1, 1));
-        const r = o.cell * o.pebble * rng.range(0.7, 1.15);
-        const asp = rng.range(1, 1.6);
-        ea[k] = 1 / (r * Math.sqrt(asp));
-        eb[k] = Math.sqrt(asp) / r;
-        const th = rng.next() * Math.PI;
-        ec[k] = Math.cos(th);
-        es[k] = Math.sin(th);
-      }
-      const off = offsets(rng, n, w, h);
-      const rough = fbmField(w, h, cellsFor(w, o.roughScale * sx), cellsFor(h, o.roughScale * sy), 4, 0.55, spec.seed ^ 0x303);
-      const mott = fbmField(w, h, cellsFor(w, o.cell * 0.6 * sx), cellsFor(h, o.cell * 0.6 * sy), 3, 0.55, spec.seed ^ 0x304);
-      const speck = new Float32Array(w * h);
-      addWhiteNoise(speck, w, h, spec.seed ^ 0x305, 1);
-      const ppi = (sx + sy) / 2;
-      const half = o.joint / 2;
-      const jc = o.jointColor;
-      for (let y = 0; y < h; y++) {
-        for (let x = 0; x < w; x++) {
-          const i = y * w + x;
-          const id = map.id[i];
-          let edge = map.edge[i] - half * (1 + o.jointVar * mott[i]);
-          if (o.pebble > 0) {
-            // Elliptical pebble: distance-like measure in inches from its rim.
-            const dx = map.dx[i];
-            const dy = map.dy[i];
-            const pa = (dx * ec[id] + dy * es[id]) * ea[id];
-            const pb = (-dx * es[id] + dy * ec[id]) * eb[id];
-            const rr = Math.sqrt(pa * pa + pb * pb);
-            const rim = (1 - rr) / Math.max(ea[id], eb[id]);
-            if (rim < edge) edge = rim;
-          }
-          const cov = clamp(edge * ppi + 0.5, 0, 1);
-          const j = shifted(x, y, off[id * 2], off[id * 2 + 1], w, h);
-          const t = tones[id];
-          const k = 1 + mott[j] * o.mottle + speck[i] * o.speckle + rough[j] * o.mottle * 0.5;
-          const jk = 1 + speck[i] * 0.2 + mott[i] * 0.25;
-          const p = i * 3;
-          rgb[p] = jc[0] * jk * (1 - cov) + t[0] * k * cov;
-          rgb[p + 1] = jc[1] * jk * (1 - cov) + t[1] * k * cov;
-          rgb[p + 2] = jc[2] * jk * (1 - cov) + t[2] * k * cov;
-          const e = clamp(edge / o.round, 0, 1);
-          const profile = 1 - (1 - e) * (1 - e);
-          height[i] = (o.dome * (profile + lift[id] * 0.15) + rough[j] * o.rough) * cov - o.dome * 0.4 * (1 - cov);
-        }
-      }
-      return { bump: 1, ao: o.ao, aoRadiusIn: Math.max(0.1, Math.min(o.cell * 0.3, 2)) };
-    },
-  };
-}
 
 export const flagstone: PatternFactory = (spec) => {
   const cell = clamp((spec.uw + spec.uh) / 2, 4, 60);
   const g = clamp(Math.round(80 / cell), 3, 10);
   const joint = jointWidth(spec, clamp(cell * 0.05, 0.4, 1.5));
-  return voronoiStones(spec, {
-    cell,
-    gx: g,
-    gy: g,
-    jitter: 0.85,
-    weight: 0.12,
-    stagger: false,
-    joint,
-    jointColor: jointColor(spec, defaultJoint(spec, 0.42)),
-    warp: cell * 0.035,
-    warpScale: cell * 0.45,
-    round: clamp(cell * 0.025, 0.2, 0.6),
-    dome: 0.35,
-    rough: 0.12,
-    roughScale: cell * 0.35,
-    toneLight: 0.2,
-    toneHue: 0.06,
-    mottle: 0.11,
-    speckle: 0.03,
-    ao: 1.6,
-    pebble: 0,
-    jointVar: 0.5,
-  });
+  const jc = jointColor(spec, defaultJoint(spec, 0.42));
+  return {
+    spanX: g * cell,
+    spanY: g * cell,
+    minFeatureIn: cell / 6,
+    render(s: Surface) {
+      const rng = specRng(spec, 30);
+      // Weighted sites give a mix of large and small slabs.
+      const sites = makeSites(rng, g, g, cell, cell, 0.85, 0.12);
+      const { w, h, sx, sy, rgb, height } = s;
+      const n = g * g;
+      // Gentle warp: slab edges are mostly straight, a little irregular.
+      const wcx = cellsFor(w, cell * 0.45 * sx);
+      const wcy = cellsFor(h, cell * 0.45 * sy);
+      const wx = fbmField(w, h, wcx, wcy, 3, 0.5, spec.seed ^ 0x301);
+      const wy = fbmField(w, h, wcx, wcy, 3, 0.5, spec.seed ^ 0x302);
+      const warp = cell * 0.035;
+      for (let i = 0; i < wx.length; i++) {
+        wx[i] *= warp;
+        wy[i] *= warp;
+      }
+      const map = voronoiMap(s, sites, wx, wy);
+      const tones: Vec3[] = [];
+      const lift: number[] = [];
+      for (let k = 0; k < n; k++) {
+        tones.push(pickTone(rng, spec, { light: 0.2, hue: 0.06, blend: 0.7 }));
+        lift.push(rng.range(-1, 1));
+      }
+      const off = offsets(rng, n, w, h);
+      // Cleft surface relief and color mottling, offset per slab.
+      const rough = fbmField(w, h, cellsFor(w, cell * 0.35 * sx), cellsFor(h, cell * 0.35 * sy), 3, 0.55, spec.seed ^ 0x303);
+      const mott = fbmField(w, h, cellsFor(w, cell * 0.6 * sx), cellsFor(h, cell * 0.6 * sy), 3, 0.55, spec.seed ^ 0x304);
+      const speck = new Float32Array(w * h);
+      addWhiteNoise(speck, w, h, spec.seed ^ 0x305, 1);
+      const ppi = (sx + sy) / 2;
+      const half = joint / 2;
+      const round = clamp(cell * 0.025, 0.2, 0.6);
+      const dome = 0.35;
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const i = y * w + x;
+          const id = map.id[i];
+          // Joint width wanders along the edges.
+          const edge = map.edge[i] - half * (1 + 0.5 * mott[i]);
+          const cov = clamp(edge * ppi + 0.5, 0, 1);
+          const j = shifted(x, y, off[id * 2], off[id * 2 + 1], w, h);
+          const t = tones[id];
+          const k = 1 + mott[j] * 0.11 + speck[i] * 0.03 + rough[j] * 0.055;
+          const jk = 1 + speck[i] * 0.2 + mott[i] * 0.25;
+          const p = i * 3;
+          rgb[p] = jc[0] * jk * (1 - cov) + t[0] * k * cov;
+          rgb[p + 1] = jc[1] * jk * (1 - cov) + t[1] * k * cov;
+          rgb[p + 2] = jc[2] * jk * (1 - cov) + t[2] * k * cov;
+          const e = clamp(edge / round, 0, 1);
+          const profile = 1 - (1 - e) * (1 - e);
+          height[i] = (dome * (profile + lift[id] * 0.15) + rough[j] * 0.12) * cov - dome * 0.4 * (1 - cov);
+        }
+      }
+      return { bump: 1, ao: 1.6, aoRadiusIn: Math.min(cell * 0.3, 2) };
+    },
+  };
 };
-
 
 interface PebbleBedOptions {
   cell: number;
@@ -332,6 +252,8 @@ interface PebbleBedOptions {
   domeMin: number;
   domeMax: number;
   zJitter: number;
+  /** Profile flatness (see PebbleShapes.flat). */
+  flat: number;
   /** What shows between pebbles. */
   under: Vec3;
   underDepth: number;
@@ -363,6 +285,7 @@ function pebbleBed(spec: NormSpec, o: PebbleBedOptions) {
         sin: new Float32Array(n),
         dome: new Float32Array(n),
         z: new Float32Array(n),
+        flat: o.flat,
       };
       const tones: Vec3[] = [];
       for (let k = 0; k < n; k++) {
@@ -378,6 +301,8 @@ function pebbleBed(spec: NormSpec, o: PebbleBedOptions) {
         tones.push(pickTone(rng, spec, { light: o.toneLight, hue: o.toneHue, blend: 0.7 }));
       }
       const map = pebbleMap(s, sites, shapes);
+      s.gradX = map.gx;
+      s.gradY = map.gy;
       const mott = fbmField(w, h, cellsFor(w, cell * 0.5 * sx), cellsFor(h, cell * 0.5 * sy), 2, 0.5, spec.seed ^ 0x311);
       const speck = new Float32Array(w * h);
       addWhiteNoise(speck, w, h, spec.seed ^ 0x312, 1);
@@ -418,9 +343,10 @@ export const gravel: PatternFactory = (spec) => {
     rMin: 0.5,
     rMax: 0.8,
     aspect: 1.7,
-    domeMin: 0.45,
-    domeMax: 0.7,
-    zJitter: 0.35,
+    domeMin: 0.32,
+    domeMax: 0.5,
+    zJitter: 0.3,
+    flat: 1.3,
     under: jointColor(spec, scale3(paletteMean(spec.palette), 0.3)),
     underDepth: cell * 0.1,
     toneLight: 0.3,
@@ -439,12 +365,13 @@ export const cobblestone: PatternFactory = (spec) => {
     cell,
     g: clamp(Math.round(40 / cell / 2) * 2, 4, 24),
     jitter: 0.3,
-    rMin: fill * 1.12,
-    rMax: fill * 1.32,
-    aspect: 1.25,
-    domeMin: 0.28,
-    domeMax: 0.4,
-    zJitter: 0.04,
+    rMin: fill * 1.1,
+    rMax: fill * 1.3,
+    aspect: 1.18,
+    domeMin: 0.34,
+    domeMax: 0.46,
+    zJitter: 0,
+    flat: 1.6,
     under: jointColor(spec, defaultJoint(spec, 0.5)),
     underDepth: cell * 0.05,
     toneLight: 0.2,
