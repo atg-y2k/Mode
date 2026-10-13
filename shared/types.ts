@@ -323,6 +323,431 @@ export interface PlacedObject {
 }
 
 // ---------------------------------------------------------------------------
+// Studio: scene understanding, idea board, prompt-driven variations
+// ---------------------------------------------------------------------------
+
+/** What a zone of a photo is. The AI picks the closest kind; `label` carries the specifics. */
+export const ZONE_KINDS = [
+  // exterior — architecture
+  'facade',
+  'roof',
+  'front-door',
+  'garage-door',
+  'windows',
+  'trim',
+  'porch',
+  'steps',
+  'columns',
+  // exterior — site
+  'walkway',
+  'driveway',
+  'sidewalk',
+  'lawn',
+  'planting-bed',
+  'yard-border',
+  'tree',
+  'shrubs',
+  'fence',
+  'retaining-wall',
+  'patio',
+  'deck',
+  'pool',
+  'mailbox',
+  'sky',
+  'street',
+  'neighbor',
+  // interior
+  'wall',
+  'accent-wall',
+  'ceiling',
+  'floor',
+  'window',
+  'door',
+  'cabinetry',
+  'countertop',
+  'backsplash',
+  'fireplace',
+  'stairs',
+  'built-ins',
+  'furniture',
+  'rug',
+  'light-fixture',
+  'decor',
+  'other',
+] as const;
+export type ZoneKind = (typeof ZONE_KINDS)[number];
+
+/** Zones that are context, not design targets (never edited unless explicitly asked). */
+export const CONTEXT_ZONE_KINDS: readonly ZoneKind[] = ['sky', 'street', 'neighbor'];
+
+/** A labeled area of the photo found by AI scene analysis (and adjustable by the user). */
+export interface SceneZone {
+  id: ID;
+  kind: ZoneKind;
+  /** Specific name, e.g. "Front lawn (left of walk)", "Concrete walkway to front door". */
+  label: string;
+  /** Materials, colors, condition, size — what is there now. */
+  description: string;
+  /** Outline in photo px (AI-estimated, approximate). Closed polygon, ≥ 3 points. */
+  polygon: Pt[];
+  /** When the user refined the outline with the mask tools: runtime/persisted mask id. Takes precedence over `polygon`. */
+  maskId?: ID;
+  /** False for context zones (sky, street, neighbors). */
+  editable: boolean;
+  /** Estimated sun exposure for ground / planting zones (from orientation & shadows). */
+  sun?: 'full-sun' | 'part-sun' | 'shade';
+}
+
+/** A route through the scene, e.g. "Driveway → front door". */
+export interface ScenePath {
+  id: ID;
+  label: string;
+  /** Where it starts / ends, in words ("driveway apron", "front door"). */
+  from: string;
+  to: string;
+  /** Current surface, width, condition, or for suggested paths the proposed design. */
+  description: string;
+  /** Centerline in photo px. */
+  points: Pt[];
+  /** Approximate width in photo px at the near end (for drawing / masks). */
+  widthPx: number;
+  kind: 'existing' | 'suggested' | 'sketch';
+}
+
+/** Architectural reading of the photo — what the design must respect. */
+export interface ArchitectureAnalysis {
+  /** e.g. "Center-hall Colonial Revival", "1950s ranch", "Craftsman bungalow", "Mid-century modern living room". */
+  style: string;
+  /** Matching id from the design-knowledge styles, when one fits. */
+  styleId?: string;
+  era?: string;
+  /** Defining features: roofline, symmetry, porch, window pattern, trim details, ceiling height… */
+  features: string[];
+  /** Existing materials & colors worth relating to (brick, cedar shake, oak floors…). */
+  materials: string[];
+  /** Scale & proportion notes (two-story mass, low horizontal lines, 36 in door with sidelights…). */
+  proportions: string;
+  /** Principles a good redesign should follow for this house. */
+  designLanguage: string[];
+  /** How the space is used / should work (main entry from the driveway side, guests park on the street…). */
+  purpose: string[];
+}
+
+/** AI understanding of one photo. Coordinates are in photo px. */
+export interface SceneMap {
+  /** AI-detected category of the photo. */
+  category: SpaceType;
+  /** e.g. "Street view of a two-story colonial, facing the front door, mid-morning". */
+  summary: string;
+  viewpoint: string;
+  style: string;
+  /** Where the yard / room boundaries are, e.g. "Lawn ends at the public sidewalk; boxwood hedge along the right property line". */
+  boundaries: string;
+  /** Light direction, time of day, shadows. */
+  lighting: string;
+  /** Which way the main facade / windows face, inferred from shadows ("front faces roughly south-east"). */
+  orientation: string;
+  architecture: ArchitectureAnalysis;
+  zones: SceneZone[];
+  paths: ScenePath[];
+  /** Notable things to keep unless asked (mature trees, brick, architecture). */
+  keep: string[];
+  /** Short list of redesign opportunities. */
+  opportunities: string[];
+  createdAt: number;
+  model: string;
+}
+
+export const IDEA_KINDS = ['image', 'note', 'product', 'theme'] as const;
+export type IdeaKind = (typeof IDEA_KINDS)[number];
+
+/** Something on the idea board that conveys the look the user wants. */
+export interface IdeaItem {
+  id: ID;
+  kind: IdeaKind;
+  /** Inspiration / product image in the blob store (downscaled to ≤ 1024 px). */
+  imageId?: ID;
+  thumbId?: ID;
+  title: string;
+  /** What the user likes about it ("love the stone border and the warm lanterns"). */
+  note: string;
+  /** Dominant colors extracted client-side ('#rrggbb'). */
+  colors: string[];
+  /** AI description of the image (style, materials, plants, colors) — cached for prompts. */
+  aiDescription?: string;
+  product?: ProductInfo;
+  /** kind 'theme': id of a DesignTheme from the design-knowledge base. */
+  themeId?: string;
+  /** Spaces this applies to; empty = the whole house. */
+  spaceIds: ID[];
+  /** Included in generations by default. */
+  active: boolean;
+  createdAt: number;
+}
+
+/**
+ * Design elements: the simple building blocks the user composes a rendition
+ * from ("Pathway", "Border edging", "Wall paint", "Lighting"…). Each element
+ * has choice dimensions (e.g. Pathway → material, stone size, shape, width,
+ * edging) whose options carry a visual (swatch) and the prompt text they add.
+ */
+export const ELEMENT_TYPES = [
+  // exterior / landscape
+  'pathway',
+  'border-edging',
+  'planting-bed',
+  'lawn',
+  'trees-shrubs',
+  'patio',
+  'driveway',
+  'steps',
+  'fence',
+  'retaining-wall',
+  'water-feature',
+  'outdoor-lighting',
+  'front-door',
+  'exterior-paint',
+  'roof',
+  'porch',
+  'garage-door',
+  'windows-shutters',
+  'outdoor-furniture',
+  // interior
+  'wall-paint',
+  'flooring',
+  'ceiling',
+  'interior-lighting',
+  'cabinets',
+  'countertops',
+  'backsplash',
+  'furniture',
+  'window-treatments',
+  'decor',
+  'fireplace',
+  // anything else
+  'custom',
+] as const;
+export type ElementType = (typeof ELEMENT_TYPES)[number];
+
+/** Swatch shown for an option so choices can be compared at a glance. */
+export type OptionVisual =
+  | { kind: 'texture'; texture: TextureSpec }
+  | { kind: 'color'; hex: string }
+  | { kind: 'colors'; hexes: string[] }
+  | { kind: 'art'; art: ArtSpec }
+  /** Small diagram id rendered by the UI (e.g. 'path-straight', 'path-curved', 'width-3', 'beam-down'). */
+  | { kind: 'diagram'; diagram: string }
+  /** Image in the blob store (AI preview or user upload). */
+  | { kind: 'image'; imageId: ID };
+
+export interface ElementOption {
+  id: string;
+  label: string;
+  /** One line shown under the swatch, e.g. "18–24 in irregular slabs, wide joints". */
+  description: string;
+  /** Phrase added to the image prompt when chosen, e.g. "large irregular bluestone flagstones (18–24 in) with 2 in moss joints". */
+  promptText: string;
+  visual?: OptionVisual;
+  /** Why this option suits the house / purpose (architecture-grounded), shown to compare options. */
+  rationale?: string;
+  /** For plant options: can it actually thrive here (zone, sun, water, space)? */
+  feasibility?: PlantFeasibility;
+}
+
+/** Whether a plant is a realistic choice for this property and spot. */
+export interface PlantFeasibility {
+  rating: 'good' | 'caution' | 'poor';
+  /** Short reasons, e.g. "Zone 5-9 ✓ (you're 7a)", "Needs full sun; this bed is shaded most of the day". */
+  reasons: string[];
+}
+
+/** A plant used in a generation, with its feasibility for the spot. */
+export interface PlantNote {
+  name: string;
+  botanical?: string;
+  rating: PlantFeasibility['rating'];
+  notes: string[];
+  /** A better-suited alternative when rating isn't 'good'. */
+  alternative?: string;
+}
+
+export interface ElementDimension {
+  id: string;
+  label: string;
+  /** Question the app asks, e.g. "What size stones?" */
+  question: string;
+  options: ElementOption[];
+  /** Allow picking several options (e.g. plant palette). Default false. */
+  multiple?: boolean;
+  /** Option id preselected when the element is added. */
+  defaultOptionId?: string;
+}
+
+export interface ElementDef {
+  type: ElementType;
+  label: string;
+  description: string;
+  /** lucide-react icon name for the element tile. */
+  icon: string;
+  setting: 'exterior' | 'interior' | 'both';
+  /** Zone kinds this element usually targets (used to preselect "where"). */
+  zoneKinds: ZoneKind[];
+  dimensions: ElementDimension[];
+}
+
+/** An element the user added to a brief, with their choices. */
+export interface ElementSpec {
+  id: ID;
+  type: ElementType;
+  /** e.g. "Front walkway". */
+  label: string;
+  /** Where it applies: scene zones and/or scene paths (incl. sketched ones). */
+  zoneIds: ID[];
+  pathIds: ID[];
+  /** Dimensions in use (built-in defaults, possibly tailored/extended by AI). */
+  dimensions: ElementDimension[];
+  /** dimension id -> chosen option ids. */
+  choices: Record<string, string[]>;
+  /** Free text for this element ("keep the existing lamp post"). */
+  note: string;
+}
+
+/** What the user is asking for: free text + element building blocks + inspiration. */
+export interface DesignBrief {
+  prompt: string;
+  elements: ElementSpec[];
+  /** How plants are shown: as planted, after ~3 years, or at mature size. */
+  plantMaturity: 'new' | 'established' | 'mature';
+  /** Idea board items to use as inspiration. */
+  ideaItemIds: ID[];
+  /** Zones allowed to change (union with the elements' zones). Empty + scope 'whole' = anything. */
+  targetZoneIds: ID[];
+  scope: 'zones' | 'whole';
+}
+
+export function emptyBrief(): DesignBrief {
+  return { prompt: '', elements: [], plantMaturity: 'established', ideaItemIds: [], targetZoneIds: [], scope: 'zones' };
+}
+
+/**
+ * Design knowledge: curated architectural styles, design themes and
+ * purpose-driven guidance per element. Grounds AI prompts and the UI in real
+ * architectural sense (style, era, proportion, materials, function).
+ */
+export interface ArchitecturalStyle {
+  id: string;
+  name: string;
+  era: string;
+  setting: 'exterior' | 'interior' | 'both';
+  /** Visual cues to recognize it. */
+  identify: string[];
+  characteristics: string[];
+  /** Typical, historically appropriate palettes (3-5 hexes each: body, trim, accent/door…). */
+  palettes: { name: string; hexes: string[] }[];
+  materials: string[];
+  /** Landscape / planting approaches that suit it. */
+  landscape: string[];
+  lighting: string[];
+  /** Common mistakes that clash with the style. */
+  avoid: string[];
+  /** DesignTheme ids that pair well. */
+  themes: string[];
+}
+
+export interface DesignTheme {
+  id: string;
+  name: string;
+  setting: 'exterior' | 'interior' | 'both';
+  /** What the theme is for — the purpose it serves (e.g. "low water, low upkeep in hot dry climates"). */
+  purpose: string;
+  description: string;
+  principles: string[];
+  palette: string[];
+  materials: string[];
+  plants: string[];
+  lighting: string[];
+  /** ArchitecturalStyle ids it suits best. */
+  suits: string[];
+  /** Climate / zone notes (e.g. "zones 7-10, full sun"). */
+  climate?: string;
+  /** Compact phrase used in image prompts. */
+  promptHint: string;
+}
+
+/** Purpose and rules of thumb for one element type (e.g. pathway: 4-5 ft primary entry walk…). */
+export interface ElementGuidance {
+  type: ElementType;
+  purpose: string;
+  rulesOfThumb: string[];
+  /** How the choice should relate to the architecture. */
+  relateToArchitecture: string[];
+}
+
+/** One generated image. */
+export interface Variation {
+  id: ID;
+  imageId: ID;
+  thumbId: ID;
+  width: number;
+  height: number;
+  /** Short name, e.g. "Curved flagstone path + lavender border". */
+  title: string;
+  /** The exact instruction sent to the image model. */
+  brief: string;
+  /** In compare runs: the option this variation shows. */
+  optionId?: string;
+  optionLabel?: string;
+  favorite: boolean;
+  createdAt: number;
+}
+
+/** One run: Claude's plan plus a batch of variations. */
+export interface Generation {
+  id: ID;
+  createdAt: number;
+  /** Snapshot of the brief that produced it (re-run / fine-tune from here). */
+  brief: DesignBrief;
+  /** 'variations' = N different takes on the brief; 'compare' = one variation per option of one dimension, all else fixed. */
+  mode: 'variations' | 'compare';
+  compare?: { elementId: ID; dimensionId: string; optionIds: string[] };
+  /** Variation (of this photo) this run started from; undefined = the original photo. */
+  baseVariationId?: ID;
+  /** Claude's interpretation: what will change and what stays. */
+  plan: string;
+  /** Plants the plan uses, with feasibility for this property (exterior runs). */
+  plantNotes?: PlantNote[];
+  provider: string;
+  model: string;
+  variations: Variation[];
+  status: 'running' | 'done' | 'partial' | 'failed';
+  error?: string;
+}
+
+export const RECOMMENDATION_CATEGORIES = [
+  'landscaping',
+  'hardscape',
+  'paint',
+  'lighting',
+  'architecture',
+  'interior',
+  'decor',
+  'other',
+] as const;
+export type RecommendationCategory = (typeof RECOMMENDATION_CATEGORIES)[number];
+
+export interface Recommendation {
+  id: ID;
+  title: string;
+  /** Ready-to-run prompt. */
+  prompt: string;
+  why: string;
+  category: RecommendationCategory;
+  targetZoneIds: ID[];
+  /** Element to add to the brief when the user picks this, if one fits. */
+  elementType?: ElementType;
+}
+
+// ---------------------------------------------------------------------------
 // Designs, photos, spaces, projects
 // ---------------------------------------------------------------------------
 
@@ -370,7 +795,17 @@ export interface Photo {
   createdAt: number;
   regions: Region[];
   calibration?: Calibration;
+  /** DEPRECATED (pre-studio analysis); superseded by `scene`. */
   analysis?: SpaceAnalysis;
+  /** AI scene understanding (categorization, zones, paths). */
+  scene?: SceneMap;
+  /** The brief being composed in the Studio for this photo. */
+  draft?: DesignBrief;
+  /** Prompt runs, newest first. */
+  generations: Generation[];
+  /** Latest AI recommendations for this photo. */
+  recommendations?: { items: Recommendation[]; createdAt: number; baseVariationId?: ID };
+  /** Fine-tune (hand-tool) design options. */
   designs: Design[];
   activeDesignId: ID;
 }
@@ -385,12 +820,28 @@ export interface Space {
   createdAt: number;
 }
 
+/** Growing conditions for the property — used to keep plant choices feasible. */
+export interface ClimateProfile {
+  /** USDA hardiness zone, e.g. "7a". */
+  hardinessZone: string;
+  /** One or two sentences: climate type, summer heat, humidity, rainfall pattern. */
+  summary: string;
+  lastFrost?: string; // e.g. "mid-April"
+  firstFrost?: string; // e.g. "late October"
+  annualRainfallIn?: number;
+  /** Typical soils, deer pressure, watering restrictions, invasive species to avoid… */
+  notes: string[];
+  source: 'ai' | 'user';
+  updatedAt: number;
+}
+
 export interface ProjectLocation {
   zip?: string;
   /** USDA hardiness zone like "7a". */
   hardinessZone?: string;
   /** Free text: climate, HOA rules, sun orientation… */
   notes?: string;
+  climate?: ClimateProfile;
 }
 
 export interface Project {
@@ -405,6 +856,9 @@ export interface Project {
   /** Overall style direction, e.g. "modern farmhouse", "drought-tolerant". */
   style?: string;
   spaces: Space[];
+  /** Inspiration that conveys the overall look (images, notes, real products). */
+  ideaBoard: IdeaItem[];
+  /** DEPRECATED — the shopping list was dropped; always []. */
   assetList: AssetListItem[];
 }
 
@@ -586,6 +1040,36 @@ export interface LightInfo {
   mountHeightFt?: number;
 }
 
+export const STORE_KINDS = ['home-depot', 'lowes', 'nursery', 'other'] as const;
+export type StoreKind = (typeof STORE_KINDS)[number];
+
+export const STORE_LABELS: Record<StoreKind, string> = {
+  'home-depot': 'The Home Depot',
+  lowes: "Lowe's",
+  nursery: 'Nursery',
+  other: 'Store',
+};
+
+/** A real, purchasable product an asset was created from (search result or pasted link). */
+export interface ProductInfo {
+  /** Display name of the seller, e.g. "The Home Depot", "Lowe's", "Nature Hills Nursery". */
+  store: string;
+  storeKind: StoreKind;
+  /** Product page. */
+  url: string;
+  brand?: string;
+  /** Price in USD when known (as found; may have changed). */
+  priceUsd?: number;
+  /** Price as displayed, e.g. "$24.98 / 3 gal". */
+  priceText?: string;
+  /** Original product image URL (the asset's own image is the cut-out copy in the blob store). */
+  imageUrl?: string;
+  /** Key specs, e.g. ["2700K", "800 lumens", "Zones 5-9", "3 gal container"]. */
+  specs: string[];
+  /** When the price / details were retrieved (ms epoch). */
+  retrievedAt: number;
+}
+
 /**
  * Something you can place on a photo: plants, fixtures, decor, furniture,
  * hardscape objects — built-in, uploaded by the user, or generated by AI.
@@ -613,11 +1097,15 @@ export interface AssetDef {
   vendorUrl?: string;
   plant?: PlantInfo;
   light?: LightInfo;
+  /** Set when the asset is a real store product (search result or pasted link). */
+  product?: ProductInfo;
   createdAt?: number;
 }
 
 // ---------------------------------------------------------------------------
-// Asset list (shopping / materials list)
+// Asset list (shopping / materials list) — DEPRECATED: the shopping-list feature
+// was dropped after the user interview. Kept only until the server's legacy
+// endpoint is removed; do not build UI or logic on it.
 // ---------------------------------------------------------------------------
 
 export const ASSET_LIST_CATEGORIES = [

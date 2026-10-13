@@ -1,16 +1,82 @@
 # Mode — Home Redesign Studio: build spec
 
-Mode is a local-first web app (works great on a phone) for redesigning a house
-from photos. You upload photos of parts of the house — rooms, the facade, the
-yard — then try paint colors, flooring/siding/hardscape materials, lighting
-(time of day and fixtures) and landscaping (plants, planters, decor), compare
-design options side by side, and keep an **asset list** (shopping/materials
-list) that you can **type in, import, or generate** (rule-based from the
-design, or AI-enriched). Optional AI (Claude) analyzes photos, proposes
-designs, prices the list and draws new assets; an optional image provider
-produces photoreal renders.
+> ## 0. PRODUCT DIRECTION (final, from the user interview — supersedes anything
+> ## below AND any assignment prompt where they conflict)
+>
+> Mode is a **prompt-first redesign studio** for the user's own house (single
+> user, local-first, desktop-first; must still work on a phone). The user
+> uploads a photo of a room or of the outside of the house and gets
+> **photoreal variations** of what it could look like.
+>
+> 1. **Scene understanding.** On upload the AI categorizes the photo (front of
+>    house, front yard, backyard, kitchen…) and builds a **scene map**: labeled
+>    zones with outlines (facade, roof, front door, windows, porch, walkway,
+>    driveway, lawn, planting beds, **yard border**, trees, fence… / walls,
+>    floor, ceiling, cabinetry…), **paths** (e.g. "driveway → front door",
+>    current surface & width), boundaries, orientation & sun exposure, and an
+>    **architectural reading** (style & era, defining features, materials,
+>    proportions, design language to respect, how the space is used).
+> 2. **Compose a rendition from simple design elements** — NOT drag & drop.
+>    The user adds building blocks (Pathway, Border edging, Planting bed, Lawn,
+>    Patio, Outdoor lighting, Front door, Exterior paint… / Wall paint,
+>    Flooring, Interior lighting, Cabinets…). Each element asks visual
+>    questions — e.g. Pathway → material, **stone size** (large flagstone
+>    slabs / medium pavers / small cobbles / pea gravel), shape (straight /
+>    gentle curve / meandering), width, edging, lighting — shown as **image
+>    swatches to compare and contrast**. Choices + free-text prompt + targeted
+>    zones form a **design brief**.
+> 3. **Generate & compare.** Claude turns the brief into N distinct variation
+>    instructions; the image provider renders them on the user's photo (only
+>    the targeted zones change unless the user chooses "whole image").
+>    **Compare mode** renders one variation per option of one question (e.g.
+>    the path in 4 stone sizes, everything else fixed) in a labeled grid.
+>    From any variation: **More like this**, **Refine** ("wider, add lavender
+>    edging"), **Use as base**, favorite, download, before/after slider.
+> 4. **Idea board** (inspiration): uploaded inspiration images, notes,
+>    **design themes** from the knowledge base, and **real products** found by
+>    AI search (Home Depot, Lowe's, nurseries) or pasted links. Items are
+>    described by AI and feed generations and recommendations.
+> 5. **Grounded in real architecture, themes and purpose.** A curated design
+>    knowledge base (architectural styles with features/palettes/materials/
+>    landscape/lighting/avoid-lists, design themes with purpose & principles,
+>    per-element purpose & rules of thumb — e.g. a primary entry walk is 4–5 ft
+>    wide and leads clearly to the door) drives the AI prompts, option
+>    rationales and recommendations.
+> 6. **Plant feasibility outdoors.** Every plant suggestion respects the
+>    property's hardiness zone & climate profile (from the project ZIP), the
+>    zone's sun exposure, water needs, mature size vs space, deer/invasiveness;
+>    plant options carry good/caution/poor ratings with reasons; generations
+>    list plants with feasibility notes; plants can be rendered as newly
+>    planted / established / mature.
+> 7. **Recommendations**: AI suggestions from scene + idea board, each one
+>    click to add to the brief or generate.
+> 8. **Fine-tune (secondary tab)**: the precise hand tools — outline surfaces,
+>    exact paint colors, material textures, lighting/time of day, placing
+>    plants/fixtures — remain as a secondary mode (also used to refine a
+>    zone's outline before generating).
+> 9. **Dropped**: the asset/shopping list (no list panel, no quantity math,
+>    no CSV/print exports, no /api/asset-list UI). Inside and outside are
+>    equally important. Image providers: **OpenAI and Google Gemini**, the
+>    user picks in Settings / per run.
+>
+> **Assignment overrides for engineers who haven't started yet:**
+> - **data**: do NOT implement src/assetList/quantities|generate|export (deleted).
+>   Implement only src/assetList/area.ts. Persistence must handle the new
+>   blobs/masks: idea board images/thumbs (project.ideaBoard), variation
+>   images/thumbs (photo.generations[].variations[]), scene zone masks
+>   (zone.maskId) in referencedIds, deleteProject and bundles. Projects
+>   loaded from older saves must be migrated (missing ideaBoard → [],
+>   photo.generations → []).
+> - **shell**: see §3.8 (rewritten): Studio / Fine-tune modes; no asset-list exports.
+> - **panels-plan**: your assignment is REPLACED by §3.15 Studio panels.
+> - **panels-scene**: Lighting + Library are Fine-tune panels; no Shop there
+>   (products go to the idea board, §3.15).
+> - **catalog / textures / engine-render / panels-design**: unchanged (they
+>   power Fine-tune and the option swatches — textureSwatch renders the
+>   texture visuals of element options).
 
-Everything works offline with no API keys except the AI features.
+Mode is a local-first web app. Everything except the AI features works
+offline with no API keys.
 
 ---------------------------------------------------------------------------
 
@@ -22,7 +88,11 @@ src/App.tsx                   app shell (routes: projects home ↔ project works
 src/ui/common/index.tsx       shared UI primitives (Button, IconButton, Slider, Modal, Swatch, …)
 src/ui/shell/*                top bar, projects home, spaces sidebar, settings, export menu, mobile nav, toasts
 src/ui/editor/*               the canvas editor (render, zoom/pan, tools, overlays, compare)
-src/ui/panels/*Panel.tsx      right-hand panels: Surfaces, Paint, Materials, Lighting, Library, AssetList, AI
+src/ui/panels/*Panel.tsx      Fine-tune panels: Surfaces, Paint, Materials, Lighting, Library
+src/ui/studio/*               Studio: StudioView (viewer, zones, sketch, variations, compare grid), generate.ts (runs)
+src/ui/studio/panels/*        Studio panels: Design (brief composer), Scene, Ideas (+ ShopModal), Suggestions, History
+src/assets/design/*           design knowledge: architectural styles, themes, element guidance, ELEMENT_DEFS
+src/lib/studio.ts             Studio API client + conversions    src/lib/products.ts  real products client
 src/state/store.ts            zustand+immer store: project document, selection, tools, undo/redo   (DONE)
 src/state/runtime.ts          in-memory masks + decoded photos + Lab cache                          (DONE)
 src/state/renderContext.ts    builds engine RenderContext for a photo/design                        (DONE)
@@ -30,7 +100,7 @@ src/state/persistence.ts      IndexedDB (idb-keyval) storage + project bundle im
 src/engine/*                  pixel engine (pure TS on ImageDataLike; compositor/assetImages use canvas)
 src/assets/catalog/*          built-in catalog data (paints, materials, plants, fixtures, decor) + search
 src/assets/art/*              procedural SVG art for built-in assets
-src/assetList/*               quantities, area estimates, rule-based list generation, CSV/print export & CSV import
+src/assetList/area.ts         real-world areas / default object sizes (Fine-tune)
 src/lib/imageImport.ts        decode / downscale / encode images (browser)
 src/lib/backgroundRemoval.ts  cut out uploaded asset photos
 src/lib/api.ts                typed client for the API server
@@ -248,15 +318,8 @@ truly need a contract change, work around it locally and list it under
   available. Friendly errors (e.g. HEIC on non-Safari: “This browser can't
   read HEIC photos — export as JPEG or use Safari”).
 - backgroundRemoval per contract (tests on synthetic images).
-- assetList: area.ts, quantities.ts, generate.ts, export.ts per contracts.
-  generate: group paint by hex+finish; area from regionAreaSqFt (sum); when a
-  region's area is unknown, still add the row with quantity 0, specs noting
-  "measure or calibrate photo". Painting supplies row once if any paint.
-  Materials: materialToBuy; mulch/gravel/sod logic by material category.
-  Objects: group placed objects by assetId across all spaces (count),
-  unitCost = midpoint of asset.cost; plants note container size; lights:
-  group by assetId (unknown fixture → by name). Space ids attached.
-  designSummaryText: compact, readable, deterministic. Tests for all.
+- assetList: ONLY area.ts (the shopping list was dropped — see §0).
+- persistence must cover Studio data (§0 overrides) and migrate old saves.
 
 ### 3.7 server — `server/*`, `src/lib/api.ts` (+ tests)
 - Hono app (server/app.ts exporting `createApp(deps)` for tests; server/index.ts
@@ -311,41 +374,45 @@ truly need a contract change, work around it locally and list it under
 
 ### 3.8 shell — `src/App.tsx`, `src/ui/shell/*`, `public/sw.js` (optional)
 - App: on mount `useStore.getState().init()`; route = project ? workspace : projects home.
-- Projects home: warm editorial landing (font-display headline “Redesign your
-  home, one photo at a time”, short explanation of the 4 steps: add spaces →
-  upload photos → design (paint, materials, lighting, landscaping) → asset
-  list), "New project" (modal: name, optional ZIP/zone/style), recent
-  projects grid (cover thumbnail from blob, name, counts, updated time, menu:
-  open/rename/delete with ConfirmModal), "Import project" (file input
-  .json), AI status hint.
-- Workspace layout: desktop: TopBar (h-14) + [SpacesSidebar w-64 | EditorView
-  flex-1 | RightPanel w-[22rem] with icon tab rail]; mobile (< lg): TopBar +
-  one pane at a time (view.mobilePane) + bottom nav (Spaces / Design / Panels)
-  and the right panel as full-height pane with a scrollable tab strip.
-- TopBar: back to projects, editable project name, save status (saving/saved/
-  error), undo/redo (+ Ctrl/Cmd+Z, Shift+Ctrl/Cmd+Z, Ctrl+Y — ignore when
-  typing in inputs), Export menu (Design image PNG via renderDesignToBlob;
-  Before/after via renderBeforeAfterBlob; Asset list CSV; Print asset list
-  (open assetListToPrintHTML in a new window and print); Project backup via
-  exportProject), Settings button.
-- SpacesSidebar: Interior / Exterior groups; space rows (icon by type, name,
-  photo count) expandable to photo thumbnails (blob → object URL, revoke on
-  unmount); add photo (hidden file input, accept image/*, multiple); drag &
-  drop images onto a space; space menu (rename, change type, notes, delete
-  with confirm); "Add space" modal: grid of SpaceType tiles with lucide icons
-  grouped Interior / Exterior, optional name. Photo row menu: rename, delete.
-- RightPanel: tab rail (icons + labels): Surfaces, Paint, Materials,
-  Lighting, Library ("Plants & objects"), Asset list, AI; renders the panel
-  components from src/ui/panels. Toasts (bottom-center, from store).
-- Settings modal: project info (name, ZIP, hardiness zone with hint & link
-  to https://planthardiness.ars.usda.gov, budget, style, notes); appearance
-  (System/Light/Dark → html[data-theme], persisted in localStorage
-  'mode.theme'); AI status (from store.health; how to enable: set
-  ANTHROPIC_API_KEY in .env and restart; image provider status); server access
-  token field (localStorage 'mode.apiToken'); storage usage
-  (navigator.storage.estimate); export/import/delete project.
-- Register a minimal service worker only in production for offline app shell
-  (optional; must not cache /api).
+  Mount `<ShopModal />` (src/ui/studio/panels/ShopModal.tsx) once at app level.
+- Projects home: warm editorial landing (font-display headline, e.g. "See your
+  home redesigned before you lift a shovel"), a short "how it works": upload a
+  photo → Mode maps the scene → compose your idea from design elements →
+  compare photoreal variations. New project modal (name, ZIP code — used for
+  hardiness zone & plant feasibility —, optional style), recent projects grid
+  (cover thumbnail, name, counts, updated, menu: rename/delete with confirm),
+  Import project (.json), AI status hint.
+- Workspace (desktop-first): TopBar (h-14) + [SpacesSidebar w-64 |
+  center | right panel w-[24rem]]. A **mode switch** (Segmented: "Studio" |
+  "Fine-tune", store.mode) sits at the top of the center area or in the top
+  bar. Studio mode: center = `<StudioView/>` (src/ui/studio/StudioView.tsx),
+  right panel tabs = Design, Scene, Ideas, Suggestions, History
+  (src/ui/studio/panels/*Panel.tsx; store.studio.panel). Fine-tune mode:
+  center = `<EditorView/>`, right panel tabs = Surfaces, Paint, Materials,
+  Lighting, Library (store.panel). Tab rail with icons + labels.
+  Mobile (< lg): one pane at a time (view.mobilePane) + bottom nav.
+- TopBar: back to projects, editable project name, save status, undo/redo
+  (+ Ctrl/Cmd+Z, Shift+Ctrl/Cmd+Z, Ctrl+Y — ignored while typing), Export menu
+  (current image: the variation shown in Studio or the Fine-tune render;
+  before/after image; project backup via exportProject), Settings.
+- SpacesSidebar: Interior / Exterior groups; space rows expandable to photo
+  thumbnails (object URLs revoked on unmount) with a small badge when the photo
+  has a scene map and the number of favorites; add photos (file input +
+  drag & drop); space menu (rename, change type, notes, delete with confirm);
+  "Add space" modal with SpaceType tiles. After a photo upload, if AI is
+  enabled, kick off scene analysis automatically (call analyzeScene from
+  src/lib/studio.ts with the photo blob and store.setScene; show a subtle
+  "Mapping the scene…" state; failures → toast, never block).
+- Settings modal: project info (name, ZIP, hardiness zone, "Look up climate"
+  → fetchClimate → location.climate shown as a card: zone, frost dates,
+  rainfall, notes), style, notes; image generation: default provider
+  (OpenAI / Gemini from health.imageProviders) and quality
+  (store.studio.provider / quality, persisted in localStorage
+  'mode.provider' / 'mode.quality'); appearance (System/Light/Dark,
+  localStorage 'mode.theme'); AI status & how to enable (ANTHROPIC_API_KEY,
+  OPENAI_API_KEY, GEMINI_API_KEY in .env, restart); server access token
+  (localStorage 'mode.apiToken'); storage usage; export/import/delete project.
+- Toaster bottom-center. Optional production-only service worker (never cache /api).
 
 ### 3.9 editor — `src/ui/editor/*` (EditorView.tsx and helpers)
 - EditorView renders, for the active photo + design: header row with design
@@ -419,7 +486,7 @@ truly need a contract change, work around it locally and list it under
   material controls: scale, rotation, tint (optional), strength; perspective
   hint for horizontal surfaces (button → plane tool). Remove material.
 
-### 3.11 panels-scene — `src/ui/panels/LightingPanel.tsx`, `LibraryPanel.tsx` (+ helpers under src/ui/panels/scene/)
+### 3.11 panels-scene — `src/ui/panels/LightingPanel.tsx`, `LibraryPanel.tsx` (+ helpers under src/ui/panels/scene/) — Fine-tune mode
 - Lighting: Scene section: time of day segmented with icons (Sun, Sunset,
   CloudMoon, Moon), exposure, warmth (kelvin slider with a warm→cool gradient
   track), ambient strength, contrast, saturation, reset. Fixtures section:
@@ -447,42 +514,146 @@ truly need a contract change, work around it locally and list it under
   name, size (height), rotation, flip, opacity, shadow, tint (vector assets),
   layer order buttons, duplicate, delete.
 
-### 3.12 panels-plan — `src/ui/panels/AssetListPanel.tsx`, `AIPanel.tsx` (+ helpers under src/ui/panels/plan/)
-- Asset list (project-wide): header with item count, total (assetListTotals)
-  vs budget (progress bar; over budget in warning color). Actions: "Generate
-  from design" (store.regenerateAssetList, explains it keeps manual & locked
-  rows), "AI: complete & price" (api.generateAssetListAI with
-  designSummaryText → draftsToItems → append; show returned notes; disabled
-  with reason when AI is off), "Add item" (modal form: name, category, qty,
-  unit, unit cost, spaces multi-select, specs, vendor, link, notes, status),
-  "Import CSV" (file → parseAssetListCSV → preview count → add as manual
-  rows), Export CSV, Print. Grouped by category with subtotals; each row:
-  swatch for paint, name, specs, qty × unit, unit cost, line total, status
-  select, source badge (generated/AI/manual) + lock icon; inline edits of
-  qty/unit cost; row menu edit/lock/delete. Filter by space and status.
-  "Expand" opens a large modal with the full table (more columns).
-- AI: status card (enabled? model; image provider). When off: friendly
-  explanation + how to enable; everything else in the app still works.
-  Sections for the active photo: (1) Analyze → api.analyzePhoto (photo blob →
-  blobToAIDataUrl) → store.setAnalysis → render analysis (summary, style,
-  surfaces with current color swatches, lighting notes, landscaping,
-  opportunities). (2) Design ideas: style chips (interior: Modern farmhouse,
-  Scandinavian, Japandi, Mid-century modern, Coastal, Traditional, Industrial,
-  Bohemian; exterior: Modern, Craftsman, Cottage garden, Xeriscape, Tropical,
-  Formal, Pollinator garden, Mediterranean) + brief + budget → api.suggestDesign
-  (regions of the photo included) → suggestion card (concept, palette
-  swatches, per-region treatments, lighting, fixtures, plants (botanical, why),
-  decor, tips, budget). Buttons: "Apply as new option" (store.addDesign(title,
-  false) then apply: paint/material treatments for listed regionIds (validate
-  material ids via getMaterial; hex via normalizeHex), lighting timeOfDay +
-  kelvin, place catalog fixtures/plants/decor at normalized positions ×
-  photo size with defaultObjectHeightPx (skip unknown ids, report count)),
-  "Add to asset list" (draftsToItems). (3) Photoreal render (image provider
-  required): strength, instructions, "Render" → current composite via
-  loadRenderContext + renderDesignToBlob → canvas → AI data URL →
-  api.renderAI → store.addAIRender(blob, prompt, provider) → gallery of
-  renders for the design with before/after slider, download, delete.
-  Show progress and allow cancel (AbortController) for long calls.
+### 3.12 (removed — asset list & old AI panel were dropped; see §3.15)
+
+### 3.13 studio-server — `server/studio/*`, `src/lib/studio.ts`, `src/lib/products.ts` (+ tests)
+- Endpoints (shared/api.ts §Studio and §Real store products): scene, climate,
+  element-options, recommend, describe-idea, plan, render-variation,
+  products/search, products/from-url, products/image. Export
+  `registerStudioRoutes(app, deps)`; the lead wires it into server/app.ts.
+- Claude calls as in §3.7 (beta.messages.parse, structured outputs,
+  fallbacks 'default', cached system prompt). System prompts embed
+  designKnowledgeForAI() (src/assets/design) and catalogSummaryForAI()
+  lazily (memoized). Scene: precise zone polygons (tight, clockwise),
+  paths' centerlines, sun per ground zone from shadows/orientation,
+  architecture reading using the style list. Plan: one self-contained,
+  photoreal image-edit instruction per variation that preserves camera,
+  perspective, lighting and everything outside the targets; respects the
+  architecture and element purpose; plants feasible for zone/sun/space and
+  sized per plantMaturity; compare runs vary ONLY the compared option.
+- Image providers (server/studio/providers.ts): OpenAI Images edits (mask,
+  references as extra images) and Google Gemini image generation
+  (generateContent with inline image parts + text; GEMINI_API_KEY,
+  GEMINI_IMAGE_MODEL default 'gemini-2.5-flash-image'); provider chosen per
+  request or IMAGE_PROVIDER default; health lists configured providers.
+  Return the provider's image as is (the client resizes and composites).
+- Products: search = Claude with the web search server tool restricted via
+  allowed_domains to homedepot.com, lowes.com and reputable nurseries
+  (e.g. naturehills.com, fast-growing-trees.com, monrovia.com,
+  provenwinners.com, springhillnursery.com, waysidegardens.com,
+  highcountrygardens.com, plantnative.org-style native nurseries); returns
+  real product pages only (never invent URLs). from-url = SSRF-safe fetch
+  (http/https only, resolve DNS and refuse private/loopback/link-local
+  addresses, 10 s timeout, 3 MB cap), parse JSON-LD Product / OpenGraph,
+  fall back to Claude reading the trimmed page text, 'partial' when blocked.
+  products/image = SSRF-safe image proxy (image/* only, ≤ 8 MB).
+- Tests with fake Claude / fake providers / fake fetch.
+
+### 3.14 studio-view — `src/ui/studio/StudioView.tsx`, `src/ui/studio/generate.ts`, other files in `src/ui/studio/` except `panels/`
+- Viewer: shows the original photo or the variation `studio.viewVariationId`
+  (fit/zoom/pan like the editor, DPR-aware), zone overlay (outlines + labels
+  on hover; targeted zones highlighted; focusZoneId emphasized; click a zone
+  to toggle it in the brief's targetZoneIds), paths drawn as dashed
+  centerlines with labels, sketch tools (draw a path centerline with a width
+  handle → scene path kind 'sketch'; draw an area → zone kind 'other'
+  labeled "Sketched area"), before/after slider vs the original, and the
+  run progress overlay.
+- Bottom dock: the prompt bar (multi-line prompt bound to the photo's
+  draft.prompt, chips for targeted zones/elements/ideas, scope toggle "Only
+  selected areas / Whole image", variation count, provider, Generate) and
+  the variations strip (newest run first; each run labeled with its plan;
+  thumbnails with favorite star, compare-run option labels, status
+  placeholders while rendering, failed tiles with retry). Click a
+  variation → view it; actions: More like this, Refine (feedback input),
+  Use as base (viewVariationId), Compare with original, Download, Delete.
+- Compare grid: when studio.gridGenerationId is set, show that run's
+  variations side by side with option labels, rationale, and "Choose" (sets
+  the element choice to that option and views the variation).
+- generate.ts per its contract: builds the PlanRequest (scene summary,
+  zones with sun, paths, brief elements → where/choices prompt texts, ideas
+  text, up to 3 idea images downscaled, location + climate summary,
+  compare/refine), creates the Generation (status 'running'), renders with a
+  concurrency of 3, converts results: resize to photo size, protect pixels
+  outside buildTargetMask (feathered alpha composite) when scope 'zones',
+  encode JPEG (q 0.9) + thumb, putBlob, addVariation; updates progress;
+  marks done/partial/failed; respects cancel. Mask sent to the server uses
+  the OpenAI convention (opaque keep, transparent edit).
+- Polished, calm, gallery-like UI; keyboard: ←/→ to step variations, F
+  favorite, Esc back to original.
+
+### 3.15 studio-panels — `src/ui/studio/panels/*` (DesignPanel, ScenePanel, IdeasPanel, SuggestionsPanel, HistoryPanel, ShopModal + helpers in that folder)
+- Design (brief composer — the heart): element palette (tiles from
+  elementsForSetting(space kind), icon + label) → adds newElementSpec to the
+  draft. Each element card: label (editable), "where" chips (zones/paths from
+  the scene, toggleable; "pick on photo" hint), each dimension as a question
+  with option cards showing the visual (texture → textureSwatch canvas,
+  color/colors → swatches, art → assetSvg via renderArt, diagram → small
+  inline SVG diagrams you draw for path shapes/widths/beams, image → blob),
+  label, description, rationale, plant feasibility badge
+  (good/caution/poor + reasons on hover); "Tailor to my photo" (AI
+  fetchElementOptions → mergeDimensions); "Compare these on my photo" per
+  dimension (startRun mode 'compare' with the selected 2–6 options); note
+  field; remove. Below: plant maturity segmented (newly planted /
+  established / mature), idea items included (toggle chips), free-text
+  prompt, Generate N variations. Element guidance (purpose, rules of thumb)
+  shown as a subtle tip.
+- Scene: Analyze / Re-analyze (analyzeScene); category (editable select),
+  summary, viewpoint, orientation & lighting, architecture card (style, era,
+  features, materials, proportions, design language, purpose), boundaries,
+  zones list (kind icon, label editable, sun badge, description, target
+  toggle, focus on hover, delete, "Refine outline" → creates a Fine-tune
+  Surface region whose mask is seeded from the zone polygon (fillPolygon),
+  sets zone.maskId = region.maskId (shared mask, so brush/wand edits in
+  Fine-tune refine the zone) and switches to Fine-tune with that region
+  selected), paths list, keep-list, opportunities (each → "Add to brief").
+- Ideas: idea board (project-wide; filter "this space"/all): add image
+  (file/paste/drag; downscale ≤ 1024 + thumb; extract 5 colors; if AI on,
+  describeIdea → title/aiDescription), add note, add theme (themesFor(setting,
+  scene styleId) picker with purpose & principles), find products (opens
+  ShopModal), paste product link (productFromUrl → image via
+  fetchProductImage → idea kind 'product'). Cards: image, title, note
+  (editable), colors, AI description, store/price/link for products,
+  active toggle, delete.
+- ShopModal (store.shop): query, category, stores (Home Depot / Lowe's /
+  Nurseries), max price, uses project zone; results grid (image, name, price,
+  store badge, specs, plant zones) → "Add to idea board", "Open at store ↗".
+- Suggestions: fetchRecommendations (focus input optional) → cards (title,
+  category, why, targets) → "Add to brief" (prompt + element + targets) or
+  "Generate now".
+- History: all runs (plan, plant feasibility notes table, brief summary,
+  provider/model, time), favorites filter, re-run with same brief, delete run.
+- Climate: if exterior and project has no climate profile, prompt to add ZIP
+  (Settings) — plant feasibility needs it.
+
+### 3.16 design-knowledge — `src/assets/design/*` (+ tests)
+- ~16 architectural styles (exterior & interior: Colonial/Colonial Revival,
+  Georgian, Federal, Cape Cod, Craftsman/Bungalow, Tudor, Victorian/Queen
+  Anne, Farmhouse (traditional & modern), Ranch, Mid-century modern, Split-level,
+  Spanish/Mission, Mediterranean, Prairie, Contemporary/Modern, Cottage,
+  Transitional interior, Scandinavian, Japandi, Industrial…) with accurate
+  identifying cues, characteristics, 2–3 historically appropriate palettes,
+  materials, landscape and lighting approaches, avoid-lists, theme ids.
+- ~18 design themes (exterior: cottage garden, formal/symmetrical,
+  native & pollinator, xeriscape/dry garden, woodland shade, modern
+  minimalist, Mediterranean, Japanese-inspired, coastal, edible/potager;
+  interior: warm minimal, Scandinavian, Japandi, modern farmhouse,
+  traditional, mid-century, coastal, bold eclectic) with purpose,
+  principles, palette, materials, plants (feasibility-minded with climate
+  notes), lighting, suits, promptHint.
+- ELEMENT_DEFS for every ElementType with 2–6 dimensions each and 3–6
+  options per dimension, each with description, promptText (specific,
+  photoreal-friendly: sizes in inches/feet, materials, colors), rationale
+  and a visual: textures (TextureSpec using TEXTURE_PATTERNS with realistic
+  unit sizes — e.g. Pathway "stone size": large flagstone 18–24 in, medium
+  12–16 in pavers, small 4 in cobbles, 3/8 in pea gravel), colors,
+  diagrams (ids listed in a DIAGRAM_IDS export for the UI to draw:
+  'path-straight', 'path-curved', 'path-meander', 'width-3ft', 'width-4ft',
+  'width-5ft', 'edge-none', 'edge-steel', 'edge-brick', 'edge-plants',
+  'beam-down', 'beam-up', 'beam-path', …) or art (PlantArt/FixtureArt).
+- ELEMENT_GUIDANCE per element: purpose, rules of thumb (dimensions, code /
+  safety basics like step riser 6–7.5 in, path lighting spacing 8–10 ft),
+  how to relate to the architecture.
+- Functions per contract; plantFeasibility uses catalog PlantInfo; tests.
 
 ---------------------------------------------------------------------------
 

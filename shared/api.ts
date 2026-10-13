@@ -8,6 +8,11 @@
  */
 import { z } from 'zod';
 import {
+  ELEMENT_TYPES,
+  RECOMMENDATION_CATEGORIES,
+  TEXTURE_PATTERNS,
+  ZONE_KINDS,
+  STORE_KINDS,
   ASSET_CATEGORIES,
   ASSET_LIST_CATEGORIES,
   PAINT_FINISHES,
@@ -23,6 +28,18 @@ export const API_PATHS = {
   assetList: '/api/asset-list',
   generateAsset: '/api/generate-asset',
   render: '/api/render',
+  productSearch: '/api/products/search',
+  productFromUrl: '/api/products/from-url',
+  /** GET ?url=<encoded image url> — server-side image fetch (CORS-free, SSRF-guarded). */
+  productImage: '/api/products/image',
+  // Studio
+  scene: '/api/studio/scene',
+  climate: '/api/studio/climate',
+  elementOptions: '/api/studio/element-options',
+  recommend: '/api/studio/recommend',
+  describeIdea: '/api/studio/describe-idea',
+  plan: '/api/studio/plan',
+  renderVariation: '/api/studio/render-variation',
 } as const;
 
 /** Max size of JSON request bodies accepted by the server. */
@@ -57,10 +74,18 @@ const LocationZ = z.object({
 // GET /api/health
 // ---------------------------------------------------------------------------
 
+export const ImageProviderIdZ = z.enum(['openai', 'gemini']);
+export type ImageProviderId = z.infer<typeof ImageProviderIdZ>;
+
 export const HealthResponseSchema = z.object({
   ok: z.boolean(),
   ai: z.object({ enabled: z.boolean(), model: z.string().nullable() }),
+  /** Default image provider (legacy single-provider field). */
   imageProvider: z.object({ enabled: z.boolean(), name: z.string().nullable(), model: z.string().nullable() }),
+  /** Every configured image provider (Studio lets the user pick). */
+  imageProviders: z
+    .array(z.object({ id: ImageProviderIdZ, name: z.string(), model: z.string(), isDefault: z.boolean() }))
+    .optional(),
 });
 export type HealthResponse = z.infer<typeof HealthResponseSchema>;
 
@@ -277,6 +302,339 @@ export const RenderResponseSchema = z.object({
   provider: z.string(),
 });
 export type RenderResponse = z.infer<typeof RenderResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// Real store products — POST /api/products/search, POST /api/products/from-url,
+// GET /api/products/image?url=…
+// Search uses Claude with web search restricted to the chosen stores; from-url
+// reads a pasted product page (structured data / meta tags, Claude fallback).
+// ---------------------------------------------------------------------------
+
+const StoreKindZ = z.enum(STORE_KINDS);
+
+export const ProductResultSchema = z.object({
+  name: z.string(),
+  brand: z.string().nullable(),
+  /** Seller display name, e.g. "The Home Depot", "Lowe's", "Nature Hills Nursery". */
+  store: z.string(),
+  storeKind: StoreKindZ,
+  url: z.string().describe('Product page URL'),
+  imageUrl: z.string().nullable().describe('Direct URL of the main product image (jpg/png/webp)'),
+  priceUsd: z.number().nullable(),
+  priceText: z.string().nullable().describe('Price as shown, e.g. "$24.98 / 3 gal"'),
+  category: AssetCategoryZ,
+  description: z.string().describe('One or two sentences'),
+  realHeightFt: z.number().nullable().describe('Approximate real height in feet (fixture height, plant size at purchase or mature), for scaling on the photo'),
+  specs: z.array(z.string()).describe('Key specs: color temperature, lumens, finish, container size, zones, sun, mature size…'),
+  plant: z
+    .object({
+      botanical: z.string().nullable(),
+      sun: z.string().nullable(),
+      water: z.string().nullable(),
+      zones: z.string().nullable().describe('e.g. "5-9"'),
+      matureSize: z.string().nullable(),
+    })
+    .nullable(),
+  light: z
+    .object({ kelvin: z.number().nullable(), lumens: z.number().nullable(), indoor: z.boolean(), outdoor: z.boolean() })
+    .nullable(),
+});
+export type ProductResult = z.infer<typeof ProductResultSchema>;
+
+export const ProductSearchRequestSchema = z.object({
+  query: z.string().min(2).max(300),
+  category: AssetCategoryZ,
+  stores: z.array(StoreKindZ).min(1),
+  maxPriceUsd: z.number().nullable(),
+  location: LocationZ.nullable(),
+  /** Extra context, e.g. "north-facing front bed", "over a kitchen island, 36 in wide". */
+  context: z.string().max(1000).nullable(),
+});
+export type ProductSearchRequest = z.infer<typeof ProductSearchRequestSchema>;
+
+export const ProductSearchResultSchema = z.object({
+  products: z.array(ProductResultSchema),
+  notes: z.array(z.string()).describe('Caveats: availability, regional stock, price checked date…'),
+});
+export type ProductSearchResult = z.infer<typeof ProductSearchResultSchema>;
+
+export const ProductFromUrlRequestSchema = z.object({
+  url: z.string().url().max(2000),
+});
+export type ProductFromUrlRequest = z.infer<typeof ProductFromUrlRequestSchema>;
+
+export const ProductFromUrlResponseSchema = z.object({
+  product: ProductResultSchema,
+  /** How the details were obtained. 'partial' = some fields could not be read (site blocked); ask the user to fill them in. */
+  method: z.enum(['structured-data', 'ai', 'partial']),
+});
+export type ProductFromUrlResponse = z.infer<typeof ProductFromUrlResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// Studio — scene understanding, element options, recommendations, idea
+// descriptions, variation planning and rendering. Coordinates exchanged with
+// the AI are NORMALIZED (0..1 of photo width/height); the client converts.
+// ---------------------------------------------------------------------------
+
+const ZoneKindZ = z.enum(ZONE_KINDS);
+const ElementTypeZ = z.enum(ELEMENT_TYPES);
+
+/** POST /api/studio/scene — categorize the photo and map its zones and paths. */
+export const SceneRequestSchema = z.object({
+  image: DataUrlZ,
+  width: z.number(),
+  height: z.number(),
+  spaceTypeHint: SpaceTypeZ.nullable(),
+  notes: z.string().max(2000).nullable(),
+});
+export type SceneRequest = z.infer<typeof SceneRequestSchema>;
+
+export const SceneResultSchema = z.object({
+  category: SpaceTypeZ.describe('Best category for this photo'),
+  summary: z.string(),
+  viewpoint: z.string(),
+  style: z.string(),
+  boundaries: z.string().describe('Where the yard / room boundaries are and what marks them'),
+  lighting: z.string(),
+  orientation: z.string().describe('Which way the facade / windows face, inferred from shadows and sun'),
+  architecture: z.object({
+    style: z.string().describe('Specific architectural style, e.g. "Center-hall Colonial Revival"'),
+    styleId: z.string().nullable().describe('Matching id from the provided style list, or null'),
+    era: z.string().nullable(),
+    features: z.array(z.string()),
+    materials: z.array(z.string()),
+    proportions: z.string(),
+    designLanguage: z.array(z.string()).describe('Principles a redesign should follow for this house'),
+    purpose: z.array(z.string()).describe('How the space is used / should function'),
+  }),
+  zones: z.array(
+    z.object({
+      kind: ZoneKindZ,
+      label: z.string(),
+      description: z.string(),
+      polygon: z.array(NormPointZ).describe('Outline, clockwise, 4-24 points, tight to the visible area'),
+      editable: z.boolean(),
+      sun: z.enum(['full-sun', 'part-sun', 'shade']).nullable().describe('Estimated sun exposure for ground/planting zones, else null'),
+    }),
+  ),
+  paths: z.array(
+    z.object({
+      label: z.string(),
+      from: z.string(),
+      to: z.string(),
+      description: z.string(),
+      points: z.array(NormPointZ).describe('Centerline from start to end, 2-12 points'),
+      widthFraction: z.number().describe('Path width at its nearest point as a fraction of photo width'),
+    }),
+  ),
+  keep: z.array(z.string()),
+  opportunities: z.array(z.string()),
+});
+export type SceneResult = z.infer<typeof SceneResultSchema>;
+
+const PlantFeasibilityZ = z.object({
+  rating: z.enum(['good', 'caution', 'poor']),
+  reasons: z.array(z.string()),
+});
+
+const PlantNoteZ = z.object({
+  name: z.string(),
+  botanical: z.string().nullable(),
+  rating: z.enum(['good', 'caution', 'poor']),
+  notes: z.array(z.string()).describe('Zone fit, sun fit, water, mature size vs space, deer, invasiveness'),
+  alternative: z.string().nullable().describe('Better-suited alternative when rating is not good'),
+});
+
+/** POST /api/studio/climate — growing conditions from a ZIP code / zone (Claude's knowledge, not a live lookup). */
+export const ClimateRequestSchema = z.object({
+  zip: z.string().max(10).nullable(),
+  hardinessZone: z.string().max(4).nullable(),
+  notes: z.string().max(1000).nullable(),
+});
+export type ClimateRequest = z.infer<typeof ClimateRequestSchema>;
+
+export const ClimateResultSchema = z.object({
+  hardinessZone: z.string(),
+  summary: z.string(),
+  lastFrost: z.string().nullable(),
+  firstFrost: z.string().nullable(),
+  annualRainfallIn: z.number().nullable(),
+  notes: z.array(z.string()).describe('Soils, deer pressure, watering restrictions, invasive species to avoid, native plant resources'),
+});
+export type ClimateResult = z.infer<typeof ClimateResultSchema>;
+
+/** Option visual as the AI may describe it (texture from our pattern set, or colors). */
+export const OptionVisualDraftSchema = z.object({
+  kind: z.enum(['texture', 'color', 'none']),
+  pattern: z.enum(TEXTURE_PATTERNS).nullable(),
+  colors: z.array(HexZ).describe('1-4 colors: the swatch color or the texture palette'),
+  unitWidthIn: z.number().nullable(),
+  unitHeightIn: z.number().nullable(),
+});
+export type OptionVisualDraft = z.infer<typeof OptionVisualDraftSchema>;
+
+export const ElementDimensionDraftSchema = z.object({
+  id: z.string().describe('kebab-case'),
+  label: z.string(),
+  question: z.string(),
+  multiple: z.boolean(),
+  options: z.array(
+    z.object({
+      id: z.string().describe('kebab-case'),
+      label: z.string(),
+      description: z.string(),
+      promptText: z.string(),
+      visual: OptionVisualDraftSchema,
+      rationale: z.string().describe('Why this option suits this house and purpose (style, proportion, function)'),
+      feasibility: PlantFeasibilityZ.nullable().describe('For plant options only (zone, sun, water, mature size vs space); else null'),
+    }),
+  ),
+});
+export type ElementDimensionDraft = z.infer<typeof ElementDimensionDraftSchema>;
+
+/** POST /api/studio/element-options — tailor an element's choices to this photo. */
+export const ElementOptionsRequestSchema = z.object({
+  elementType: ElementTypeZ,
+  elementLabel: z.string(),
+  image: DataUrlZ.nullable(),
+  sceneSummary: z.string().max(8000),
+  zoneLabels: z.array(z.string()),
+  ideas: z.array(z.string()).describe('Idea board descriptions / notes'),
+  location: LocationZ.nullable(),
+  climate: z.string().max(4000).nullable(),
+  /** Built-in dimensions so the AI refines rather than reinvents them. */
+  existing: z.array(z.object({ id: z.string(), label: z.string(), optionLabels: z.array(z.string()) })),
+  /** Optional user question, e.g. "what stone sizes would suit a cottage look?" */
+  ask: z.string().max(1000).nullable(),
+});
+export type ElementOptionsRequest = z.infer<typeof ElementOptionsRequestSchema>;
+
+export const ElementOptionsResultSchema = z.object({
+  dimensions: z.array(ElementDimensionDraftSchema),
+  tips: z.array(z.string()),
+});
+export type ElementOptionsResult = z.infer<typeof ElementOptionsResultSchema>;
+
+/** POST /api/studio/recommend — ideas for this photo given the scene and idea board. */
+export const RecommendRequestSchema = z.object({
+  image: DataUrlZ,
+  sceneSummary: z.string().max(8000),
+  zones: z.array(z.object({ id: z.string(), kind: ZoneKindZ, label: z.string() })),
+  ideas: z.array(z.string()),
+  location: LocationZ.nullable(),
+  climate: z.string().max(4000).nullable(),
+  focus: z.string().max(1000).nullable(),
+});
+export type RecommendRequest = z.infer<typeof RecommendRequestSchema>;
+
+export const RecommendResultSchema = z.object({
+  recommendations: z.array(
+    z.object({
+      title: z.string(),
+      prompt: z.string(),
+      why: z.string(),
+      category: z.enum(RECOMMENDATION_CATEGORIES),
+      targetZoneIds: z.array(z.string()).describe('Only ids from the provided zones'),
+      elementType: ElementTypeZ.nullable(),
+    }),
+  ),
+});
+export type RecommendResult = z.infer<typeof RecommendResultSchema>;
+
+/** POST /api/studio/describe-idea — read an inspiration image. */
+export const DescribeIdeaRequestSchema = z.object({
+  image: DataUrlZ,
+  note: z.string().max(2000).nullable(),
+});
+export type DescribeIdeaRequest = z.infer<typeof DescribeIdeaRequestSchema>;
+
+export const DescribeIdeaResultSchema = z.object({
+  title: z.string().describe('2-6 words'),
+  description: z.string().describe('Style, materials, colors, plants, lighting — what makes the look, in 2-4 sentences'),
+  styleTags: z.array(z.string()),
+});
+export type DescribeIdeaResult = z.infer<typeof DescribeIdeaResultSchema>;
+
+/** POST /api/studio/plan — turn a brief into N variation instructions (or one per compared option). */
+export const PlanRequestSchema = z.object({
+  /** Base image the variations start from (original photo or a chosen variation). */
+  image: DataUrlZ,
+  sceneSummary: z.string().max(8000),
+  zones: z.array(
+    z.object({
+      id: z.string(),
+      kind: ZoneKindZ,
+      label: z.string(),
+      description: z.string(),
+      sun: z.enum(['full-sun', 'part-sun', 'shade']).nullable(),
+    }),
+  ),
+  paths: z.array(z.object({ id: z.string(), label: z.string(), description: z.string() })),
+  location: LocationZ.nullable(),
+  /** Climate profile summary (zone, frost, rainfall, notes) for plant feasibility. */
+  climate: z.string().max(4000).nullable(),
+  brief: z.object({
+    prompt: z.string().max(4000),
+    scope: z.enum(['zones', 'whole']),
+    plantMaturity: z.enum(['new', 'established', 'mature']),
+    targetZoneLabels: z.array(z.string()),
+    elements: z.array(
+      z.object({
+        type: ElementTypeZ,
+        label: z.string(),
+        where: z.array(z.string()).describe('Zone / path labels'),
+        choices: z.array(z.object({ dimension: z.string(), options: z.array(z.string()) })).describe('Chosen option prompt texts per dimension'),
+        note: z.string(),
+      }),
+    ),
+  }),
+  ideas: z.array(z.string()),
+  /** Up to 3 inspiration images. */
+  ideaImages: z.array(DataUrlZ).max(3),
+  count: z.number(),
+  compare: z
+    .object({
+      elementLabel: z.string(),
+      dimensionLabel: z.string(),
+      options: z.array(z.object({ id: z.string(), label: z.string(), promptText: z.string() })),
+    })
+    .nullable(),
+  /** "More like this" / refine: the variation we start from and what to change. */
+  refine: z.object({ title: z.string(), brief: z.string(), feedback: z.string().nullable() }).nullable(),
+});
+export type PlanRequest = z.infer<typeof PlanRequestSchema>;
+
+export const PlanResultSchema = z.object({
+  plan: z.string().describe('What will change and what stays, 1-3 sentences'),
+  plants: z.array(PlantNoteZ).describe('Every plant the variations use, with feasibility for this property; empty for interiors'),
+  variations: z.array(
+    z.object({
+      title: z.string().describe('3-7 words'),
+      brief: z.string().describe('Complete, self-contained image-edit instruction for this variation'),
+      optionId: z.string().nullable().describe('For compare runs: which option this variation shows'),
+    }),
+  ),
+});
+export type PlanResult = z.infer<typeof PlanResultSchema>;
+
+/** POST /api/studio/render-variation — one image from one instruction. */
+export const RenderVariationRequestSchema = z.object({
+  image: DataUrlZ,
+  /** PNG, same size as `image`: OPAQUE = keep, TRANSPARENT = may change (OpenAI convention). Null = whole image. */
+  mask: DataUrlZ.nullable(),
+  brief: z.string().max(8000),
+  references: z.array(DataUrlZ).max(3),
+  provider: ImageProviderIdZ.nullable(),
+  quality: z.enum(['draft', 'standard', 'high']),
+});
+export type RenderVariationRequest = z.infer<typeof RenderVariationRequestSchema>;
+
+export const RenderVariationResultSchema = z.object({
+  image: z.string().describe('PNG/JPEG data URL'),
+  provider: ImageProviderIdZ,
+  model: z.string(),
+});
+export type RenderVariationResult = z.infer<typeof RenderVariationResultSchema>;
 
 // ---------------------------------------------------------------------------
 // Errors

@@ -10,18 +10,22 @@
  */
 import { produce, type Draft } from 'immer';
 import { create } from 'zustand';
-import type { HealthResponse } from '../../shared/api';
+import type { HealthResponse, ImageProviderId } from '../../shared/api';
 import { newId } from '../../shared/ids';
 import {
   DEFAULT_LIGHTING,
   SPACE_TYPE_LABELS,
   SURFACE_LABELS,
+  emptyBrief,
   spaceKindOf,
   type AIRender,
+  type AssetCategory,
   type AssetDef,
-  type AssetListItem,
   type Calibration,
   type Design,
+  type DesignBrief,
+  type Generation,
+  type IdeaItem,
   type LightBeam,
   type LightingSettings,
   type Photo,
@@ -29,17 +33,19 @@ import {
   type PlacedObject,
   type Project,
   type ProjectMeta,
+  type Recommendation,
   type Region,
+  type SceneMap,
   type Space,
   type SpaceAnalysis,
   type SpaceType,
   type SurfaceKind,
   type Treatment,
+  type Variation,
 } from '../../shared/types';
-import { findAsset, getMaterial, getPaint } from '../assets/catalog';
+import { findAsset } from '../assets/catalog';
 import { evictAssetImage } from '../engine/assetImages';
 import { copyMaskInto, createMask, type MaskMode } from '../engine/mask';
-import { generateAssetList, mergeGeneratedItems } from '../assetList/generate';
 import { getHealth } from '../lib/api';
 import { downloadBlob, importImageFile } from '../lib/imageImport';
 import * as db from './persistence';
@@ -63,7 +69,48 @@ export type ToolId =
   | 'plane' // edit the region's perspective quad
   | 'place'; // click to place `placement`
 
-export type PanelId = 'surfaces' | 'paint' | 'materials' | 'lighting' | 'library' | 'assets' | 'ai';
+/** Studio = prompt-driven design (main); Fine-tune = hand tools on the canvas (secondary). */
+export type WorkspaceMode = 'studio' | 'finetune';
+
+/** Right-panel tabs in Fine-tune mode. */
+export type PanelId = 'surfaces' | 'paint' | 'materials' | 'lighting' | 'library';
+
+/** Right-panel tabs in Studio mode. */
+export type StudioPanelId = 'design' | 'scene' | 'ideas' | 'suggestions' | 'history';
+
+export interface StudioState {
+  panel: StudioPanelId;
+  /** Variation shown in the viewer (null = original photo). It is also the base of the next run. */
+  viewVariationId: string | null;
+  /** When set, the center shows this generation as a comparison grid. */
+  gridGenerationId: string | null;
+  /** Draw zone outlines & labels over the image. */
+  showZones: boolean;
+  /** Zone highlighted (hover / selected in the Scene panel). */
+  focusZoneId: string | null;
+  /** Sketch tool in the viewer: draw a path (centerline) or an area to target. */
+  sketch: 'none' | 'path' | 'area';
+  /** Variations per run (1..6). */
+  variationCount: number;
+  /** Image provider for the next run (null = server default). */
+  provider: ImageProviderId | null;
+  quality: 'draft' | 'standard' | 'high';
+  /** Element card expanded in the Design panel. */
+  activeElementId: string | null;
+}
+
+export interface RunProgress {
+  stage: 'planning' | 'rendering';
+  total: number;
+  done: number;
+  failed: number;
+}
+
+/** Opens the "Find real products" modal (Home Depot / Lowe's / nurseries) prefilled. */
+export interface ShopRequest {
+  query: string;
+  category: AssetCategory;
+}
 
 export interface ToolOptions {
   brushRadius: number; // px in photo space
@@ -116,17 +163,16 @@ export interface MutateOptions {
   history?: boolean;
 }
 
-export interface NewAssetItem extends Partial<Omit<AssetListItem, 'name' | 'category'>> {
-  name: string;
-  category: AssetListItem['category'];
-}
-
 export interface AppState {
   ready: boolean;
   projects: ProjectMeta[];
   project: Project | null;
   /** User-uploaded and AI-generated assets (global, all projects). */
   library: AssetDef[];
+  mode: WorkspaceMode;
+  studio: StudioState;
+  /** In-flight Studio runs by generation id. */
+  runs: Record<string, RunProgress>;
   selection: Selection;
   tool: ToolId;
   toolOptions: ToolOptions;
@@ -138,6 +184,8 @@ export interface AppState {
   /** Last color picked with the eyedropper. */
   pickedColor: string | null;
   health: HealthResponse | null;
+  /** Non-null while the Shop modal is open. */
+  shop: ShopRequest | null;
   saveState: 'idle' | 'saving' | 'saved' | 'error';
   toasts: Toast[];
   past: HistoryEntry[];
@@ -190,13 +238,27 @@ export interface AppState {
   deleteAIRender(renderId: string): void;
   updateDesignNotes(notes: string): void;
 
-  // asset list
-  addAssetItem(item: NewAssetItem): string | null;
-  updateAssetItem(id: string, patch: Partial<Omit<AssetListItem, 'id'>>, opts?: MutateOptions): void;
-  deleteAssetItem(id: string): void;
-  setAssetList(items: AssetListItem[], label?: string): void;
-  /** Rule-based regenerate (keeps manual/AI/locked rows). */
-  regenerateAssetList(): Promise<void>;
+  // studio
+  setMode(mode: WorkspaceMode): void;
+  setStudio(patch: Partial<StudioState>): void;
+  /** Replace the AI scene map of a photo (undoable). */
+  setScene(photoId: string, scene: SceneMap | undefined): void;
+  /** Edit zones / paths of a photo's scene (no-op when the photo has no scene). */
+  updateScene(photoId: string, recipe: (scene: Draft<SceneMap>) => void, opts?: MutateOptions): void;
+  /** Edit the Studio brief of a photo (created empty on first edit). */
+  updateDraft(photoId: string, recipe: (brief: Draft<DesignBrief>) => void, opts?: MutateOptions): void;
+  addIdeaItem(item: Omit<IdeaItem, 'id' | 'createdAt'>, blobs?: { image?: Blob; thumb?: Blob }): Promise<string | null>;
+  updateIdeaItem(id: string, patch: Partial<Omit<IdeaItem, 'id'>>, opts?: MutateOptions): void;
+  removeIdeaItem(id: string): Promise<void>;
+  addGeneration(photoId: string, generation: Generation): void;
+  updateGeneration(photoId: string, generationId: string, recipe: (g: Draft<Generation>) => void): void;
+  /** Stores nothing in the blob store — save the variation's image/thumb blobs first. */
+  addVariation(photoId: string, generationId: string, variation: Variation): void;
+  toggleFavorite(photoId: string, variationId: string): void;
+  deleteVariation(photoId: string, variationId: string): Promise<void>;
+  deleteGeneration(photoId: string, generationId: string): Promise<void>;
+  setRecommendations(photoId: string, items: Recommendation[], baseVariationId?: string): void;
+  setRunProgress(generationId: string, progress: RunProgress | null): void;
 
   // library
   addLibraryAsset(asset: AssetDef, imageBlob?: Blob): Promise<void>;
@@ -213,6 +275,8 @@ export interface AppState {
   setPanel(panel: PanelId): void;
   setView(patch: Partial<ViewState>): void;
   setPickedColor(hex: string | null): void;
+  openShop(req?: Partial<ShopRequest>): void;
+  closeShop(): void;
   notify(message: string, kind?: Toast['kind']): void;
   dismissToast(id: string): void;
 
@@ -249,6 +313,31 @@ export function activeDesignOf(photo: Photo | undefined): Design | undefined {
   return photo.designs.find((d) => d.id === photo.activeDesignId) ?? photo.designs[0];
 }
 
+/** Every blob id and mask id owned by a photo (for cleanup on delete). */
+export function photoRefs(photo: Photo): { blobIds: string[]; maskIds: string[] } {
+  const blobIds = [
+    photo.imageId,
+    photo.thumbId,
+    ...photo.designs.flatMap((d) => d.aiRenders.map((r) => r.imageId)),
+    ...photo.generations.flatMap((g) => g.variations.flatMap((v) => [v.imageId, v.thumbId])),
+  ];
+  const maskIds = [
+    ...photo.regions.map((r) => r.maskId),
+    ...(photo.scene?.zones.flatMap((z) => (z.maskId ? [z.maskId] : [])) ?? []),
+  ];
+  return { blobIds, maskIds };
+}
+
+/** Variation by id within a photo. */
+export function findVariation(photo: Photo | undefined, variationId: string | null): Variation | undefined {
+  if (!photo || !variationId) return undefined;
+  for (const g of photo.generations) {
+    const v = g.variations.find((x) => x.id === variationId);
+    if (v) return v;
+  }
+  return undefined;
+}
+
 export function newDesign(name: string): Design {
   const now = Date.now();
   return {
@@ -275,6 +364,7 @@ export function newProject(name: string): Project {
     updatedAt: now,
     location: {},
     spaces: [],
+    ideaBoard: [],
     assetList: [],
   };
 }
@@ -398,6 +488,20 @@ export const useStore = create<AppState>()((set, get) => {
     projects: [],
     project: null,
     library: [],
+    mode: 'studio',
+    studio: {
+      panel: 'design',
+      viewVariationId: null,
+      gridGenerationId: null,
+      showZones: true,
+      focusZoneId: null,
+      sketch: 'none',
+      variationCount: 3,
+      provider: null,
+      quality: 'standard',
+      activeElementId: null,
+    },
+    runs: {},
     selection: EMPTY_SELECTION,
     tool: 'select',
     toolOptions: {
@@ -414,6 +518,7 @@ export const useStore = create<AppState>()((set, get) => {
     maskVersions: {},
     pickedColor: null,
     health: null,
+    shop: null,
     saveState: 'idle',
     toasts: [],
     past: [],
@@ -461,6 +566,8 @@ export const useStore = create<AppState>()((set, get) => {
         placement: null,
         tool: 'select',
         saveState: 'idle',
+        mode: 'studio',
+        studio: { ...get().studio, viewVariationId: null, gridGenerationId: null, focusZoneId: null, sketch: 'none', activeElementId: null },
         view: { ...get().view, mobilePane: 'editor', compare: 'off', showOriginal: false },
       });
     },
@@ -554,16 +661,14 @@ export const useStore = create<AppState>()((set, get) => {
       const blobIds: string[] = [];
       const maskIds: string[] = [];
       for (const ph of sp.photos) {
-        blobIds.push(ph.imageId, ph.thumbId, ...ph.designs.flatMap((d) => d.aiRenders.map((r) => r.imageId)));
-        maskIds.push(...ph.regions.map((r) => r.maskId));
+        const refs = photoRefs(ph);
+        blobIds.push(...refs.blobIds);
+        maskIds.push(...refs.maskIds);
         runtime.forgetPhoto(ph.id);
       }
       runtime.forgetMasks(maskIds);
       const next = produce(p, (d) => {
         d.spaces = d.spaces.filter((s) => s.id !== id);
-        d.assetList.forEach((item) => {
-          item.spaceIds = item.spaceIds.filter((sid) => sid !== id);
-        });
         d.updatedAt = Date.now();
       });
       // Deleting pixel data cannot be undone: clear history.
@@ -591,6 +696,7 @@ export const useStore = create<AppState>()((set, get) => {
             height: imported.height,
             createdAt: Date.now(),
             regions: [],
+            generations: [],
             designs: [design],
             activeDesignId: design.id,
           };
@@ -622,8 +728,7 @@ export const useStore = create<AppState>()((set, get) => {
       const found = findPhoto(p, photoId);
       if (!p || !found) return;
       const { photo, space } = found;
-      const blobIds = [photo.imageId, photo.thumbId, ...photo.designs.flatMap((d) => d.aiRenders.map((r) => r.imageId))];
-      const maskIds = photo.regions.map((r) => r.maskId);
+      const { blobIds, maskIds } = photoRefs(photo);
       runtime.forgetPhoto(photoId);
       runtime.forgetMasks(maskIds);
       const next = produce(p, (d) => {
@@ -893,65 +998,155 @@ export const useStore = create<AppState>()((set, get) => {
         withActiveDesign(d, get().selection.photoId, (des) => void (des.notes = notes)), { coalesce: 'design-notes' });
     },
 
-    // --------------------------------------------------------------- asset list
-    addAssetItem(item) {
+    // ------------------------------------------------------------------- studio
+    setMode(mode) {
+      set({ mode, placement: null, tool: 'select' });
+    },
+
+    setStudio(patch) {
+      set((s) => ({ studio: { ...s.studio, ...patch } }));
+    },
+
+    setScene(photoId, scene) {
+      get().mutateProject(scene ? 'Analyze scene' : 'Clear scene', (d) =>
+        withPhoto(d, photoId, (ph) => void (ph.scene = scene as Draft<SceneMap> | undefined)));
+    },
+
+    updateScene(photoId, recipe, opts) {
+      get().mutateProject('Edit scene', (d) =>
+        withPhoto(d, photoId, (ph) => {
+          if (ph.scene) recipe(ph.scene);
+        }), opts ?? { coalesce: `scene:${photoId}` });
+    },
+
+    updateDraft(photoId, recipe, opts) {
+      get().mutateProject('Edit brief', (d) =>
+        withPhoto(d, photoId, (ph) => {
+          if (!ph.draft) ph.draft = emptyBrief();
+          recipe(ph.draft);
+        }), opts ?? { coalesce: `draft:${photoId}` });
+    },
+
+    async addIdeaItem(item, blobs) {
       if (!get().project) return null;
-      const id = newId('itm');
-      const row: AssetListItem = {
-        quantity: 1,
-        unit: 'each',
-        spaceIds: [],
-        source: 'manual',
-        status: 'idea',
-        locked: item.source === undefined || item.source === 'manual',
-        createdAt: Date.now(),
-        ...item,
-        id,
-      };
-      get().mutateProject('Add list item', (d) => void d.assetList.push(row));
+      const id = newId('idea');
+      const full: IdeaItem = { ...item, id, createdAt: Date.now() };
+      if (blobs?.image) {
+        full.imageId = newId('img');
+        await db.putBlob(full.imageId, blobs.image);
+      }
+      if (blobs?.thumb) {
+        full.thumbId = newId('img');
+        await db.putBlob(full.thumbId, blobs.thumb);
+      }
+      get().mutateProject('Add idea', (d) => void d.ideaBoard.push(full));
       return id;
     },
 
-    updateAssetItem(id, patch, opts) {
-      get().mutateProject('Edit list item', (d) => {
-        const row = d.assetList.find((x) => x.id === id);
-        if (!row) return;
-        Object.assign(row, patch);
-        // Hand-edits to generated rows must survive regeneration.
-        const userFields: (keyof AssetListItem)[] = ['name', 'quantity', 'unit', 'unitCost', 'specs', 'category'];
-        if (row.source === 'generated' && userFields.some((k) => k in patch) && patch.locked === undefined) row.locked = true;
-      }, opts ?? { coalesce: `item:${id}` });
+    updateIdeaItem(id, patch, opts) {
+      get().mutateProject('Edit idea', (d) => {
+        const it = d.ideaBoard.find((x) => x.id === id);
+        if (it) Object.assign(it, patch);
+      }, opts ?? { coalesce: `idea:${id}` });
     },
 
-    deleteAssetItem(id) {
-      get().mutateProject('Delete list item', (d) => {
-        d.assetList = d.assetList.filter((x) => x.id !== id);
+    async removeIdeaItem(id) {
+      const item = get().project?.ideaBoard.find((x) => x.id === id);
+      if (!item) return;
+      const next = produce(get().project!, (d) => {
+        d.ideaBoard = d.ideaBoard.filter((x) => x.id !== id);
+        for (const sp of d.spaces) for (const ph of sp.photos) {
+          if (ph.draft) ph.draft.ideaItemIds = ph.draft.ideaItemIds.filter((x) => x !== id);
+        }
+        d.updatedAt = Date.now();
+      });
+      // Blob deletion cannot be undone: clear history.
+      set({ project: next, past: [], future: [] });
+      scheduleSave();
+      await db.deleteBlobs([item.imageId, item.thumbId].filter((x): x is string => !!x));
+    },
+
+    addGeneration(photoId, generation) {
+      get().mutateProject('Generate', (d) =>
+        withPhoto(d, photoId, (ph) => void ph.generations.unshift(generation as Draft<Generation>)), { history: false });
+    },
+
+    updateGeneration(photoId, generationId, recipe) {
+      get().mutateProject('Generate', (d) =>
+        withPhoto(d, photoId, (ph) => {
+          const g = ph.generations.find((x) => x.id === generationId);
+          if (g) recipe(g);
+        }), { history: false });
+    },
+
+    addVariation(photoId, generationId, variation) {
+      get().mutateProject('Generate', (d) =>
+        withPhoto(d, photoId, (ph) => {
+          ph.generations.find((x) => x.id === generationId)?.variations.push(variation);
+        }), { history: false });
+    },
+
+    toggleFavorite(photoId, variationId) {
+      get().mutateProject('Favorite', (d) =>
+        withPhoto(d, photoId, (ph) => {
+          for (const g of ph.generations) {
+            const v = g.variations.find((x) => x.id === variationId);
+            if (v) v.favorite = !v.favorite;
+          }
+        }), { history: false });
+    },
+
+    async deleteVariation(photoId, variationId) {
+      let removed: Variation | undefined;
+      get().mutateProject('Delete variation', (d) =>
+        withPhoto(d, photoId, (ph) => {
+          for (const g of ph.generations) {
+            const v = g.variations.find((x) => x.id === variationId);
+            if (v) {
+              removed = { ...v };
+              g.variations = g.variations.filter((x) => x.id !== variationId);
+            }
+          }
+        }), { history: false });
+      set((s) => ({
+        studio: s.studio.viewVariationId === variationId ? { ...s.studio, viewVariationId: null } : s.studio,
+      }));
+      if (removed) await db.deleteBlobs([removed.imageId, removed.thumbId]);
+    },
+
+    async deleteGeneration(photoId, generationId) {
+      const ph = findPhoto(get().project, photoId)?.photo;
+      const g = ph?.generations.find((x) => x.id === generationId);
+      if (!g) return;
+      get().mutateProject('Delete run', (d) =>
+        withPhoto(d, photoId, (p) => {
+          p.generations = p.generations.filter((x) => x.id !== generationId);
+        }), { history: false });
+      const ids = new Set(g.variations.map((v) => v.id));
+      set((s) => ({
+        studio: {
+          ...s.studio,
+          viewVariationId: s.studio.viewVariationId && ids.has(s.studio.viewVariationId) ? null : s.studio.viewVariationId,
+          gridGenerationId: s.studio.gridGenerationId === generationId ? null : s.studio.gridGenerationId,
+        },
+      }));
+      await db.deleteBlobs(g.variations.flatMap((v) => [v.imageId, v.thumbId]));
+    },
+
+    setRecommendations(photoId, items, baseVariationId) {
+      get().mutateProject('Suggestions', (d) =>
+        withPhoto(d, photoId, (ph) => void (ph.recommendations = { items, createdAt: Date.now(), baseVariationId })), {
+        history: false,
       });
     },
 
-    setAssetList(items, label = 'Update list') {
-      get().mutateProject(label, (d) => {
-        d.assetList = items as Draft<AssetListItem>[];
+    setRunProgress(generationId, progress) {
+      set((s) => {
+        const runs = { ...s.runs };
+        if (progress) runs[generationId] = progress;
+        else delete runs[generationId];
+        return { runs };
       });
-    },
-
-    async regenerateAssetList() {
-      const p = get().project;
-      if (!p) return;
-      // Masks are needed for area estimates: load every region mask.
-      await Promise.all(
-        p.spaces.flatMap((s) => s.photos.flatMap((ph) => ph.regions.map((r) => runtime.loadMask(r.maskId, ph.width, ph.height)))),
-      );
-      const latest = get().project;
-      if (!latest) return;
-      const generated = generateAssetList({
-        project: latest,
-        getMask: runtime.getMask,
-        getAsset: resolveAsset,
-        getMaterial,
-        getPaint,
-      });
-      get().setAssetList(mergeGeneratedItems(latest.assetList, generated), 'Regenerate list');
     },
 
     // ------------------------------------------------------------------ library
@@ -990,7 +1185,11 @@ export const useStore = create<AppState>()((set, get) => {
 
     selectSpace(spaceId) {
       const sp = findSpace(get().project, spaceId);
-      set({ selection: { ...EMPTY_SELECTION, spaceId, photoId: sp?.photos[0]?.id ?? null }, placement: null });
+      set((s) => ({
+        selection: { ...EMPTY_SELECTION, spaceId, photoId: sp?.photos[0]?.id ?? null },
+        placement: null,
+        studio: { ...s.studio, viewVariationId: null, gridGenerationId: null, focusZoneId: null, sketch: 'none', activeElementId: null },
+      }));
     },
 
     selectPhoto(photoId) {
@@ -1000,6 +1199,7 @@ export const useStore = create<AppState>()((set, get) => {
         selection: { ...EMPTY_SELECTION, spaceId: found.space.id, photoId },
         placement: null,
         view: { ...s.view, mobilePane: 'editor', compare: 'off' },
+        studio: { ...s.studio, viewVariationId: null, gridGenerationId: null, focusZoneId: null, sketch: 'none', activeElementId: null },
       }));
     },
 
@@ -1025,6 +1225,14 @@ export const useStore = create<AppState>()((set, get) => {
 
     setPickedColor(hex) {
       set({ pickedColor: hex });
+    },
+
+    openShop(req) {
+      set({ shop: { query: req?.query ?? '', category: req?.category ?? 'plant' } });
+    },
+
+    closeShop() {
+      set({ shop: null });
     },
 
     notify(message, kind = 'info') {
