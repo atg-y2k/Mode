@@ -143,9 +143,9 @@ export function GroupLabel({ children, id, action }: { children: ReactNode; id?:
 }
 
 const STEPS = [
-  { title: 'Add a surface', body: 'Pick what you want to change — a wall, the siding, the lawn.' },
-  { title: 'Outline it on the photo', body: 'Tap or brush over it with the smart brush or the magic wand.' },
-  { title: 'Pick a paint or material', body: 'Choose a color or a texture — it previews instantly.' },
+  { title: 'Add a surface', short: 'Add surface', body: 'Pick what you want to change — a wall, the siding, the lawn.' },
+  { title: 'Outline it on the photo', short: 'Outline it', body: 'Tap or brush over it with the smart brush or the magic wand.' },
+  { title: 'Pick a paint or material', short: 'Pick a finish', body: 'Choose a color or a texture — it previews instantly.' },
 ] as const;
 
 /**
@@ -171,7 +171,9 @@ export function StepGuide({ current, compact }: { current: 1 | 2 | 3 | 4; compac
               {done ? <Check className={compact ? 'size-3' : 'size-3.5'} aria-label="Done" /> : n}
             </span>
             {compact ? (
-              <span className={cn('truncate text-[11px] font-medium', active ? 'text-text' : 'text-subtle')}>{s.title}</span>
+              <span className={cn('truncate text-[11px] font-medium', active ? 'text-text' : 'text-subtle')} title={s.title}>
+                {s.short}
+              </span>
             ) : (
               <span className="min-w-0 pt-0.5">
                 <span className={cn('block text-sm font-medium', done ? 'text-muted line-through decoration-line-strong' : 'text-text')}>{s.title}</span>

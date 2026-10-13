@@ -71,7 +71,7 @@ export function SurfacesPanel() {
           <>
             <Section title={`In this photo · ${regions.length}`} action={<OutlineDisplayToggle />}>
               <RegionList photo={photo} design={design} selectedId={region?.id ?? null} />
-              <p className="text-[11px] text-subtle">Where outlines overlap, surfaces lower in the list are applied on top.</p>
+              {regions.length > 1 && <p className="text-[11px] text-subtle">Where outlines overlap, surfaces lower in the list are applied on top.</p>}
             </Section>
             {region ? (
               <SelectedSurface key={region.id} region={region} photo={photo} design={design} />
@@ -115,6 +115,9 @@ function OutlineDisplayToggle() {
 
 function SelectedSurface({ region, photo, design }: { region: Region; photo: Photo; design: Design }) {
   const stats = useRegionStats(region, photo);
+  const finished = !!design.treatments[region.id];
+  // First surfaces of a photo: keep the three-step flow in view until it is done once.
+  const showSteps = !!stats && (stats.empty || !finished) && photo.regions.length <= 2;
   return (
     <>
       <Section
@@ -125,6 +128,11 @@ function SelectedSurface({ region, photo, design }: { region: Region; photo: Pho
           </span>
         }
       >
+        {showSteps && (
+          <div className="rounded-xl bg-surface-2 px-3 py-2">
+            <StepGuide current={stats.empty ? 2 : 3} compact />
+          </div>
+        )}
         <OutlineCard region={region} photo={photo} design={design} />
       </Section>
       <Section title="Perspective">

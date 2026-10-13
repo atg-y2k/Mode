@@ -4,7 +4,7 @@
  * current material card and its adjustments (pattern size, rotation, tint,
  * strength).
  */
-import { useId, useMemo, useState } from 'react';
+import { memo, useId, useMemo, useState } from 'react';
 import { Check, RotateCcw, Search, Trash } from 'lucide-react';
 import { SURFACE_LABELS, type MaterialDef, type MaterialTreatment, type SurfaceKind } from '../../../../shared/types';
 import { MATERIALS, materialsForSurface } from '../../../assets/catalog';
@@ -69,7 +69,8 @@ export function MaterialTile({ material, selected, onPick }: { material: Materia
   );
 }
 
-export function MaterialBrowser({
+/** Memoized: pass stable callbacks so adjusting the current material doesn't re-render every tile. */
+export const MaterialBrowser = memo(function MaterialBrowser({
   surface,
   currentId,
   onPick,
@@ -170,7 +171,7 @@ export function MaterialBrowser({
       )}
     </div>
   );
-}
+});
 
 // ---------------------------------------------------------------------------
 // Current material

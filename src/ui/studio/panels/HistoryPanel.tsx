@@ -67,6 +67,7 @@ function RunList({ photo, scene }: { photo: Photo; scene: SceneMap | undefined }
                   label: (
                     <>
                       <Star className="size-3" aria-hidden /> {favorites}
+                      <span className="sr-only"> favorites</span>
                     </>
                   ),
                   title: 'Favorites only',

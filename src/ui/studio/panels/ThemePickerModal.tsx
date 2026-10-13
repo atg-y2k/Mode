@@ -3,7 +3,7 @@
  * xeriscape, Japandi…), the ones that suit the photo's architecture first.
  * Each shows its purpose, principles, palette and climate notes.
  */
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Check, Plus, Sprout } from 'lucide-react';
 import type { DesignTheme } from '../../../../shared/types';
 import { getStyle, themesFor } from '../../../assets/design';
@@ -13,6 +13,9 @@ import { addThemeIdea } from './ideas';
 
 export function ThemePickerModal({ open, onClose, defaultSetting }: { open: boolean; onClose: () => void; defaultSetting: 'interior' | 'exterior' }) {
   const [setting, setSetting] = useState(defaultSetting);
+  useEffect(() => {
+    if (open) setSetting(defaultSetting);
+  }, [open, defaultSetting]);
   const styleId = useStore((s) => selectActivePhoto(s)?.scene?.architecture.styleId);
   const onBoard = useStore((s) => s.project?.ideaBoard);
   const style = styleId ? getStyle(styleId) : undefined;

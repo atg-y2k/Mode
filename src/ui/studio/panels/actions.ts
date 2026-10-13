@@ -5,12 +5,12 @@
  * polygon becomes a Fine-tune surface whose mask the zone then shares).
  */
 import type { ElementOptionsRequest } from '../../../../shared/api';
-import { SPACE_TYPE_LABELS, emptyBrief, type DesignBrief, type Photo, type Recommendation, type Space } from '../../../../shared/types';
+import { SPACE_TYPE_LABELS, emptyBrief, type DesignBrief, type ElementType, type Photo, type Recommendation, type Space } from '../../../../shared/types';
 import { copyMaskInto, fillPolygon, isMaskEmpty } from '../../../engine/mask';
 import type { Mask } from '../../../engine/types';
 import { fetchElementOptions, fetchRecommendations, locationForApi } from '../../../lib/studio';
 import * as runtime from '../../../state/runtime';
-import { findPhoto, findVariation, selectActivePhoto, useStore } from '../../../state/store';
+import { findPhoto, findVariation, selectActivePhoto, useStore, type AppState } from '../../../state/store';
 import { errorText } from '../../shell/format';
 import { requestSceneAnalysis } from '../../shell/sceneJobs';
 import { sceneSummaryText, startRun, type StartRunOptions } from '../generate';
@@ -30,18 +30,21 @@ function photoAndSpace(photoId: string): { photo: Photo; space: Space } | undefi
 // Brief edits
 // ---------------------------------------------------------------------------
 
+/** Brief recipes are written against plain DesignBrief (they also run in tests); immer drafts satisfy it. */
+type DraftRecipe = Parameters<AppState['updateDraft']>[1];
+
 /** A discrete brief edit (its own undo step). */
 export function editBrief(photoId: string, recipe: (brief: DesignBrief) => void): void {
-  state().updateDraft(photoId, recipe as Parameters<ReturnType<typeof state>['updateDraft']>[1], {});
+  state().updateDraft(photoId, recipe as DraftRecipe, {});
 }
 
 /** A text edit typed into the brief (merged into one undo step while typing). */
 export function typeBrief(photoId: string, key: string, recipe: (brief: DesignBrief) => void): void {
-  state().updateDraft(photoId, recipe as Parameters<ReturnType<typeof state>['updateDraft']>[1], { coalesce: `brief:${photoId}:${key}` });
+  state().updateDraft(photoId, recipe as DraftRecipe, { coalesce: `brief:${photoId}:${key}` });
 }
 
 /** Adds a design element (defaults, zones preselected from the scene, plant feasibility) and expands it. */
-export function addElement(photoId: string, type: Parameters<ReturnType<typeof elementFactory>>[0]): string | null {
+export function addElement(photoId: string, type: ElementType): string | null {
   const s = state();
   const found = photoAndSpace(photoId);
   if (!found || !s.project) return null;
@@ -156,6 +159,11 @@ export function restoreBrief(photoId: string, generationId: string): void {
   editBrief(photoId, (b) => void Object.assign(b, copy));
   state().setStudio({ panel: 'design', activeElementId: null });
   state().notify('Brief restored — adjust it on the Design tab and generate again.', 'success');
+}
+
+/** Clears the zone highlight on the photo when the component unmounts (hover highlights must not linger). */
+export function clearZoneFocus(): void {
+  if (state().studio.focusZoneId) state().setStudio({ focusZoneId: null });
 }
 
 export function viewVariation(variationId: string | null): void {

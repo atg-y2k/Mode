@@ -37,6 +37,7 @@ import {
   usedPaintColors,
   type CustomColor,
 } from './design/paint';
+import { useStableCallback } from './design/hooks';
 import { RegionBar, RegionPicker } from './design/RegionPicker';
 import { prefersMaterial, surfaceNoun } from './design/surfaceKinds';
 import { Callout } from './design/ui';
@@ -143,7 +144,7 @@ function PaintEditor({ photo, design, region, picked }: { photo: Photo; design: 
 
   const apply = (t: PaintTreatment, coalesce?: string) => useStore.getState().setTreatment(region.id, t, coalesce ? { coalesce } : undefined);
 
-  const pickCatalog = (p: PaintColor) => apply(paintFromCatalog(p, treatment, region.surface));
+  const pickCatalog = useStableCallback((p: PaintColor) => apply(paintFromCatalog(p, treatment, region.surface)));
   const applyCustom = (c: CustomColor & { paintId?: string }, live = false) => {
     const t = paintFromCustom(c, treatment, region.surface);
     if (t) apply(t, live ? `panel:paint-custom:${region.id}` : undefined);
@@ -158,13 +159,15 @@ function PaintEditor({ photo, design, region, picked }: { photo: Photo; design: 
     selected: isSamePaint(paint, u),
   }));
 
+  const paintHex = paint?.hex;
+  const paintId = paint?.paintId;
   const similar = useMemo<ColorTileItem[]>(() => {
-    if (!paint) return [];
-    return safeNearest(paint.hex, 9)
-      .filter(({ paint: p }) => p.id !== paint.paintId)
+    if (!paintHex) return [];
+    return safeNearest(paintHex, 9)
+      .filter(({ paint: p }) => p.id !== paintId)
       .slice(0, 8)
       .map(({ paint: p, deltaE }) => ({ key: p.id, hex: p.hex, name: p.name, caption: deltaELabel(deltaE) }));
-  }, [paint]);
+  }, [paintHex, paintId]);
 
   const customInitial: CustomColor | undefined = paint
     ? paint.paintId
@@ -239,7 +242,13 @@ function PaintEditor({ photo, design, region, picked }: { photo: Photo; design: 
       </Section>
 
       <Section title="Color library">
-        <FanDeck current={paint} onPick={pickCatalog} onEyedropper={startEyedropper} eyedropperActive={tool === 'eyedropper'} />
+        <FanDeck
+          selectedId={paintId}
+          currentLabel={paint ? `${paintDisplayName(paint)} · ${displayHex(paint.hex)}` : undefined}
+          onPick={pickCatalog}
+          onEyedropper={startEyedropper}
+          eyedropperActive={tool === 'eyedropper'}
+        />
       </Section>
 
       {similar.length > 0 && (

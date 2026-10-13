@@ -14,6 +14,7 @@ import { Button, EmptyState, PanelHeader, Section } from '../common';
 import { applyTreatmentToRegions, openFinishPanel } from './design/actions';
 import { CurrentMaterialCard, MaterialBrowser, MaterialControls } from './design/MaterialParts';
 import { CalibrationCard, PerspectiveCard } from './design/MeasureCards';
+import { useStableCallback } from './design/hooks';
 import { materialTreatmentFor } from './design/materials';
 import { displayHex, paintDisplayName, usedPaintColors } from './design/paint';
 import { RegionBar, RegionPicker } from './design/RegionPicker';
@@ -68,7 +69,8 @@ function MaterialEditor({ photo, design, region }: { photo: Photo; design: Desig
     [project],
   );
 
-  const pick = (m: MaterialDef) => useStore.getState().setTreatment(region.id, materialTreatmentFor(m, treatment));
+  const pick = useStableCallback((m: MaterialDef) => useStore.getState().setTreatment(region.id, materialTreatmentFor(m, treatment)));
+  const goToPaint = useStableCallback(() => openFinishPanel(region.id, 'paint'));
   const change = (patch: Partial<MaterialTreatment>, key?: string) => {
     if (!applied) return;
     const next: MaterialTreatment = { ...applied, ...patch };
@@ -122,7 +124,7 @@ function MaterialEditor({ photo, design, region }: { photo: Photo; design: Desig
       </Section>
 
       <Section title={`Materials for ${surfaceNoun(region.surface)}`}>
-        <MaterialBrowser surface={region.surface} currentId={applied?.materialId} onPick={pick} onGoToPaint={() => openFinishPanel(region.id, 'paint')} />
+        <MaterialBrowser surface={region.surface} currentId={applied?.materialId} onPick={pick} onGoToPaint={goToPaint} />
       </Section>
 
       <Section title="Perspective & scale">

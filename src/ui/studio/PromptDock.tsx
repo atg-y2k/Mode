@@ -122,8 +122,8 @@ export function PromptDock({ photo, space }: { photo: Photo; space: Space | unde
       photo.id,
       (d) => {
         const next = ideas.map((i) => i.id).filter((id) => id !== ideaId);
-      // An empty list means "use the active ideas": excluding the last one needs the marker.
-      d.ideaItemIds = next.length > 0 ? next : [NO_IDEAS];
+        // An empty list means "use the active ideas": excluding the last one needs the marker.
+        d.ideaItemIds = next.length > 0 ? next : [NO_IDEAS];
       },
       {},
     );
@@ -279,7 +279,7 @@ export function PromptDock({ photo, space }: { photo: Photo; space: Space | unde
           <div role="radiogroup" aria-label="What may change" className="inline-flex h-8 rounded-lg bg-surface-2 p-0.5 text-xs">
             {(
               [
-                ['zones', 'Selected areas', 'Only the areas and paths in the brief change'],
+                ['zones', 'Only selected areas', 'Only the areas and paths in the brief change; everything else stays exactly as photographed'],
                 ['whole', 'Whole image', 'Anything in the photo may change'],
               ] as const
             ).map(([value, label, title]) => (

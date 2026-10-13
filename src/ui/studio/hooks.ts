@@ -58,8 +58,7 @@ function release(id: string): void {
     if (entry.url) {
       decoded.delete(entry.url);
       URL.revokeObjectURL(entry.url);
-    }
-    else void entry.promise.then((u) => u && URL.revokeObjectURL(u));
+    } else void entry.promise.then((u) => u && URL.revokeObjectURL(u));
   }, REVOKE_DELAY_MS);
 }
 

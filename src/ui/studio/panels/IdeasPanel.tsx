@@ -44,11 +44,12 @@ function IdeaBoard({ project, space, setting }: { project: Project; space: Space
   const effectiveFilter: Filter = space ? filter : 'all';
   const items = useMemo(() => [...(effectiveFilter === 'space' ? forSpace : board)].sort((a, b) => b.createdAt - a.createdAt), [effectiveFilter, forSpace, board]);
 
-  // Paste images anywhere while the board is open (text fields keep their own paste).
+  // Paste images anywhere while the board is open.
   useEffect(() => {
     const onPaste = (e: ClipboardEvent) => {
       const files = Array.from(e.clipboardData?.files ?? []).filter(isImageFile);
-      if (files.length === 0 || isEditableTarget(e.target)) return;
+      // Text fields keep their own paste; so does any open dialog (Settings, Shop…).
+      if (files.length === 0 || isEditableTarget(e.target) || document.querySelector('[role="dialog"]')) return;
       e.preventDefault();
       void addImageIdeas(files, []);
     };

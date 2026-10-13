@@ -7,14 +7,14 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Blocks, Crosshair, ImagePlus, Lightbulb, Loader2, Minus, Plus, ScanSearch, Sparkles, Sprout, WandSparkles } from 'lucide-react';
-import type { DesignBrief, IdeaItem, Photo, Project, SceneMap, Space } from '../../../../shared/types';
+import type { DesignBrief, ElementType, IdeaItem, Photo, Project, SceneMap, Space } from '../../../../shared/types';
 import { elementsForSetting } from '../../../assets/design';
 import { useStore } from '../../../state/store';
 import { pickPhotos } from '../../shell/photoImport';
 import { useSceneJob } from '../../shell/sceneJobs';
 import { Button, EmptyState, IconButton, PanelHeader, Section, Segmented, TextArea, Toggle } from '../../common';
 import { generationBlocker } from '../generate';
-import { addElement, editBrief, generateBrief, mapScene, openRunGrid, typeBrief } from './actions';
+import { addElement, clearZoneFocus, editBrief, generateBrief, mapScene, openRunGrid, typeBrief } from './actions';
 import { PLANT_MATURITY_OPTIONS, hasCustomIdeas, includedIdeaIds, isBriefEmpty, resetIdeas, toggleIdea, toggleTargetZone } from './briefOps';
 import { useStudioContext } from './context';
 import { ElementCard } from './ElementCard';
@@ -81,6 +81,7 @@ function BriefComposer({
 }) {
   const activeElementId = useStore((s) => s.studio.activeElementId);
   const scrollTarget = useRef<string | null>(null);
+  useEffect(() => clearZoneFocus, []);
 
   useEffect(() => {
     const id = scrollTarget.current;
@@ -89,7 +90,7 @@ function BriefComposer({
     requestAnimationFrame(() => document.querySelector(`[data-element-id="${id}"]`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }));
   }, [activeElementId, brief.elements.length]);
 
-  const onAdd = (type: Parameters<typeof addElement>[1]) => {
+  const onAdd = (type: ElementType) => {
     const id = addElement(photo.id, type);
     if (id) scrollTarget.current = id;
   };
@@ -98,7 +99,7 @@ function BriefComposer({
     <div className="flex min-h-full flex-col">
       <PanelHeader
         title="Design brief"
-        subtitle={`Compose your idea for ${space.name.toLowerCase().startsWith('the ') ? space.name : `the ${space.name.toLowerCase()}`}, then generate photoreal variations.`}
+        subtitle="Compose your idea from design elements, then generate photoreal variations of your photo."
       />
 
       {setting === 'exterior' && (
@@ -175,7 +176,7 @@ function BriefComposer({
 
 // ---------------------------------------------------------------------------
 
-function ElementPalette({ setting, brief, onAdd }: { setting: 'interior' | 'exterior'; brief: DesignBrief; onAdd: (type: Parameters<typeof addElement>[1]) => void }) {
+function ElementPalette({ setting, brief, onAdd }: { setting: 'interior' | 'exterior'; brief: DesignBrief; onAdd: (type: ElementType) => void }) {
   const [all, setAll] = useState(false);
   const defs = useMemo(() => {
     const list = elementsForSetting(setting);

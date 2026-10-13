@@ -4,7 +4,7 @@
  * search, dense swatch grid), color tiles (similar, used in this project,
  * eyedropper matches), the custom color form and the picked-color card.
  */
-import { useId, useMemo, useState, type KeyboardEvent } from 'react';
+import { memo, useId, useMemo, useState, type KeyboardEvent } from 'react';
 import { Check, Pipette, Search, Trash, X } from 'lucide-react';
 import { COLOR_FAMILIES, PAINT_FINISHES, type ColorFamily, type PaintColor, type PaintFinish, type PaintTreatment } from '../../../../shared/types';
 import { PAINT_COLORS, getPaint, searchPaints } from '../../../assets/catalog';
@@ -70,7 +70,7 @@ export function LrvMeter({ hex }: { hex: string }) {
 export function CurrentPaintCard({ paint, onRemove }: { paint: PaintTreatment; onRemove: () => void }) {
   const fg = textColorOn(paint.hex);
   const catalog = paint.paintId ? getPaint(paint.paintId) : undefined;
-  const source = [paint.brand, paint.code].filter(Boolean).join(' · ') || (catalog ? `${catalog.collection} · Mode palette` : 'Custom color');
+  const source = [paint.brand, paint.code].filter(Boolean).join(' · ') || (catalog ? `${catalog.collection} collection` : 'Custom color');
   return (
     <div className="flex flex-col gap-3">
       <div className="overflow-hidden rounded-2xl border border-line shadow-sm">
@@ -230,13 +230,22 @@ function onDeckKeyDown(e: KeyboardEvent<HTMLDivElement>) {
   }
 }
 
-export function FanDeck({
-  current,
+/**
+ * The color library. Memoized with primitive props so dragging a slider
+ * (which changes the paint treatment every frame) doesn't re-render ~165 chips.
+ */
+export const FanDeck = memo(function FanDeck({
+  selectedId,
+  currentLabel,
   onPick,
   onEyedropper,
   eyedropperActive,
 }: {
-  current: PaintTreatment | undefined;
+  /** Catalog id of the color on the surface. */
+  selectedId: string | undefined;
+  /** "Name · #HEX" of the color on the surface (shown when nothing is hovered). */
+  currentLabel: string | undefined;
+  /** Must be stable (see useStableCallback). */
   onPick: (paint: PaintColor) => void;
   onEyedropper: () => void;
   eyedropperActive: boolean;
@@ -264,13 +273,12 @@ export function FanDeck({
   }, [catalog, filter]);
   const grouped = !filter.collection && !filter.family && !filter.query.trim();
   const groups = useMemo(() => (grouped ? groupByCollection(list) : [{ collection: '', paints: list }]), [grouped, list]);
-  const selectedId = current?.paintId;
   const firstFocusable = list.some((p) => p.id === selectedId) ? selectedId : list[0]?.id;
   const filtered = !grouped;
   const peekText = peek
     ? `${peek.name} · ${displayHex(peek.hex)} · ${peek.collection}`
-    : current
-      ? `On this surface: ${paintDisplayName(current)} · ${displayHex(current.hex)}`
+    : currentLabel
+      ? `On this surface: ${currentLabel}`
       : 'Hover or tap a chip to see its name';
 
   if (catalog.length === 0) {
@@ -348,7 +356,7 @@ export function FanDeck({
         ))}
       </div>
 
-      <p className="min-h-4 truncate text-xs text-muted" aria-live="polite">
+      <p className="min-h-4 truncate text-xs text-muted" aria-hidden>
         {peekText}
       </p>
 
@@ -408,7 +416,7 @@ export function FanDeck({
       )}
     </div>
   );
-}
+});
 
 // ---------------------------------------------------------------------------
 // Custom color

@@ -148,7 +148,7 @@ function Guidance({ type }: { type: ElementSpec['type'] }) {
   if (!g) return null;
   const rules = more ? g.rulesOfThumb : g.rulesOfThumb.slice(0, 2);
   return (
-    <Callout icon={<Lightbulb className="size-4" aria-hidden />} className="bg-surface-2/60">
+    <Callout icon={<Lightbulb className="size-4" aria-hidden />}>
       <p className="text-text">{g.purpose}</p>
       {rules.length > 0 && (
         <ul className="mt-1.5 list-disc space-y-0.5 pl-4">

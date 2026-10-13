@@ -5,7 +5,7 @@
  * opportunities. Zones can be renamed, re-rated for sun, targeted for the
  * brief, refined in Fine-tune (shared mask) or deleted.
  */
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Check, Compass, Crosshair, Eye, Landmark, PenTool, Plus, RefreshCw, Route, ScanSearch, ShieldCheck, Sparkles, Trash2 } from 'lucide-react';
 import {
   EXTERIOR_SPACE_TYPES,
@@ -25,7 +25,7 @@ import { relativeTime } from '../../shell/format';
 import { pickPhotos } from '../../shell/photoImport';
 import { useSceneJob } from '../../shell/sceneJobs';
 import { Badge, Button, ConfirmModal, EmptyState, IconButton, PanelHeader, Section, Select, Spinner, Swatch, Toggle, cn } from '../../common';
-import { deletePath, deleteZone, editBrief, mapScene, refineZoneOutline } from './actions';
+import { clearZoneFocus, deletePath, deleteZone, editBrief, mapScene, refineZoneOutline } from './actions';
 import { appendToPrompt, toggleTargetZone } from './briefOps';
 import { useStudioContext } from './context';
 import { zoneIcon } from './icons';
@@ -59,6 +59,7 @@ function SceneView({ space, photo, scene, brief }: { space: Space; photo: Photo;
   const job = useSceneJob(photo.id);
   const aiReady = useAiReady();
   const [confirmRemap, setConfirmRemap] = useState(false);
+  useEffect(() => clearZoneFocus, []);
   const [confirmClear, setConfirmClear] = useState(false);
 
   return (

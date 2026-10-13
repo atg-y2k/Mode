@@ -41,12 +41,15 @@ function remember(key: string, entry: Entry): void {
 }
 
 function renderSwatch(spec: TextureSpec, size: number, span?: number): string {
-  const img = textureSwatch(spec, size, span);
+  // Get the canvas first: no point generating pixels that can't be shown.
   const canvas = document.createElement('canvas');
-  canvas.width = img.width;
-  canvas.height = img.height;
+  canvas.width = size;
+  canvas.height = size;
   const ctx = canvas.getContext('2d');
   if (!ctx) throw new Error('Canvas 2D is unavailable');
+  const img = textureSwatch(spec, size, span);
+  canvas.width = img.width;
+  canvas.height = img.height;
   const data = ctx.createImageData(img.width, img.height);
   data.data.set(img.data);
   ctx.putImageData(data, 0, 0);

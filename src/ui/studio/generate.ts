@@ -107,6 +107,9 @@ interface RunContext {
 
 const contexts = new Map<string, RunContext>();
 
+/** Error text of runs a reload interrupted (the strip and History show it as "Interrupted"). */
+export const INTERRUPTED = 'Interrupted — Mode was closed or reloaded before this run finished.';
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -501,8 +504,9 @@ export async function retryRun(generationId: string): Promise<string | null> {
 
 /**
  * Marks runs left 'running' by an earlier session (the app was closed or
- * reloaded mid-run) as interrupted: 'partial' when some variations finished,
- * 'failed' when none did. Runs active in this session are left alone.
+ * reloaded mid-run) as interrupted: status 'partial' with an "Interrupted…"
+ * error, keeping whatever variations finished. Runs active in this session
+ * are left alone. Returns how many runs were marked.
  */
 export function recoverInterruptedRuns(): number {
   const s = state();
@@ -515,8 +519,8 @@ export function recoverInterruptedRuns(): number {
         if (g.status !== 'running' || contexts.get(g.id)?.active) continue;
         n++;
         s.updateGeneration(photo.id, g.id, (gen) => {
-          gen.status = gen.variations.length > 0 ? 'partial' : 'failed';
-          gen.error = 'Interrupted — Mode was closed or reloaded before this run finished.';
+          gen.status = 'partial';
+          gen.error = INTERRUPTED;
         });
         s.setRunProgress(g.id, null);
       }
@@ -642,6 +646,11 @@ async function execute(
     });
     patchRunInfo(generationId, { stage: 'rendering', slots });
     publishProgress(ctx);
+    const poor = notes.filter((n) => n.rating === 'poor');
+    if (poor.length > 0) {
+      const list = poor.map((n) => (n.alternative ? `${n.name} (try ${n.alternative})` : n.name)).join(', ');
+      state().notify(`Plant check: ${list} ${poor.length === 1 ? "isn't a good fit" : "aren't good fits"} for this spot — see the run's plants.`, 'info');
+    }
 
     // 2. Render, up to CONCURRENCY at a time; each variation succeeds or fails on its own.
     const queue = slots.filter((x) => x.state === 'pending').map((x) => x.key);

@@ -3,7 +3,7 @@
  * masks loaded on demand, debounced mask statistics (coverage, area) that
  * follow brush strokes without recomputing every frame, and viewport helpers.
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Photo, Region } from '../../../../shared/types';
 import { regionAreaSqFt, type AreaMethod } from '../../../assetList/area';
 import { isMaskEmpty, maskCoverage } from '../../../engine/mask';
@@ -66,18 +66,41 @@ export interface RegionStats {
   method: AreaMethod;
 }
 
-/** Statistics for a region, recomputed ~200 ms after its outline stops changing. Null while the mask loads. */
+/**
+ * Statistics for a region, recomputed ~200 ms after its outline (or its
+ * plane / area override, e.g. while a plane corner is dragged) stops
+ * changing. Null while the mask loads.
+ */
 export function useRegionStats(region: Region | undefined, photo: Pick<Photo, 'width' | 'height' | 'calibration'>): RegionStats | null {
   const { mask, version } = useRegionMask(region?.maskId, photo.width, photo.height);
-  const settled = useSettled(version, 200);
+  const settledVersion = useSettled(version, 200);
+  const settledRegion = useSettled(region, 200);
+  // A different region is never stale data: use it right away.
+  const r = settledRegion && region && settledRegion.id === region.id ? settledRegion : region;
   const { width, height, calibration } = photo;
-  return useMemo(() => {
-    void settled; // recompute after in-place mask edits settle
-    if (!region || !mask) return null;
+  const coverage = useMemo(() => {
+    void settledVersion; // recompute after in-place mask edits settle
+    if (!mask) return null;
     const empty = isMaskEmpty(mask);
     const total = mask.width * mask.height;
-    const coverage = empty || total === 0 ? 0 : maskCoverage(mask) / total;
-    const area = regionAreaSqFt(region, mask, { width, height, calibration });
-    return { empty, coverage, sqft: area.sqft, method: area.method };
-  }, [mask, settled, region, width, height, calibration]);
+    return { empty, share: empty || total === 0 ? 0 : maskCoverage(mask) / total };
+  }, [mask, settledVersion]);
+  const plane = r?.plane;
+  const override = r?.areaSqFtOverride;
+  return useMemo(() => {
+    void settledVersion;
+    if (!r || !mask || !coverage) return null;
+    const area = regionAreaSqFt({ ...r, plane, areaSqFtOverride: override }, mask, { width, height, calibration });
+    return { empty: coverage.empty, coverage: coverage.share, sqft: area.sqft, method: area.method };
+    // Only the plane and the override affect the area; other region edits (name, color) don't.
+  }, [mask, coverage, settledVersion, plane, override, width, height, calibration, r?.id]);
+}
+
+/** A callback with a stable identity that always calls the latest `fn` (lets memoized children skip re-renders). */
+export function useStableCallback<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) => R {
+  const ref = useRef(fn);
+  useLayoutEffect(() => {
+    ref.current = fn;
+  });
+  return useCallback((...args: A) => ref.current(...args), []);
 }

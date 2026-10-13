@@ -4,7 +4,7 @@
  * Each card can be added to the brief (prompt + element + target areas) or
  * generated right away.
  */
-import { useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { ArrowRight, Plus, RefreshCw, ScanSearch, Sparkles } from 'lucide-react';
 import type { Photo, Recommendation, SceneMap } from '../../../../shared/types';
 import { getElementDef } from '../../../assets/design';
@@ -14,7 +14,7 @@ import { pickPhotos } from '../../shell/photoImport';
 import { useSceneJob } from '../../shell/sceneJobs';
 import { Button, EmptyState, PanelHeader, Section, TextInput } from '../../common';
 import { generationBlocker } from '../generate';
-import { addRecommendationToBrief, fetchSuggestions, generateRecommendation, mapScene, suggestionsJobKey } from './actions';
+import { addRecommendationToBrief, clearZoneFocus, fetchSuggestions, generateRecommendation, mapScene, suggestionsJobKey } from './actions';
 import { useAiJob } from './aiJobs';
 import { useStudioContext } from './context';
 import { RECOMMENDATION_META, elementIcon } from './icons';
@@ -46,6 +46,7 @@ export function SuggestionsPanel() {
 function Suggestions({ photo, scene, setting }: { photo: Photo; scene: SceneMap | undefined; setting: 'interior' | 'exterior' }) {
   const [focus, setFocus] = useState('');
   const aiReady = useAiReady();
+  useEffect(() => clearZoneFocus, []);
   const job = useAiJob(suggestionsJobKey(photo.id));
   const sceneJob = useSceneJob(photo.id);
   const viewing = useStore((s) => s.studio.viewVariationId);

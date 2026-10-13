@@ -10,9 +10,9 @@ import { useEffect, useRef, type ReactNode } from 'react';
 import type { Generation, Photo, Variation } from '../../../shared/types';
 import { useStore } from '../../state/store';
 import { cn } from '../common';
-import { runOrNotify, viewVariation } from './actions';
+import { viewVariation } from './actions';
 import { PlantSummaryChip } from './Feasibility';
-import { cancelRun, retryRun, retryVariation } from './generate';
+import { INTERRUPTED, cancelRun, retryRun, retryVariation } from './generate';
 import { useBlobUrl } from './hooks';
 import { useRunInfo } from './runs';
 import { compareContext, runTiles, type Tile } from './tiles';
@@ -213,13 +213,15 @@ function RunGroup({ photo, g, tileW, viewId, gridOpen }: { photo: Photo; g: Gene
             )}
             title={g.error}
           >
-            {g.error?.startsWith('Interrupted')
+            {g.error === INTERRUPTED
               ? 'Interrupted'
               : g.error?.startsWith('Cancelled')
                 ? 'Cancelled'
                 : g.status === 'failed'
                   ? 'Failed'
-                  : `${failedCount} failed`}
+                  : failedCount > 0
+                    ? `${failedCount} failed`
+                    : 'Partial'}
           </span>
         )}
         {g.plantNotes && g.plantNotes.length > 0 && <PlantSummaryChip notes={g.plantNotes} compact />}
@@ -252,9 +254,7 @@ function RunGroup({ photo, g, tileW, viewId, gridOpen }: { photo: Photo; g: Gene
             <span className="line-clamp-2 max-w-60">{g.error ?? 'No variations'}</span>
             <button
               type="button"
-              onClick={() =>
-                void runOrNotify({ photoId: photo.id, mode: g.mode, compare: g.compare, brief: g.brief, baseVariationId: g.baseVariationId ?? null })
-              }
+              onClick={() => void retryRun(g.id).catch((err: Error) => useStore.getState().notify(err.message, 'error'))}
               className="inline-flex h-7 shrink-0 items-center gap-1 rounded-full bg-surface px-2.5 font-medium text-text shadow-sm hover:bg-surface-3"
             >
               <RotateCcw className="size-3" /> Run again
