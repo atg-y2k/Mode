@@ -644,6 +644,7 @@ export const ApiErrorBodySchema = z.object({
   error: z.object({
     code: z.enum([
       'bad_request',
+      'unauthorized',
       'ai_disabled',
       'image_provider_disabled',
       'refused',

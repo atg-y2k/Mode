@@ -234,8 +234,8 @@ export function Toggle({ checked, onChange, label, disabled }: { checked: boolea
       >
         <span
           className={cn(
-            'absolute top-0.5 size-4 rounded-full bg-white shadow transition-transform',
-            checked ? 'translate-x-4.5' : 'translate-x-0.5',
+            'absolute left-0.5 top-0.5 size-4 rounded-full bg-white shadow transition-transform',
+            checked ? 'translate-x-4' : 'translate-x-0',
           )}
         />
       </button>
@@ -407,10 +407,13 @@ export function Modal({
   size?: 'sm' | 'md' | 'lg' | 'xl';
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
+  // Latest onClose without re-running the open effect (which moves focus) on every render.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') onCloseRef.current();
     };
     window.addEventListener('keydown', onKey);
     const prev = document.activeElement as HTMLElement | null;
@@ -419,7 +422,7 @@ export function Modal({
       window.removeEventListener('keydown', onKey);
       prev?.focus?.();
     };
-  }, [open, onClose]);
+  }, [open]);
   if (!open) return null;
   const widths = { sm: 'max-w-sm', md: 'max-w-lg', lg: 'max-w-2xl', xl: 'max-w-4xl' };
   return createPortal(

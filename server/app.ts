@@ -332,14 +332,14 @@ export function createApp(deps: AppDeps) {
       const token = c.req.header('x-mode-token');
       if (!token) {
         throw new ApiHttpError(
-          'bad_request',
+          'unauthorized',
           'This Mode server requires an access token. Add it in Settings under "Server access token".',
           401,
         );
       }
       if (!tokenMatches(token, config.accessToken)) {
         throw new ApiHttpError(
-          'bad_request',
+          'unauthorized',
           'The access token was not accepted. Check it in Settings under "Server access token".',
           401,
         );

@@ -160,7 +160,7 @@ function errorForStatus(status: number): ApiError {
   if (status === 429) return new ApiError('rate_limited', 'Too many requests. Wait a minute and try again.', status);
   if (status === 401 || status === 403) {
     return new ApiError(
-      'bad_request',
+      'unauthorized',
       'The server refused the request. Check the server access token in Settings.',
       status,
     );
