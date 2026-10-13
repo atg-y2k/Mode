@@ -737,8 +737,12 @@ export interface HandoffPack {
   /** Size of the exported image (after snapping to a supported aspect ratio and resizing). */
   outW: number;
   outH: number;
-  /** Selection-marker color drawn on the marked copy. */
+  /** Selection-marker color drawn on the marked copy ('' = no marker, whole-image edit). */
   markerColor: string;
+  /** Aspect ratio label the export was snapped to, e.g. "4:3". */
+  ratio?: string;
+  /** Strictness the prompt was written with. */
+  strictness?: 'strict' | 'balanced' | 'creative';
   /** Exported clean image / marked image in the blob store. */
   cleanImageId: ID;
   markedImageId: ID;
@@ -937,7 +941,17 @@ export interface SiteProfile {
   /** Where the coordinates came from. */
   coordsSource: 'zip' | 'address' | 'photo-gps';
   /** Nearest NOAA 1991–2020 normals station frost dates (month-day strings, e.g. "04-12"). */
-  frost?: { station: string; distanceKm: number; lastSpring50: string; lastSpring90?: string; firstFall50: string; firstFall10?: string; freeDays?: number };
+  frost?: {
+    station: string;
+    distanceKm: number;
+    /** True when the nearest usable station records no freezes in a typical year (dates are then absent). */
+    frostFree?: boolean;
+    lastSpring50?: string;
+    lastSpring90?: string;
+    firstFall50?: string;
+    firstFall10?: string;
+    freeDays?: number;
+  };
   /** USDA Soil Data Access summary for the point. */
   soil?: { mapUnit: string; drainage?: string; ph?: number; clayPct?: number; hydroGroup?: string; disturbed?: boolean };
   /** EPA Level III ecoregion name, when known. */
@@ -954,9 +968,10 @@ export interface ProjectLocation {
   /** Free text: climate, HOA rules, sun orientation… */
   notes?: string;
   climate?: ClimateProfile;
-  /** ZIP centroid or geocoded address (kept on this device). */
+  /** ZIP centroid, photo GPS or geocoded address (kept on this device). */
   lat?: number;
   lon?: number;
+  coordsSource?: 'zip' | 'address' | 'photo-gps';
   /** Optional street address for exact coordinates (kept on this device; never sent to AI prompts). */
   address?: string;
   /** Deer pressure for plant filtering (Rutgers-style A–D ratings guide the advice). */

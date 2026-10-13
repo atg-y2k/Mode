@@ -1027,6 +1027,11 @@ export const useStore = create<AppState>()((set, get) => {
             const ids = new Set([...next.zones.map((z) => z.id), ...next.paths.map((p) => p.id)]);
             next.zones.push(...prev.zones.filter((z) => isSketchZone(z) && !ids.has(z.id)));
             next.paths.push(...prev.paths.filter((p) => p.kind === 'sketch' && !ids.has(p.id)));
+            // A facade direction the user set by hand beats the AI's guess.
+            if (prev.facadeAzimuthSource === 'user' && prev.facadeAzimuthDeg !== undefined) {
+              next.facadeAzimuthDeg = prev.facadeAzimuthDeg;
+              next.facadeAzimuthSource = 'user';
+            }
             ph.scene = next;
           } else {
             ph.scene = scene as Draft<SceneMap> | undefined;
@@ -1152,7 +1157,13 @@ export const useStore = create<AppState>()((set, get) => {
           gridGenerationId: s.studio.gridGenerationId === generationId ? null : s.studio.gridGenerationId,
         },
       }));
-      await db.deleteBlobs(g.variations.flatMap((v) => [v.imageId, v.thumbId]));
+      await db.deleteBlobs([
+        ...g.variations.flatMap((v) => [v.imageId, v.thumbId]),
+        ...(g.planned ?? []).flatMap((pl) => [
+          ...(pl.handoff ? [pl.handoff.cleanImageId, pl.handoff.markedImageId] : []),
+          ...(pl.staged ? [pl.staged.imageId, pl.staged.thumbId] : []),
+        ]),
+      ]);
     },
 
     setRecommendations(photoId, items, baseVariationId) {

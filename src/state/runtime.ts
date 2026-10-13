@@ -122,6 +122,8 @@ export async function preloadPhoto(photo: Photo): Promise<ImageDataLike> {
   const [img] = await Promise.all([
     loadPhotoImage(photo),
     ...photo.regions.map((r) => loadMask(r.maskId, photo.width, photo.height)),
+    // Zones sharpened on-device or refined in Fine-tune carry exact masks.
+    ...(photo.scene?.zones ?? []).flatMap((z) => (z.maskId ? [loadMask(z.maskId, photo.width, photo.height)] : [])),
   ]);
   return img;
 }

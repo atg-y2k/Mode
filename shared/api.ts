@@ -589,6 +589,8 @@ export const PlanRequestSchema = z.object({
     prompt: z.string().max(4000),
     scope: z.enum(['zones', 'whole']),
     plantMaturity: z.enum(['new', 'established', 'mature']),
+    /** How freely variations may reinterpret the brief (default balanced). */
+    strictness: z.enum(['strict', 'balanced', 'creative']).optional(),
     targetZoneLabels: z.array(z.string()),
     elements: z.array(
       z.object({
