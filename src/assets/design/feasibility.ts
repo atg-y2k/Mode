@@ -8,9 +8,18 @@
  *   3. Space — mature width vs the spot's span (√area).
  *   4. Water vs annual rainfall, deer pressure, invasiveness (cautions).
  * Interior evaluation (houseplants) ignores the zone and reads `sun` as window light.
+ *
+ * Invasiveness has two sources: a curated list with regional notes (always
+ * available) and USGS US-RIIS v2.0 (src/site/invasives, ~4,900 plant names),
+ * which loads in the background on first use in the browser. Rating stays
+ * synchronous: until US-RIIS has loaded only the curated list applies.
  */
-import type { AssetDef, PlantFeasibility, PlantInfo, SunExposure } from '../../../shared/types';
+import type { AssetDef, PlantFeasibility, PlantInfo, ProjectLocation, SunExposure } from '../../../shared/types';
+import { ensureInvasivesLoading, invasiveStatusSync, splitBotanicalNames, type Locality } from '../../site/invasives';
 import type { PlantProfile } from './plants';
+
+/** Deer pressure: the project's setting (low/medium/high) or a yes/no read from climate notes. */
+export type DeerPressure = NonNullable<ProjectLocation['deerPressure']>;
 
 export interface FeasibilityContext {
   /** USDA hardiness zone number of the property (e.g. parseZone('7a') → 7; 7.5 for "7b" is read as zone 7). */
@@ -23,10 +32,16 @@ export interface FeasibilityContext {
   areaSqFt?: number;
   /** Annual rainfall (inches) from the climate profile. */
   annualRainfallIn?: number;
-  /** True when deer browse the area (climate profile notes); false when they don't; undefined = unknown. */
-  deerPressure?: boolean;
+  /**
+   * Deer pressure: 'low' | 'medium' | 'high' (Settings), or true / false when
+   * read from climate notes (true = deer browse the area, rated like 'medium').
+   * Undefined = unknown.
+   */
+  deerPressure?: boolean | DeerPressure;
   /** Where the plant goes. Default: exterior (indoor plants default to interior). */
   setting?: 'exterior' | 'interior';
+  /** US-RIIS region of the property (from the ZIP); default the lower 48. */
+  locality?: Locality;
 }
 
 type Level = 'ok' | 'info' | 'caution' | 'poor';
@@ -185,13 +200,67 @@ function waterCheck(info: PlantInfo, rain: number): Check | undefined {
   return undefined;
 }
 
-function deerCheck(info: PlantInfo, pressure: boolean | undefined): Check | undefined {
+/** true (deer noted in the climate profile) reads as medium pressure; false as low. */
+function deerLevel(pressure: FeasibilityContext['deerPressure']): DeerPressure | undefined {
+  if (pressure === true) return 'medium';
+  if (pressure === false) return 'low';
+  return pressure;
+}
+
+/**
+ * Deer: with medium or high pressure, deer favorites get a caution (Rutgers-style:
+ * prefer plants rated "rarely" or "seldom severely" damaged); low pressure skips
+ * deer advice; unknown pressure only notes that deer browse the plant.
+ */
+function deerCheck(info: PlantInfo, pressure: FeasibilityContext['deerPressure']): Check | undefined {
+  const lvl = deerLevel(pressure);
+  if (lvl === 'low') return undefined;
   if (info.deerResistant === false) {
-    if (pressure === true) return { kind: 'deer', level: 'caution', text: 'Deer favorite — protect it or choose a deer-resistant plant' };
-    if (pressure === undefined) return { kind: 'deer', level: 'info', text: 'Browsed by deer where they are common' };
+    if (lvl === 'high') {
+      return { kind: 'deer', level: 'caution', text: 'Deer favorite and deer pressure is high here — it needs fencing or repellent; a deer-resistant plant is the easier choice' };
+    }
+    if (lvl === 'medium') return { kind: 'deer', level: 'caution', text: 'Deer favorite — protect it or choose a deer-resistant plant' };
+    return { kind: 'deer', level: 'info', text: 'Browsed by deer where they are common' };
   }
-  if (info.deerResistant === true && pressure === true) return { kind: 'deer', level: 'ok', text: 'Deer resistant ✓' };
+  if (info.deerResistant === true && lvl) return { kind: 'deer', level: 'ok', text: 'Deer resistant ✓' };
+  if (info.deerResistant === undefined && lvl === 'high') {
+    return { kind: 'deer', level: 'info', text: 'Deer resistance not rated — check it (e.g. Rutgers deer ratings) before planting' };
+  }
   return undefined;
+}
+
+/** Lawn grasses and lawn overseeding (they spread by design; the catalog gives them no mature width). */
+function isTurf(info: PlantInfo): boolean {
+  return (info.type === 'grass' || info.type === 'groundcover') && info.matureWidthFt === 0 && info.matureHeightFt < 1;
+}
+
+/**
+ * Invasiveness: the curated list first (regional advice), then US-RIIS for the
+ * property's region. Listed invasive / widespread invasive → caution (info for
+ * lawn grasses, which are meant to spread: keep them out of beds). "Established"
+ * (introduced but not invasive) adds nothing. When only some forms of a species
+ * are listed, an info note says to check which form is sold.
+ */
+function invasiveChecks(info: PlantInfo, name: string, ctx: FeasibilityContext): Check[] {
+  const curated = invasiveNote(info.botanical, name);
+  if (curated) return [{ kind: 'invasive', level: 'caution', text: `Invasive risk: ${curated}` }];
+  ensureInvasivesLoading();
+  const turf = isTurf(info);
+  const out: Check[] = [];
+  for (const n of splitBotanicalNames(info.botanical)) {
+    const v = invasiveStatusSync(n, ctx.locality ?? 'L48');
+    if (!v?.note) continue;
+    if (v.invasive) {
+      out.push(
+        turf
+          ? { kind: 'invasive', level: 'info', text: `Spreads beyond the lawn: ${v.note} — keep a clean edge between lawn and beds` }
+          : { kind: 'invasive', level: 'caution', text: `Invasive risk: ${v.note} — check your state's invasive plant list before planting` },
+      );
+    } else if (v.level === 0 && v.match?.match === 'infraspecific') {
+      out.push({ kind: 'invasive', level: 'info', text: v.note });
+    }
+  }
+  return out;
 }
 
 function sitingCheck(info: PlantInfo): Check | undefined {
@@ -234,8 +303,7 @@ function evaluate(info: PlantInfo, name: string, ctx: FeasibilityContext): Check
     }
     const deer = deerCheck(info, ctx.deerPressure);
     if (deer) out.push(deer);
-    const invasive = invasiveNote(info.botanical, name);
-    if (invasive) out.push({ kind: 'invasive', level: 'caution', text: `Invasive risk: ${invasive}` });
+    out.push(...invasiveChecks(info, name, ctx));
     const siting = sitingCheck(info);
     if (siting) out.push(siting);
   }
@@ -351,7 +419,7 @@ export const FEASIBILITY_RULES: string[] = [
   'Space: mature width must fit the bed; center plants at least half their mature width from walls and paths and space them at their mature width so beds fill in by year 3 without shearing into boxes. Keep foundation shrubs below window sills at maturity.',
   'Trees: small trees (≤ 25 ft) 8–10+ ft from the house, medium 15–20 ft, large shade trees 20–30+ ft and away from sewer lines and overhead wires.',
   'Water: group plants by water need; drought-tolerant Mediterranean plants need sharp drainage in wet climates; thirsty plants need irrigation where rainfall is under ~30 in/yr.',
-  'Deer: where deer are present favor deer-resistant plants (boxwood, lavender, catmint, ornamental grasses, ferns, hellebores) over hosta, arborvitae, yews, hydrangeas, roses and tulips.',
-  `Never suggest invasive plants: ${INVASIVE_WATCHLIST.join(', ')}. Prefer natives of the region where they fit the design.`,
+  'Deer: where deer are present favor deer-resistant plants (boxwood, lavender, catmint, ornamental grasses, ferns, hellebores) over hosta, arborvitae, yews, hydrangeas, roses and tulips; with high deer pressure suggest only plants deer rarely damage (Rutgers A/B ratings).',
+  `Never suggest invasive plants: ${INVASIVE_WATCHLIST.join(', ')}. Prefer natives of the region where they fit the design. Plants the USGS US-RIIS register lists as invasive in the region (e.g. cherry laurel, Japanese maple, crape myrtle, star jasmine) self-seed beyond gardens in places — when one is central to a style, rate it caution, say so, and offer a native alternative.`,
   'Plant maturity in renderings: "new" = nursery sizes (1-gal perennials, 3–7 gal shrubs, 6–8 ft trees) with mulch visible between plants; "established" ≈ 3 years, perennials full, shrubs ~2/3 of mature size; "mature" = full mature size.',
 ];

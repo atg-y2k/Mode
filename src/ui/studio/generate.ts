@@ -1,28 +1,37 @@
 /**
  * Studio run orchestration (browser):
- *   brief + scene + idea board → POST plan → N × POST render-variation
- *   (in parallel, max 3 at a time) → protect pixels outside the target mask
- *   (scope 'zones') → store variation blobs + Variation records as each arrives.
+ *   brief + scene + idea board → POST plan → review (the user sees the plan
+ *   and each instruction, edits, Sends) → then either
+ *   - API mode: N × POST render-variation (in parallel, max 3 at a time) →
+ *     protect pixels outside the target mask (scope 'zones') → store
+ *     variation blobs + Variation records as each arrives; or
+ *   - hand-off mode: the run waits ('awaiting') with one planned item per
+ *     variation; the user renders each in their ChatGPT / Gemini app and
+ *     brings the image back (see ./handoff).
+ * Both modes persist the plan's items on Generation.planned, so a reload
+ * keeps every instruction (retry after reload, pending hand-offs).
  * Progress is published through store.setRunProgress; runs can be cancelled.
  *
  * Robustness:
  * - partial failures: each variation renders independently; a run whose
  *   variations partly fail ends 'partial' with the error text, and a failed
  *   variation can be retried alone with its planned instruction
- *   (retryVariation) — or all failed ones at once (retryRun);
+ *   (retryVariation) — or all failed ones at once (retryRun), also after a reload;
  * - cancellation: one AbortController per run (cancelRun);
  * - reloads: runs left 'running' by an earlier session are marked
  *   interrupted on load (recoverInterruptedRuns, called by StudioView).
  */
-import type { PlanRequest, PlanResult, RenderVariationRequest } from '../../../shared/api';
+import { API_PATHS, PlanRequestSchema, PlanResultSchema, type PlanRequest, type PlanResult, type RenderVariationRequest } from '../../../shared/api';
 import { newId } from '../../../shared/ids';
 import {
   SPACE_TYPE_LABELS,
   emptyBrief,
   type DesignBrief,
   type Generation,
+  type HandoffApp,
   type IdeaItem,
   type Photo,
+  type PlannedVariation,
   type PlantNote,
   type SceneMap,
   type Variation,
@@ -30,12 +39,16 @@ import {
 import type { ImageDataLike, Mask } from '../../engine/types';
 import { ApiError, isAbortError } from '../../lib/api';
 import { blobToAIDataUrl, blobToDataUrl, blobToImageData, dataUrlToBlob, imageDataToBlob } from '../../lib/imageImport';
-import { planVariations, renderVariation } from '../../lib/studio';
+import { renderVariation, STUDIO_TIMEOUTS_MS, studioPost } from '../../lib/studio';
 import * as db from '../../state/persistence';
 import * as runtime from '../../state/runtime';
-import { findPhoto, findVariation, useStore, type AppState } from '../../state/store';
+import { findPhoto, findVariation, useStore, type AppState, type StudioState } from '../../state/store';
 import { STUDIO_KNOWLEDGE } from './knowledge';
 import { compositeVariation, maskToKeepAlpha, resizePixels, thumbnailBlob } from './composite';
+import { appLabel, rollupStatus } from './handoff/planned';
+import { effectiveRenderMode } from './handoff/prefs';
+import { awaitReview, closeReview, openReview, reviewAvailable, type ReviewItem } from './handoff/review';
+import { focusHandoff } from './handoff/session';
 import { briefTargetIds, maskForBrief } from './maskFromZones';
 import { buildPlanRequest, ideasForBrief, resolveCompare, sceneSummaryText as sceneText, swapOptionInBrief, type PlanKnowledge } from './planRequest';
 import { forgetRunInfo, getRunInfo, patchRunInfo, patchSlot, setRunInfo, type RunSlot } from './runs';
@@ -59,8 +72,14 @@ export interface StartRunOptions {
    * instruction as the model to follow. Overrides baseVariationId / feedback.
    */
   moreLikeThis?: string;
-  /** Show the run in the compare grid as it renders (default true when the photo is on screen). */
+  /** Show the run in the compare grid as it renders (default: API runs whose photo is on screen). */
   showGrid?: boolean;
+  /** 'handoff' = the user renders each variation in ChatGPT / Gemini; default: the Studio's choice (API only when the server has an image provider). */
+  renderMode?: StudioState['renderMode'];
+  /** App for hand-offs (default store.studio.handoffApp). */
+  app?: HandoffApp;
+  /** Show the review step before rendering / handing off (default: whenever the review modal is mounted). */
+  review?: boolean;
 }
 
 /** Variations rendered in parallel. */
@@ -73,7 +92,7 @@ const KNOWLEDGE: PlanKnowledge = STUDIO_KNOWLEDGE;
 
 /** Everything a render needs, prepared once per run (and again for a retry after the run ended). */
 interface RenderInputs {
-  /** Photo-size data URL of the starting image. */
+  /** Photo-size data URL of the starting image ('' for hand-off runs, which never call the render API). */
   image: string;
   /** The starting image downscaled for Claude (plan request). */
   planImage: string;
@@ -103,6 +122,10 @@ interface RunContext {
   providerRecorded: boolean;
   /** Original run options (for "Retry" after a failed plan). */
   options: StartRunOptions;
+  renderMode: StudioState['renderMode'];
+  app: HandoffApp;
+  /** Waits for the user's review after planning. */
+  review: boolean;
 }
 
 const contexts = new Map<string, RunContext>();
@@ -165,14 +188,22 @@ function providerLabel(s: AppState, id: RenderVariationRequest['provider']): { p
   return { provider: id ?? s.health?.imageProvider.name ?? 'default', model: s.health?.imageProvider.model ?? '' };
 }
 
-/** User-facing reason the next run can't start, or null. Unknown health (still loading) doesn't block. */
-export function generationBlocker(s: Pick<AppState, 'health'>): string | null {
+/**
+ * User-facing reason the next run can't start, or null. Unknown health
+ * (still loading) doesn't block. Hand-off runs only need the server (Claude
+ * plans, or the server's template plan without Claude); API runs also need
+ * an image provider. Without `renderMode` the Studio's effective mode applies
+ * (API falls back to hand-off while no provider is configured).
+ */
+export function generationBlocker(s: Pick<AppState, 'health'> & { studio?: Pick<StudioState, 'renderMode'> }, renderMode?: StudioState['renderMode']): string | null {
   const h = s.health;
   if (!h) return null;
   if (!h.ok) return "Can't reach the Mode server — check that it's running.";
+  const mode = renderMode ?? effectiveRenderMode(s.studio ?? state().studio, h);
+  if (mode === 'handoff') return null;
   const providers = h.imageProviders ?? [];
   if (!h.imageProvider.enabled && providers.length === 0) {
-    return 'Photoreal variations need an image provider: add OPENAI_API_KEY or GEMINI_API_KEY to .env and restart the server.';
+    return 'Rendering with an image API needs OPENAI_API_KEY or GEMINI_API_KEY in .env (restart the server) — or switch to hand-off and use your ChatGPT or Gemini app.';
   }
   return null;
 }
@@ -187,7 +218,7 @@ function publishProgress(ctx: RunContext): void {
   const done = info.slots.filter((x) => x.state === 'done').length;
   const failed = info.slots.filter((x) => x.state === 'failed').length;
   state().setRunProgress(ctx.generationId, {
-    stage: info.stage === 'planning' ? 'planning' : 'rendering',
+    stage: info.stage === 'planning' || info.stage === 'review' ? 'planning' : 'rendering',
     total: info.slots.length,
     done,
     failed,
@@ -197,6 +228,16 @@ function publishProgress(ctx: RunContext): void {
 function updateGeneration(ctx: RunContext, recipe: (g: Generation) => void): void {
   if (!currentGeneration(ctx)) return;
   state().updateGeneration(ctx.photoId, ctx.generationId, recipe as Parameters<AppState['updateGeneration']>[2]);
+}
+
+/** Updates one planned item of the run (no-op for runs without a recorded plan). */
+function patchPlanned(ctx: RunContext, key: string, patch: Partial<PlannedVariation>): void {
+  updateGeneration(ctx, (g) => {
+    const p = g.planned?.find((x) => x.id === key);
+    if (!p) return;
+    Object.assign(p, patch);
+    for (const k of Object.keys(patch) as (keyof PlannedVariation)[]) if (patch[k] === undefined) delete p[k];
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -257,13 +298,21 @@ async function prepareInputs(ctx: RunContext, photo: Photo): Promise<RenderInput
     loadTargetMasks(photo, ctx.brief),
   ]);
   const mask = buildTargetMask(photo, ctx.brief);
+  const forApi = ctx.renderMode === 'api';
   const [image, planImage, maskUrl] = await Promise.all([
     // The provider mask must match the image size exactly: send photo-size pixels.
-    blobIsPhotoSize ? blobToDataUrl(blob) : imageDataToBlob(pixels, 'image/jpeg', 0.92).then(blobToDataUrl),
+    !forApi ? Promise.resolve('') : blobIsPhotoSize ? blobToDataUrl(blob) : imageDataToBlob(pixels, 'image/jpeg', 0.92).then(blobToDataUrl),
     blobToAIDataUrl(blob),
-    mask ? imageDataToBlob(maskToKeepAlpha(mask), 'image/png').then(blobToDataUrl) : Promise.resolve(null),
+    mask && forApi ? imageDataToBlob(maskToKeepAlpha(mask), 'image/png').then(blobToDataUrl) : Promise.resolve(null),
   ]);
   return { image, planImage, maskUrl, mask, base: pixels, references };
+}
+
+/** POST plan, also reporting whether Claude planned it or the server filled its template (no Claude configured). */
+async function requestPlan(req: PlanRequest, signal: AbortSignal): Promise<{ plan: PlanResult; source: 'ai' | 'template' | null }> {
+  const { data, headers } = await studioPost(API_PATHS.plan, PlanRequestSchema, req, PlanResultSchema, STUDIO_TIMEOUTS_MS.plan, signal);
+  const source = headers.get('x-mode-plan-source');
+  return { plan: data, source: source === 'ai' || source === 'template' ? source : null };
 }
 
 function inputsFor(ctx: RunContext, photo: Photo): Promise<RenderInputs> {
@@ -315,7 +364,9 @@ export async function startRun(opts: StartRunOptions): Promise<string> {
   const found = findPhoto(project, opts.photoId);
   if (!found) throw new Error('That photo is no longer in this project.');
   const { photo, space } = found;
-  const blocker = generationBlocker(s);
+  const renderMode = opts.renderMode ?? effectiveRenderMode(s.studio, s.health);
+  const app = opts.app ?? s.studio.handoffApp;
+  const blocker = generationBlocker(s, renderMode);
   if (blocker) throw new Error(blocker);
 
   // Starting image, brief and refine context.
@@ -356,7 +407,7 @@ export async function startRun(opts: StartRunOptions): Promise<string> {
   const count = compare ? compare.options.length : clampCount(opts.count ?? s.studio.variationCount);
   const provider = s.studio.provider;
   const generationId = newId('gen');
-  const label = providerLabel(s, provider);
+  const label = renderMode === 'handoff' ? { provider: appLabel(app), model: 'hand-off' } : providerLabel(s, provider);
   const generation: Generation = {
     id: generationId,
     createdAt: Date.now(),
@@ -367,6 +418,7 @@ export async function startRun(opts: StartRunOptions): Promise<string> {
     model: label.model,
     variations: [],
     status: 'running',
+    renderMode,
   };
   if (compare) generation.compare = { elementId: compare.element.id, dimensionId: compare.dimension.id, optionIds: compare.options.map((o) => o.id) };
   if (baseVariationId) generation.baseVariationId = baseVariationId;
@@ -385,20 +437,36 @@ export async function startRun(opts: StartRunOptions): Promise<string> {
     cancelled: false,
     inputs: null,
     providerRecorded: false,
-    options: { ...opts, brief, baseVariationId: baseVariationId ?? null },
+    options: { ...opts, brief, baseVariationId: baseVariationId ?? null, renderMode, app },
+    renderMode,
+    app,
+    review: opts.review ?? reviewAvailable(),
   };
   contexts.set(generationId, ctx);
   watchForRemovedRuns();
 
   // Placeholders straight away: one per compared option, else one per planned variation.
+  // Slot keys double as the planned items' ids.
   const slots: RunSlot[] = compare
-    ? compare.options.map((o) => ({ key: o.id, title: o.label, brief: '', optionId: o.id, optionLabel: o.label, state: 'pending' }))
-    : Array.from({ length: count }, (_, i) => ({ key: `v${i + 1}`, title: '', brief: '', state: 'pending' }));
+    ? compare.options.map((o) => ({ key: newId('plv'), title: o.label, brief: '', optionId: o.id, optionLabel: o.label, state: 'pending' }))
+    : Array.from({ length: count }, () => ({ key: newId('plv'), title: '', brief: '', state: 'pending' }));
   setRunInfo({ generationId, photoId: photo.id, stage: 'planning', slots });
 
   s.addGeneration(photo.id, generation);
   publishProgress(ctx);
-  if (opts.showGrid !== false && s.selection.photoId === photo.id) s.setStudio({ gridGenerationId: generationId });
+  const onScreen = s.selection.photoId === photo.id;
+  if ((opts.showGrid ?? renderMode === 'api') && onScreen) s.setStudio({ gridGenerationId: generationId });
+  if (ctx.review) {
+    openReview({
+      generationId,
+      photoId: photo.id,
+      renderMode,
+      app,
+      runMode: generation.mode,
+      count,
+      ...(baseVariationId ? { baseVariationId } : {}),
+    });
+  }
 
   void execute(ctx, photo, space.kind, SPACE_TYPE_LABELS[space.type], count, compare, refine);
   return generationId;
@@ -420,8 +488,17 @@ export function cancelRun(generationId: string): void {
   ctx.active = false;
   ctx.inputs = null;
   publishProgress(ctx);
+  closeReview(generationId);
   const g = currentGeneration(ctx);
   if (!g) return;
+  updateGeneration(ctx, (gen) => {
+    for (const p of gen.planned ?? []) {
+      if (p.status === 'pending') {
+        p.status = 'failed';
+        p.error = 'Cancelled';
+      }
+    }
+  });
   if (g.variations.length === 0) {
     // Nothing to keep: drop the empty run.
     void state().deleteGeneration(ctx.photoId, generationId);
@@ -436,9 +513,13 @@ export function cancelRun(generationId: string): void {
   });
 }
 
-/** Re-renders one failed variation of a run from this session, reusing its planned instruction. */
+/**
+ * Re-renders one failed variation of an API run, reusing its planned
+ * instruction — from this session's live slots, or from the plan recorded
+ * on the run (after a reload).
+ */
 export async function retryVariation(generationId: string, slotKey: string): Promise<void> {
-  const ctx = contexts.get(generationId);
+  const ctx = contexts.get(generationId) ?? restoreContext(generationId);
   const slot = getRunInfo(generationId)?.slots.find((x) => x.key === slotKey);
   if (!ctx || !slot || slot.state !== 'failed') return;
   if (!slot.brief) {
@@ -454,12 +535,16 @@ export async function retryVariation(generationId: string, slotKey: string): Pro
   }
   reactivate(ctx);
   patchSlot(generationId, slotKey, { state: 'pending', error: undefined });
+  patchPlanned(ctx, slotKey, { status: 'pending', error: undefined });
   publishProgress(ctx);
   try {
     const inputs = await inputsFor(ctx, photo);
     await renderSlot(ctx, photo, inputs, slotKey);
   } catch (err) {
-    if (!isAbortError(err)) patchSlot(generationId, slotKey, { state: 'failed', error: errorMessage(err) });
+    if (!isAbortError(err)) {
+      patchSlot(generationId, slotKey, { state: 'failed', error: errorMessage(err) });
+      patchPlanned(ctx, slotKey, { status: 'failed', error: errorMessage(err) });
+    }
   }
   if (!othersBusy(ctx)) finish(ctx);
   else publishProgress(ctx);
@@ -474,7 +559,7 @@ export async function retryVariation(generationId: string, slotKey: string): Pro
  */
 export async function retryRun(generationId: string): Promise<string | null> {
   const s = state();
-  const ctx = contexts.get(generationId);
+  const ctx = contexts.get(generationId) ?? restoreContext(generationId);
   const info = getRunInfo(generationId);
   const failed = info?.slots.filter((x) => x.state === 'failed') ?? [];
   if (ctx && failed.length > 0 && failed.every((x) => x.brief)) {
@@ -484,8 +569,9 @@ export async function retryRun(generationId: string): Promise<string | null> {
   const owner = ctx ? currentPhoto(ctx) : photoOfGeneration(generationId);
   const g = owner?.generations.find((x) => x.id === generationId);
   if (!owner || !g) return null;
+  // A new run follows the Studio's current render mode (the user may have switched since).
   const opts: StartRunOptions = ctx
-    ? { ...ctx.options, photoId: owner.id }
+    ? { ...ctx.options, photoId: owner.id, renderMode: undefined, app: undefined, review: undefined }
     : {
         photoId: owner.id,
         mode: g.mode,
@@ -521,6 +607,11 @@ export function recoverInterruptedRuns(): number {
         s.updateGeneration(photo.id, g.id, (gen) => {
           gen.status = 'partial';
           gen.error = INTERRUPTED;
+          for (const p of gen.planned ?? []) {
+            if (p.status !== 'pending') continue;
+            p.status = 'failed';
+            p.error = 'Interrupted before it rendered.';
+          }
         });
         s.setRunProgress(g.id, null);
       }
@@ -532,6 +623,61 @@ export function recoverInterruptedRuns(): number {
 // ---------------------------------------------------------------------------
 // Execution
 // ---------------------------------------------------------------------------
+
+/**
+ * Rebuilds the context of an API run from an earlier session from its
+ * recorded plan, so failed variations can be re-rendered without planning
+ * again. Undefined when there is nothing to retry that way.
+ */
+function restoreContext(generationId: string): RunContext | undefined {
+  const s = state();
+  const project = s.project;
+  const owner = photoOfGeneration(generationId);
+  const g = owner?.generations.find((x) => x.id === generationId);
+  if (!project || !owner || !g || g.renderMode === 'handoff' || g.status === 'running') return undefined;
+  const planned = (g.planned ?? []).filter((p) => p.status !== 'rejected');
+  if (!planned.some((p) => (p.status === 'failed' || p.status === 'pending') && p.brief.trim())) return undefined;
+  const space = findPhoto(project, owner.id)?.space;
+  if (!space) return undefined;
+  const baseVariationId = g.baseVariationId && findVariation(owner, g.baseVariationId) ? g.baseVariationId : undefined;
+  const ctx: RunContext = {
+    generationId,
+    photoId: owner.id,
+    projectId: project.id,
+    spaceId: space.id,
+    brief: g.brief,
+    baseVariationId,
+    provider: s.studio.provider,
+    quality: s.studio.quality,
+    controller: new AbortController(),
+    active: false,
+    cancelled: false,
+    inputs: null,
+    providerRecorded: g.variations.length > 0,
+    options: { photoId: owner.id, mode: g.mode, compare: g.compare, brief: g.brief, baseVariationId: baseVariationId ?? null },
+    renderMode: 'api',
+    app: s.studio.handoffApp,
+    review: false,
+  };
+  contexts.set(generationId, ctx);
+  watchForRemovedRuns();
+  setRunInfo({
+    generationId,
+    photoId: owner.id,
+    stage: 'finished',
+    slots: planned.map((p) => ({
+      key: p.id,
+      title: p.title,
+      brief: p.brief,
+      ...(p.optionId ? { optionId: p.optionId } : {}),
+      ...(p.optionLabel ? { optionLabel: p.optionLabel } : {}),
+      state: p.status === 'done' ? 'done' : 'failed',
+      ...(p.status === 'done' ? {} : { error: p.error || 'Not rendered.' }),
+      ...(p.variationId ? { variationId: p.variationId } : {}),
+    })),
+  });
+  return ctx;
+}
 
 function reactivate(ctx: RunContext): void {
   if (ctx.active) return;
@@ -590,7 +736,7 @@ function slotsFromPlan(plan: PlanResult, placeholders: RunSlot[], compare: Retur
       brief = j >= 0 ? swapOptionInBrief(matched[j]!.brief, compare.options[j], o, compare.dimension.label) : '';
     }
     return {
-      key: o.id,
+      key: placeholders.find((p) => p.optionId === o.id)?.key ?? placeholders[i]?.key ?? o.id,
       title: o.label,
       brief,
       optionId: o.id,
@@ -633,24 +779,63 @@ async function execute(
       },
       KNOWLEDGE,
     );
-    const plan = await planVariations(request, ctx.controller.signal);
+    const { plan, source } = await requestPlan(request, ctx.controller.signal);
     checkAlive(ctx);
 
     const placeholders = getRunInfo(generationId)?.slots ?? [];
-    const slots = slotsFromPlan(plan, placeholders, compare);
+    let slots = slotsFromPlan(plan, placeholders, compare);
     if (slots.length === 0) throw new Error('The planner returned no variations — try rephrasing the brief.');
     const notes = plantNotesFrom(plan);
     updateGeneration(ctx, (g) => {
       g.plan = plan.plan.trim();
       if (notes.length) g.plantNotes = notes;
     });
-    patchRunInfo(generationId, { stage: 'rendering', slots });
-    publishProgress(ctx);
     const poor = notes.filter((n) => n.rating === 'poor');
-    if (poor.length > 0) {
+    if (poor.length > 0 && !ctx.review) {
       const list = poor.map((n) => (n.alternative ? `${n.name} (try ${n.alternative})` : n.name)).join(', ');
       state().notify(`Plant check: ${list} ${poor.length === 1 ? "isn't a good fit" : "aren't good fits"} for this spot — see the run's plants.`, 'info');
     }
+
+    // 2. Review: the user sees the plan and each instruction, may edit or drop some, then Sends.
+    if (ctx.review) {
+      patchRunInfo(generationId, { stage: 'review', slots });
+      publishProgress(ctx);
+      const reviewed = await awaitReview(generationId, {
+        plan: plan.plan.trim(),
+        plantNotes: notes,
+        planSource: source,
+        items: slots
+          .filter((x) => x.state !== 'failed')
+          .map((x) => ({ key: x.key, title: x.title, brief: x.brief, ...(x.optionLabel ? { optionLabel: x.optionLabel } : {}) })),
+      });
+      if (!reviewed || reviewed.length === 0) {
+        if (!ctx.cancelled) cancelRun(generationId);
+        return;
+      }
+      checkAlive(ctx);
+      slots = applyReview(slots, reviewed);
+    }
+
+    // 3. Record the plan's items on the run (survives reloads).
+    const hand = ctx.renderMode === 'handoff';
+    const planned: PlannedVariation[] = slots.map((x) => ({
+      id: x.key,
+      title: x.title,
+      brief: x.brief,
+      ...(x.optionId ? { optionId: x.optionId } : {}),
+      ...(x.optionLabel ? { optionLabel: x.optionLabel } : {}),
+      status: x.state === 'failed' ? 'failed' : hand ? 'awaiting-handoff' : 'pending',
+      ...(x.error ? { error: x.error } : {}),
+    }));
+    updateGeneration(ctx, (g) => {
+      g.planned = planned;
+    });
+    if (hand) {
+      enterHandoff(ctx, planned);
+      return;
+    }
+    patchRunInfo(generationId, { stage: 'rendering', slots });
+    publishProgress(ctx);
 
     // 2. Render, up to CONCURRENCY at a time; each variation succeeds or fails on its own.
     const queue = slots.filter((x) => x.state === 'pending').map((x) => x.key);
@@ -665,10 +850,54 @@ async function execute(
     if (!currentGeneration(ctx)) abandon(ctx);
     else if (!othersBusy(ctx)) finish(ctx);
   } catch (err) {
+    closeReview(generationId);
     if (ctx.cancelled) return;
     if (!currentGeneration(ctx)) abandon(ctx);
     else if (!isAbortError(err)) failRun(ctx, errorMessage(err));
   }
+}
+
+/** Slots after the review: edited titles / instructions; items the user removed are dropped. */
+function applyReview(slots: RunSlot[], reviewed: readonly ReviewItem[]): RunSlot[] {
+  const byKey = new Map(reviewed.map((r) => [r.key, r]));
+  return slots
+    .filter((x) => byKey.has(x.key))
+    .map((x) => {
+      const r = byKey.get(x.key)!;
+      return { ...x, title: r.title.trim() || x.title, brief: r.brief.trim() || x.brief };
+    });
+}
+
+/**
+ * Hand-off run: planning is over and the variations wait for the user to
+ * render them in ChatGPT / Gemini. The live run ends here; the persisted
+ * plan (Generation.planned) drives the companion, staging and the strip.
+ */
+function enterHandoff(ctx: RunContext, planned: PlannedVariation[]): void {
+  ctx.active = false;
+  ctx.inputs = null;
+  state().setRunProgress(ctx.generationId, null);
+  contexts.delete(ctx.generationId);
+  forgetRunInfo(ctx.generationId);
+  updateGeneration(ctx, (g) => {
+    const r = rollupStatus(g);
+    g.status = r.status;
+    if (r.error) g.error = r.error;
+    else delete g.error;
+  });
+  const first = planned.find((p) => p.status === 'awaiting-handoff');
+  if (!first) return;
+  const s = state();
+  if (s.project?.id === ctx.projectId && s.selection.photoId === ctx.photoId) {
+    focusHandoff({ photoId: ctx.photoId, generationId: ctx.generationId, plannedId: first.id });
+  }
+  const n = planned.filter((p) => p.status === 'awaiting-handoff').length;
+  s.notify(
+    n === 1
+      ? `Ready for ${appLabel(ctx.app)} — follow the steps in the hand-off card.`
+      : `${n} variations ready for ${appLabel(ctx.app)} — one at a time, each in a new chat. Do some now and the rest later if you like.`,
+    'success',
+  );
 }
 
 /** The run (or its project) went away mid-flight: stop and forget it. */
@@ -680,6 +909,7 @@ function abandon(ctx: RunContext): void {
   state().setRunProgress(ctx.generationId, null);
   contexts.delete(ctx.generationId);
   forgetRunInfo(ctx.generationId);
+  closeReview(ctx.generationId);
 }
 
 let watchingStore = false;
@@ -744,6 +974,7 @@ async function renderSlot(ctx: RunContext, photo: Photo, inputs: RenderInputs, k
     };
     if (slot.optionId) variation.optionId = slot.optionId;
     if (slot.optionLabel) variation.optionLabel = slot.optionLabel;
+    variation.source = { kind: 'api', model: `${result.provider} ${result.model}`.trim() };
     state().addVariation(ctx.photoId, generationId, variation);
     if (!ctx.providerRecorded) {
       ctx.providerRecorded = true;
@@ -753,9 +984,11 @@ async function renderSlot(ctx: RunContext, photo: Photo, inputs: RenderInputs, k
       });
     }
     patchSlot(generationId, key, { state: 'done', variationId: variation.id });
+    patchPlanned(ctx, key, { status: 'done', variationId: variation.id, error: undefined });
   } catch (err) {
     if (ctx.cancelled || isAbortError(err)) return;
     patchSlot(generationId, key, { state: 'failed', error: errorMessage(err) });
+    patchPlanned(ctx, key, { status: 'failed', error: errorMessage(err) });
   } finally {
     publishProgress(ctx);
   }
@@ -796,6 +1029,11 @@ function failRun(ctx: RunContext, message: string): void {
   updateGeneration(ctx, (g) => {
     g.status = g.variations.length > 0 ? 'partial' : 'failed';
     g.error = message;
+    for (const p of g.planned ?? []) {
+      if (p.status === 'done') continue;
+      p.status = 'failed';
+      p.error = message;
+    }
   });
   if (currentGeneration(ctx)) state().notify(`Generation failed: ${message}`, 'error');
 }

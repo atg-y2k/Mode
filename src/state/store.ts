@@ -684,9 +684,13 @@ export const useStore = create<AppState>()((set, get) => {
 
     async addPhotos(spaceId, files) {
       const ids: string[] = [];
+      // GPS / compass heading / capture time come from the ORIGINAL file: importing
+      // re-encodes the photo, which strips EXIF. Loaded on demand; never blocks an import.
+      const readCapture = (file: File) =>
+        import('../site/capture').then((m) => m.readPhotoCapture(file)).catch(() => undefined);
       for (const file of files) {
         try {
-          const imported = await importImageFile(file);
+          const [imported, capture] = await Promise.all([importImageFile(file), readCapture(file)]);
           const photoId = newId('pho');
           const imageId = newId('img');
           const thumbId = newId('img');
@@ -704,6 +708,7 @@ export const useStore = create<AppState>()((set, get) => {
             generations: [],
             designs: [design],
             activeDesignId: design.id,
+            ...(capture ? { capture } : {}),
           };
           get().mutateProject('Add photo', (d) => {
             d.spaces.find((s) => s.id === spaceId)?.photos.push(photo);

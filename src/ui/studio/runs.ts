@@ -5,7 +5,8 @@
  * working. Written by generate.ts, read by the variation strip and the
  * compare grid (useRunInfo). In memory only — after a reload, finished
  * variations come from the project and unfinished runs are marked
- * interrupted (see recoverInterruptedRuns in generate.ts).
+ * interrupted (see recoverInterruptedRuns in generate.ts); runs record their
+ * plan on Generation.planned, so failed variations stay retryable.
  */
 import { useSyncExternalStore } from 'react';
 
@@ -29,8 +30,12 @@ export interface RunSlot {
 export interface RunInfo {
   generationId: string;
   photoId: string;
-  /** 'planning' → 'rendering' → 'finished' (also after cancel / failure). */
-  stage: 'planning' | 'rendering' | 'finished';
+  /**
+   * 'planning' → 'review' (waiting for the user to Send, when the review step
+   * is shown) → 'rendering' → 'finished' (also after cancel / failure).
+   * Hand-off runs end after the review: their planned items are persisted.
+   */
+  stage: 'planning' | 'review' | 'rendering' | 'finished';
   slots: RunSlot[];
 }
 

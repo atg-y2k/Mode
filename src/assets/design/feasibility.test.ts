@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import type { AssetDef, PlantInfo } from '../../../shared/types';
+import { invasivesReady, setInvasivesData } from '../../site/invasives';
 import { paletteFeasibility, profileFeasibility, shortPlantName } from './feasibility';
 import { deerPressureFromNotes, dominantSun, feasibilityContext, optionFeasibility, parseHardinessZone, withPlantFeasibility } from './spec';
 import { plantFeasibility } from './index';
@@ -94,6 +95,33 @@ describe('plantFeasibility', () => {
     expect(barberry.reasons.join(' ')).toMatch(/invasive/i);
   });
 
+  it('grades deer advice by deer pressure (low / medium / high)', () => {
+    const favorite = plant({ deerResistant: false });
+    const high = plantFeasibility(favorite, { zone: 6, deerPressure: 'high' });
+    expect(high.rating).toBe('caution');
+    expect(high.reasons[0]).toMatch(/deer pressure is high here/);
+    expect(plantFeasibility(favorite, { zone: 6, deerPressure: 'medium' }).reasons[0]).toBe('Deer favorite — protect it or choose a deer-resistant plant');
+    // true (deer noted in the climate profile) reads like medium; low / false skip deer advice entirely.
+    expect(plantFeasibility(favorite, { zone: 6, deerPressure: true }).reasons[0]).toBe('Deer favorite — protect it or choose a deer-resistant plant');
+    for (const none of ['low', false] as const) {
+      const f = plantFeasibility(favorite, { zone: 6, deerPressure: none });
+      expect(f.rating).toBe('good');
+      expect(f.reasons.join(' ')).not.toMatch(/deer/i);
+    }
+    // Unknown pressure: a note only.
+    const unknown = plantFeasibility(favorite, { zone: 6 });
+    expect(unknown.rating).toBe('good');
+    expect(unknown.reasons).toContain('Browsed by deer where they are common');
+    // Resistant plants are confirmed under any pressure; unrated ones get a hint under high pressure.
+    expect(plantFeasibility(plant({ deerResistant: true }), { zone: 6, deerPressure: 'high' }).reasons).toContain('Deer resistant ✓');
+    expect(plantFeasibility(plant({ deerResistant: true }), { zone: 6, deerPressure: 'low' }).reasons).not.toContain('Deer resistant ✓');
+    const unrated = plantFeasibility(plant({}), { zone: 6, deerPressure: 'high' });
+    expect(unrated.rating).toBe('good');
+    expect(unrated.reasons.join(' ')).toMatch(/Deer resistance not rated/);
+    // Interior plants never get deer advice.
+    expect(plantFeasibility(favorite, { setting: 'interior', deerPressure: 'high' }).reasons.join(' ')).not.toMatch(/deer/i);
+  });
+
   it('evaluates houseplants indoors by light and outdoors as summer containers', () => {
     const fig = plant({ type: 'houseplant', indoor: true, zoneMin: undefined, zoneMax: undefined, sun: ['full-sun', 'part-sun'] }, 'Fiddle-leaf fig');
     expect(plantFeasibility(fig, { zone: 6, setting: 'interior', sun: 'part-sun' }).rating).toBe('good');
@@ -110,6 +138,81 @@ describe('plantFeasibility', () => {
     const asset = plant({});
     delete asset.plant;
     expect(plantFeasibility(asset, { zone: 6 }).rating).toBe('caution');
+  });
+});
+
+describe('US-RIIS invasive reasons', () => {
+  afterEach(() => setInvasivesData(null));
+  const RIIS = {
+    rows: [
+      ['Prunus laurocerasus', 'Cherry laurel', '300'],
+      ['Lavandula angustifolia', 'English lavender', '100'],
+      ['Cynodon dactylon', 'Bermudagrass', '303'],
+      ['Zoysia japonica', 'Zoysiagrass', '100'],
+      ['Berberis thunbergii', 'Japanese barberry', '300'],
+      ['Euonymus fortunei var. radicans', 'Climbing euonymus', '200'],
+      ['Ficus elastica', 'Indian rubberplant', '202'],
+      ['Mentha X piperita', 'Peppermint', '020'],
+    ] as [string, string, string][],
+  };
+
+  it('adds nothing until the list has loaded (rating stays synchronous)', () => {
+    expect(invasivesReady()).toBe(false);
+    expect(plantFeasibility(plant({ botanical: "Prunus laurocerasus 'Otto Luyken'" }), { zone: 7 }).rating).toBe('good');
+  });
+
+  it('cautions on plants listed invasive in the region, with the source', () => {
+    setInvasivesData(RIIS);
+    const f = plantFeasibility(plant({ botanical: "Prunus laurocerasus 'Schipkaensis'" }, 'Skip laurel'), { zone: 7 });
+    expect(f.rating).toBe('caution');
+    expect(f.reasons[0]).toBe(
+      "Invasive risk: Cherry laurel (Prunus laurocerasus) is listed as a widespread invasive in the lower 48 states (USGS US-RIIS v2.0) — check your state's invasive plant list before planting",
+    );
+  });
+
+  it('keeps the curated regional note when both lists know the plant', () => {
+    setInvasivesData(RIIS);
+    const f = plantFeasibility(plant({ botanical: 'Berberis thunbergii' }, 'Japanese barberry'), { zone: 6 });
+    const invasive = f.reasons.filter((r) => /invasive/i.test(r));
+    expect(invasive).toHaveLength(1);
+    expect(invasive[0]).toMatch(/East and Midwest/);
+  });
+
+  it('ignores "established" (introduced, not invasive) plants', () => {
+    setInvasivesData(RIIS);
+    expect(plantFeasibility(plant({ botanical: "Lavandula angustifolia 'Hidcote'" }), { zone: 6 }).reasons.join(' ')).not.toMatch(/invasive|US-RIIS/i);
+  });
+
+  it('treats spreading lawn grasses as a note, checking every species of a mix', () => {
+    setInvasivesData(RIIS);
+    const lawn = plant({ type: 'grass', botanical: 'Zoysia japonica / Cynodon dactylon', matureWidthFt: 0, matureHeightFt: 0.2 }, 'Zoysia / Bermuda grass');
+    const f = plantFeasibility(lawn, { zone: 8 });
+    expect(f.rating).toBe('good');
+    expect(f.reasons.join(' ')).toMatch(/^.*Spreads beyond the lawn: Bermudagrass \(Cynodon dactylon\)/);
+  });
+
+  it('uses the property region (Hawaii lists differ from the lower 48)', () => {
+    setInvasivesData(RIIS);
+    const rubber = plant({ type: 'tree', botanical: 'Ficus elastica', zoneMin: 10, zoneMax: 12 }, 'Rubber tree');
+    expect(plantFeasibility(rubber, { zone: 11, setting: 'exterior' }).reasons.join(' ')).toMatch(/invasive in the lower 48/);
+    expect(plantFeasibility(rubber, { zone: 11, setting: 'exterior', locality: 'HI' }).reasons.join(' ')).toMatch(/invasive in Hawaii/);
+    const mint = plant({ type: 'perennial', botanical: 'Mentha × piperita' }, 'Peppermint');
+    expect(plantFeasibility(mint, { zone: 6 }).reasons.join(' ')).not.toMatch(/invasive/i);
+    expect(plantFeasibility(mint, { zone: 4, locality: 'AK' }).rating).toBe('caution');
+  });
+
+  it('notes when only some forms of a species are listed', () => {
+    setInvasivesData(RIIS);
+    const f = plantFeasibility(plant({ botanical: "Euonymus fortunei 'Emerald Gaiety'" }), { zone: 6 });
+    expect(f.rating).toBe('good');
+    expect(f.reasons.join(' ')).toMatch(/Euonymus fortunei var\. radicans \(a form of this species\)/);
+  });
+
+  it('flags palettes that include a listed plant, naming it', () => {
+    setInvasivesData({ rows: [...RIIS.rows, ['Acer palmatum', 'Japanese maple', '300']] });
+    const f = paletteFeasibility([PLANT_PROFILES['japanese-maple'], PLANT_PROFILES.coneflower], 'all', { zone: 6, sun: 'full-sun' });
+    expect(f?.rating).toBe('caution');
+    expect(f?.reasons[0]).toMatch(/^Japanese maple: Invasive risk: Japanese maple \(Acer palmatum\)/);
   });
 });
 

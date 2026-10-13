@@ -1,0 +1,28 @@
+import { createRequire } from 'node:module';
+import { it } from 'vitest';
+import { resolveOpenCv } from './cv';
+import { runImport } from './pipeline';
+import { renderHandoff } from './prepare';
+import { ellipseMask, simulateReturn, texturedScene } from './testing';
+it('probe', async () => {
+  const cv = await resolveOpenCv(createRequire(import.meta.url)('@techstark/opencv-js'));
+  const W = 1200, H = 900;
+  const scene = texturedScene(W, H, 11);
+  const target = ellipseMask(W, H, 600, 650, 150, 70);
+  let t = performance.now();
+  const exp = renderHandoff(scene, target, { app: 'gemini' });
+  console.log('render ms', Math.round(performance.now() - t), exp.mode, exp.crop, exp.outW, exp.outH, exp.ratio, exp.markerColor, exp.coverage.toFixed(3));
+  const sim = simulateReturn(exp.marked, exp.crop, target);
+  t = performance.now();
+  const res = runImport(cv, { original: scene, target, crop: exp.crop, outW: exp.outW, outH: exp.outH, returned: sim.returned });
+  console.log('import ms', Math.round(performance.now() - t), res.report, res.alignNote, res.colorFit, res.outsideChangeMap.width, res.outsideChangeMap.height);
+  const big = ellipseMask(W, H, 600, 450, 420, 300);
+  const full = renderHandoff(scene, big, { app: 'chatgpt' });
+  const sim2 = simulateReturn(full.marked, full.crop, big, { scale: 0.75, zoom: 1.0, shift: { x: 4, y: 3 } });
+  t = performance.now();
+  const res2 = runImport(cv, { original: scene, target: big, crop: full.crop, outW: full.outW, outH: full.outH, returned: sim2.returned });
+  console.log('full', full.crop, full.outW, full.outH, 'ms', Math.round(performance.now() - t), res2.report, res2.alignNote);
+  const other = texturedScene(exp.outW, exp.outH, 99);
+  const res3 = runImport(cv, { original: scene, target, crop: exp.crop, outW: exp.outW, outH: exp.outH, returned: other });
+  console.log('unrelated', res3.report, res3.alignNote);
+}, 60000);

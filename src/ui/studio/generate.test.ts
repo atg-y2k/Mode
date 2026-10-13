@@ -1,11 +1,35 @@
 import 'fake-indexeddb/auto';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HealthResponse } from '../../../shared/api';
 import { emptyBrief, type DesignBrief, type Generation, type Photo, type Project, type SceneMap } from '../../../shared/types';
+import { createImageDataLike } from '../../engine/types';
 import { createMask } from '../../engine/mask';
+import * as db from '../../state/persistence';
 import * as runtime from '../../state/runtime';
 import { findPhoto, newDesign, useStore } from '../../state/store';
-import { INTERRUPTED, buildTargetMask, cancelRun, generationBlocker, recoverInterruptedRuns, startRun } from './generate';
+import { INTERRUPTED, buildTargetMask, cancelRun, generationBlocker, recoverInterruptedRuns, retryVariation, startRun } from './generate';
+import { declineReview, registerReviewHost, submitReview, useReview } from './handoff/review';
+import { handoffSession, setHandoffSession } from './handoff/session';
+
+// Node has no image decoding: stand-ins for the browser codecs used by runs.
+vi.mock('../../lib/imageImport', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('../../lib/imageImport')>();
+  return {
+    ...orig,
+    blobToAIDataUrl: async () => 'data:image/jpeg;base64,AAAA',
+    blobToDataUrl: async () => 'data:image/jpeg;base64,AAAA',
+    imageDataToBlob: async () => new Blob(['img'], { type: 'image/jpeg' }),
+    dataUrlToBlob: async () => new Blob(['img'], { type: 'image/png' }),
+  };
+});
+vi.mock('./composite', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('./composite')>();
+  return {
+    ...orig,
+    compositeVariation: async (_blob: Blob, base: { width: number; height: number }) => createImageDataLike(base.width, base.height),
+    thumbnailBlob: async () => new Blob(['thumb'], { type: 'image/jpeg' }),
+  };
+});
 
 const W = 120;
 const H = 90;
@@ -109,9 +133,39 @@ function setup(draft: DesignBrief | undefined, generations: Generation[] = []): 
     runs: {},
     past: [],
     future: [],
-    studio: { ...useStore.getState().studio, viewVariationId: null, gridGenerationId: null, variationCount: 3, provider: null },
+    studio: { ...useStore.getState().studio, viewVariationId: null, gridGenerationId: null, variationCount: 3, provider: null, renderMode: 'api', handoffApp: 'chatgpt' },
   });
   return photo;
+}
+
+const NO_PROVIDERS: HealthResponse = { ...HEALTHY, ai: { enabled: false, model: null }, imageProvider: { enabled: false, name: null, model: null }, imageProviders: [] };
+
+/** Photo pixels "in storage" + a fake API: plan (template) and render endpoints. */
+function fakeBackend(opts: { failRender?: boolean } = {}) {
+  const calls: { path: string; body: Record<string, unknown> }[] = [];
+  vi.spyOn(runtime, 'loadPhotoImage').mockResolvedValue(createImageDataLike(W, H, { r: 120, g: 140, b: 90 }));
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (path: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body ?? '{}')) as Record<string, unknown>;
+      calls.push({ path, body });
+      if (path === '/api/studio/plan') {
+        const count = body.count as number;
+        const json = {
+          plan: 'Lavender drifts in the bed; the house stays as it is.',
+          plants: [],
+          variations: Array.from({ length: count }, (_, i) => ({ title: `Take ${i + 1}`, brief: `Edit the bed: take ${i + 1}.`, optionId: null })),
+        };
+        return new Response(JSON.stringify(json), { status: 200, headers: { 'Content-Type': 'application/json', 'X-Mode-Plan-Source': 'template' } });
+      }
+      if (path === '/api/studio/render-variation') {
+        if (opts.failRender) return new Response(JSON.stringify({ error: { code: 'upstream_error', message: 'Provider timed out.' } }), { status: 502 });
+        return new Response(JSON.stringify({ image: 'data:image/png;base64,AAAA', provider: 'openai', model: 'gpt-image-1' }), { status: 200 });
+      }
+      return new Response('{}', { status: 404 });
+    }),
+  );
+  return calls;
 }
 
 const currentPhoto = () => findPhoto(useStore.getState().project, 'pho')!.photo;
@@ -134,9 +188,13 @@ describe('generationBlocker', () => {
     expect(generationBlocker({ health: null })).toBeNull();
     expect(generationBlocker({ health: HEALTHY })).toBeNull();
     expect(generationBlocker({ health: { ...HEALTHY, ok: false } })).toMatch(/server/);
-    expect(generationBlocker({ health: { ...HEALTHY, imageProvider: { enabled: false, name: null, model: null }, imageProviders: [] } })).toMatch(
-      /OPENAI_API_KEY or GEMINI_API_KEY/,
-    );
+    expect(generationBlocker({ health: NO_PROVIDERS }, 'api')).toMatch(/OPENAI_API_KEY or GEMINI_API_KEY/);
+  });
+
+  it('never asks for an image provider in hand-off mode (and API mode falls back to hand-off without one)', () => {
+    expect(generationBlocker({ health: NO_PROVIDERS }, 'handoff')).toBeNull();
+    expect(generationBlocker({ health: NO_PROVIDERS, studio: { renderMode: 'api' } })).toBeNull();
+    expect(generationBlocker({ health: { ...NO_PROVIDERS, ok: false } }, 'handoff')).toMatch(/server/);
   });
 });
 
@@ -151,8 +209,8 @@ describe('startRun', () => {
       /no longer in the brief/,
     );
     await expect(startRun({ photoId: 'pho', mode: 'variations', feedback: 'wider' })).rejects.toThrow(/variation to refine/);
-    useStore.setState({ health: { ...HEALTHY, imageProvider: { enabled: false, name: null, model: null }, imageProviders: [] } });
-    await expect(startRun({ photoId: 'pho', mode: 'variations', brief: { ...emptyBrief(), prompt: 'x' } })).rejects.toThrow(/image provider/);
+    useStore.setState({ health: NO_PROVIDERS });
+    await expect(startRun({ photoId: 'pho', mode: 'variations', brief: { ...emptyBrief(), prompt: 'x' }, renderMode: 'api' })).rejects.toThrow(/OPENAI_API_KEY/);
     expect(currentPhoto().generations).toHaveLength(0);
   });
 
@@ -181,6 +239,92 @@ describe('startRun', () => {
     const g = currentPhoto().generations.find((x) => x.id === id)!;
     expect(g.error).toMatch(/missing from storage/);
     expect(useStore.getState().runs[id]).toBeUndefined();
+  });
+});
+
+describe('hand-off runs', () => {
+  beforeEach(async () => {
+    vi.restoreAllMocks();
+    setHandoffSession({ active: null, companion: 'closed' });
+    await db.putBlob('img-photo', new Blob(['photo'], { type: 'image/jpeg' }));
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  const draft = { ...emptyBrief(), prompt: 'Lavender in the bed', targetZoneIds: ['bed'] };
+
+  it('plans (template plan without Claude), then waits for the user with one planned item per variation', async () => {
+    setup(draft);
+    const p = currentPhoto();
+    useStore.getState().mutateProject('x', (d) => void (d.spaces[0].photos[0].imageId = 'img-photo'), { history: false });
+    useStore.setState({ health: NO_PROVIDERS, studio: { ...useStore.getState().studio, renderMode: 'handoff', handoffApp: 'gemini' } });
+    const calls = fakeBackend();
+    const id = await startRun({ photoId: p.id, mode: 'variations', count: 2 });
+    expect(useStore.getState().studio.gridGenerationId).toBeNull();
+    await vi.waitFor(() => expect(currentPhoto().generations[0].status).toBe('awaiting'));
+    const g = currentPhoto().generations[0];
+    expect(g.id).toBe(id);
+    expect(g.renderMode).toBe('handoff');
+    expect(g.provider).toBe('Gemini');
+    expect(g.plan).toMatch(/Lavender/);
+    expect(g.planned?.map((x) => [x.title, x.brief, x.status])).toEqual([
+      ['Take 1', 'Edit the bed: take 1.', 'awaiting-handoff'],
+      ['Take 2', 'Edit the bed: take 2.', 'awaiting-handoff'],
+    ]);
+    expect(useStore.getState().runs[id]).toBeUndefined();
+    expect(handoffSession().active).toEqual({ photoId: 'pho', generationId: id, plannedId: g.planned![0].id });
+    expect(handoffSession().companion).toBe('open');
+    // Only the plan was requested — nothing is rendered through an API.
+    expect(calls.map((c) => c.path)).toEqual(['/api/studio/plan']);
+  });
+
+  it('waits for the review: edited instructions are used, removed ones dropped; declining removes the run', async () => {
+    setup(draft);
+    useStore.getState().mutateProject('x', (d) => void (d.spaces[0].photos[0].imageId = 'img-photo'), { history: false });
+    useStore.setState({ health: NO_PROVIDERS, studio: { ...useStore.getState().studio, renderMode: 'handoff' } });
+    fakeBackend();
+    const unregister = registerReviewHost();
+    try {
+      const id = await startRun({ photoId: 'pho', mode: 'variations', count: 3 });
+      expect(useReview.getState().current).toMatchObject({ generationId: id, stage: 'planning', renderMode: 'handoff', count: 3 });
+      await vi.waitFor(() => expect(useReview.getState().current?.stage).toBe('ready'));
+      const review = useReview.getState().current!;
+      expect(review.planSource).toBe('template');
+      expect(review.items).toHaveLength(3);
+      expect(currentPhoto().generations[0].status).toBe('running');
+      submitReview(id, [{ ...review.items![0], brief: 'Only lavender, 3 ft drifts.' }, review.items![2]]);
+      await vi.waitFor(() => expect(currentPhoto().generations[0].status).toBe('awaiting'));
+      expect(currentPhoto().generations[0].planned?.map((x) => x.brief)).toEqual(['Only lavender, 3 ft drifts.', 'Edit the bed: take 3.']);
+      expect(useReview.getState().current).toBeNull();
+
+      const id2 = await startRun({ photoId: 'pho', mode: 'variations', count: 1 });
+      await vi.waitFor(() => expect(useReview.getState().current?.stage).toBe('ready'));
+      declineReview(id2);
+      cancelRun(id2);
+      await vi.waitFor(() => expect(currentPhoto().generations.map((g) => g.id)).toEqual([id]));
+    } finally {
+      unregister();
+    }
+  });
+
+  it('API runs record their plan, and a failed variation can be retried after a reload', async () => {
+    setup(draft);
+    useStore.getState().mutateProject('x', (d) => void (d.spaces[0].photos[0].imageId = 'img-photo'), { history: false });
+    fakeBackend({ failRender: true });
+    const id = await startRun({ photoId: 'pho', mode: 'variations', count: 1, showGrid: false });
+    await vi.waitFor(() => expect(currentPhoto().generations[0].status).toBe('failed'));
+    let g = currentPhoto().generations[0];
+    expect(g.renderMode).toBe('api');
+    expect(g.planned).toEqual([expect.objectContaining({ title: 'Take 1', status: 'failed', error: expect.stringMatching(/timed out/) })]);
+
+    // "Reload": the live run state is gone; the recorded plan is enough to retry without planning again.
+    const key = g.planned![0].id;
+    const calls = fakeBackend();
+    await retryVariation(id, key);
+    await vi.waitFor(() => expect(currentPhoto().generations[0].status).toBe('done'));
+    g = currentPhoto().generations[0];
+    expect(g.planned?.[0]).toMatchObject({ status: 'done', variationId: g.variations[0].id });
+    expect(g.variations[0]).toMatchObject({ title: 'Take 1', brief: 'Edit the bed: take 1.', source: { kind: 'api' } });
+    expect(calls.map((c) => c.path)).toEqual(['/api/studio/render-variation']);
   });
 });
 

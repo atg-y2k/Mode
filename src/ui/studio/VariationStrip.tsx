@@ -1,11 +1,13 @@
 /**
  * The variations strip: the original, then every run of this photo (newest
  * first), each labeled with its plan (compare runs: the compared question)
- * and its plants' feasibility; thumbnails with favorite stars and option
- * labels, live placeholders while planning / rendering, failed tiles with
- * retry. Click a tile to view it; each tile has the full action menu.
+ * and its plants' feasibility; thumbnails with favorite stars, option labels
+ * and provenance (ChatGPT / Gemini / API + an alignment warning), live
+ * placeholders while planning / rendering, hand-offs waiting for the user
+ * (click → the hand-off card) or back for review (click → staging), failed
+ * tiles with retry. Click a tile to view it; each tile has the full action menu.
  */
-import { GitCompareArrows, ImageOff, LayoutGrid, Loader2, PenLine, RotateCcw, Sparkles, Star, Trash2, TriangleAlert, X } from 'lucide-react';
+import { GitCompareArrows, ImageOff, LayoutGrid, Loader2, PenLine, RotateCcw, ScanSearch, Sparkles, Star, Trash2, TriangleAlert, X } from 'lucide-react';
 import { useEffect, useRef, type ReactNode } from 'react';
 import type { Generation, Photo, Variation } from '../../../shared/types';
 import { useStore } from '../../state/store';
@@ -13,6 +15,10 @@ import { cn } from '../common';
 import { viewVariation } from './actions';
 import { PlantSummaryChip } from './Feasibility';
 import { INTERRUPTED, cancelRun, retryRun, retryVariation } from './generate';
+import { openHandoff, openStaging, retryPrepare } from './handoff/actions';
+import { AppIcon, SourceTag } from './handoff/bits';
+import { appLabel, sameRef } from './handoff/planned';
+import { useHandoffSession } from './handoff/session';
 import { useBlobUrl } from './hooks';
 import { useRunInfo } from './runs';
 import { compareContext, runTiles, type Tile } from './tiles';
@@ -40,6 +46,18 @@ export function runTitle(g: Generation): string {
   if (g.brief.prompt.trim()) return g.brief.prompt.trim();
   if (g.brief.elements.length) return g.brief.elements.map((e) => e.label).join(' + ');
   return g.status === 'running' ? 'Planning…' : 'Run';
+}
+
+/** Header chip of a run that isn't simply done. */
+function statusText(g: Generation, failedCount: number, waiting: number, back: number): string {
+  if (g.status === 'awaiting') {
+    if (back > 0 && waiting === 0) return `${back} to review`;
+    return back > 0 ? `${waiting} waiting · ${back} back` : `${waiting} waiting`;
+  }
+  if (g.error === INTERRUPTED) return 'Interrupted';
+  if (g.error?.startsWith('Cancelled')) return 'Cancelled';
+  if (g.status === 'failed') return 'Failed';
+  return failedCount > 0 ? `${failedCount} failed` : 'Partial';
 }
 
 function Thumb({ id, alt }: { id: string; alt: string }) {
@@ -104,10 +122,11 @@ function VariationTile({ photo, g, tile, width, selected }: { photo: Photo; g: G
       <TileFrame width={width} selected={selected} onClick={() => viewVariation(v.id)} label={`${tile.label}${g.mode === 'compare' ? '' : ` — ${v.title}`}`}>
         <Thumb id={v.thumbId} alt={v.title} />
         {(g.mode === 'compare' || v.optionLabel) && (
-          <span className="absolute inset-x-0 bottom-0 truncate bg-gradient-to-t from-black/75 to-transparent px-1.5 pt-3 pb-1 text-left text-[10px] font-medium text-white">
+          <span className="absolute inset-x-0 bottom-0 truncate bg-gradient-to-t from-black/75 to-transparent px-1.5 pt-3 pb-1 pr-10 text-left text-[10px] font-medium text-white">
             {v.optionLabel ?? v.title}
           </span>
         )}
+        <SourceTag source={v.source} className="absolute right-1 bottom-1" />
       </TileFrame>
       <button
         type="button"
@@ -143,8 +162,50 @@ function PendingTile({ tile, width, planning }: { tile: Tile; width: number; pla
   );
 }
 
-function FailedTile({ g, tile, width }: { g: Generation; tile: Tile; width: number }) {
+/** A hand-off waiting for the user: opens the hand-off card. */
+function AwaitingTile({ photo, g, tile, width }: { photo: Photo; g: Generation; tile: Tile; width: number }) {
+  const ref = { photoId: photo.id, generationId: g.id, plannedId: tile.plannedId as string };
+  const active = useHandoffSession((s) => sameRef(s.active, ref));
+  const job = useHandoffSession((s) => s.jobs[ref.plannedId]);
+  const app = tile.app;
+  return (
+    <TileFrame
+      width={width}
+      selected={active}
+      onClick={() => openHandoff(ref)}
+      label={`${tile.label || 'Variation'} — waiting for ${app ? appLabel(app) : 'the hand-off'}`}
+      className="border border-dashed border-line-strong bg-surface-2"
+    >
+      <div className="flex h-full flex-col items-center justify-center gap-1 px-1.5 text-center">
+        {job ? <Loader2 className="size-4 animate-spin text-accent" /> : <AppIcon app={app} className="size-4 text-accent" />}
+        <span className="line-clamp-2 text-[10px] leading-tight font-medium text-text">{tile.label || 'Waiting'}</span>
+        <span className="text-[9px] text-muted">{job?.kind === 'importing' ? 'Lining up…' : app ? `Waiting · ${appLabel(app)}` : 'Waiting'}</span>
+      </div>
+    </TileFrame>
+  );
+}
+
+/** A returned hand-off waiting for Accept / Reject: opens staging. */
+function StagedTile({ photo, g, tile, width }: { photo: Photo; g: Generation; tile: Tile; width: number }) {
+  const ref = { photoId: photo.id, generationId: g.id, plannedId: tile.plannedId as string };
+  const open = useHandoffSession((s) => sameRef(s.staging, ref));
+  return (
+    <TileFrame width={width} selected={open} onClick={() => openStaging(ref)} label={`${tile.label || 'Variation'} — back, review it`}>
+      {tile.staged && <Thumb id={tile.staged.thumbId} alt={tile.label} />}
+      <span className="absolute inset-0 bg-black/25" />
+      <span className="absolute top-1 left-1 inline-flex items-center gap-0.5 rounded-full bg-accent px-1.5 py-0.5 text-[9px] font-bold text-accent-fg shadow">
+        <ScanSearch className="size-2.5" /> Review
+      </span>
+      <span className="absolute inset-x-0 bottom-0 truncate bg-gradient-to-t from-black/75 to-transparent px-1.5 pt-3 pb-1 text-left text-[10px] font-medium text-white">
+        {tile.label}
+      </span>
+    </TileFrame>
+  );
+}
+
+function FailedTile({ photo, g, tile, width }: { photo: Photo; g: Generation; tile: Tile; width: number }) {
   const missing = tile.state === 'missing';
+  const handoff = g.renderMode === 'handoff' && !!tile.plannedId;
   return (
     <TileFrame width={width} label={`${tile.label || 'Variation'} — ${missing ? 'not rendered' : `failed: ${tile.error ?? ''}`}`} className="bg-danger-soft">
       <div className="flex h-full flex-col items-center justify-center gap-1 px-1.5 text-center">
@@ -155,7 +216,9 @@ function FailedTile({ g, tile, width }: { g: Generation; tile: Tile; width: numb
         <button
           type="button"
           onClick={() =>
-            void (tile.slotKey ? retryVariation(g.id, tile.slotKey) : retryRun(g.id).catch((err: Error) => useStore.getState().notify(err.message, 'error')))
+            handoff
+              ? retryPrepare({ photoId: photo.id, generationId: g.id, plannedId: tile.plannedId as string })
+              : void (tile.slotKey ? retryVariation(g.id, tile.slotKey) : retryRun(g.id).catch((err: Error) => useStore.getState().notify(err.message, 'error')))
           }
           className="inline-flex h-6 items-center gap-1 rounded-full bg-surface px-2 text-[10px] font-semibold text-text shadow-sm hover:bg-surface-2 focus-visible:outline-2 focus-visible:outline-accent"
         >
@@ -186,10 +249,12 @@ function RunGroup({ photo, g, tileW, viewId, gridOpen }: { photo: Photo; g: Gene
   const tiles = runTiles(g, info);
   const running = g.status === 'running' && !!progress;
   const failedCount = tiles.filter((t) => t.state === 'failed' || t.state === 'missing').length;
+  const waiting = tiles.filter((t) => t.state === 'awaiting').length;
+  const back = tiles.filter((t) => t.state === 'staged').length;
   const title = runTitle(g);
   const icon =
     g.mode === 'compare' ? <GitCompareArrows className="size-3.5" /> : g.baseVariationId ? <PenLine className="size-3.5" /> : <Sparkles className="size-3.5" />;
-  const planning = info?.stage === 'planning';
+  const planning = info?.stage === 'planning' || info?.stage === 'review';
 
   return (
     <section
@@ -205,23 +270,15 @@ function RunGroup({ photo, g, tileW, viewId, gridOpen }: { photo: Photo; g: Gene
           {title}
         </span>
         {running && <Loader2 className="size-3.5 shrink-0 animate-spin text-accent" aria-label="Running" />}
-        {!running && g.status !== 'done' && (
+        {!running && g.status !== 'done' && g.status !== 'running' && (
           <span
             className={cn(
               'shrink-0 rounded-full px-1.5 py-px text-[10px] font-semibold',
-              g.status === 'failed' ? 'bg-danger-soft text-danger' : 'bg-warning/15 text-warning',
+              g.status === 'awaiting' ? 'bg-accent-soft text-accent' : g.status === 'failed' ? 'bg-danger-soft text-danger' : 'bg-warning/15 text-warning',
             )}
-            title={g.error}
+            title={g.status === 'awaiting' ? `Hand-off to ${g.provider}: render each variation in the app and bring it back` : g.error}
           >
-            {g.error === INTERRUPTED
-              ? 'Interrupted'
-              : g.error?.startsWith('Cancelled')
-                ? 'Cancelled'
-                : g.status === 'failed'
-                  ? 'Failed'
-                  : failedCount > 0
-                    ? `${failedCount} failed`
-                    : 'Partial'}
+            {statusText(g, failedCount, waiting, back)}
           </span>
         )}
         {g.plantNotes && g.plantNotes.length > 0 && <PlantSummaryChip notes={g.plantNotes} compact />}
@@ -235,7 +292,8 @@ function RunGroup({ photo, g, tileW, viewId, gridOpen }: { photo: Photo; g: Gene
             <X className="size-3.5" />
           </HeaderButton>
         ) : (
-          (g.status === 'failed' || g.status === 'partial') && (
+          (g.status === 'failed' || g.status === 'partial') &&
+          g.renderMode !== 'handoff' && (
             <HeaderButton
               label={failedCount > 0 ? 'Retry the failed variations' : 'Run again with the same brief'}
               onClick={() => void retryRun(g.id).catch((err: Error) => useStore.getState().notify(err.message, 'error'))}
@@ -264,8 +322,12 @@ function RunGroup({ photo, g, tileW, viewId, gridOpen }: { photo: Photo; g: Gene
         {tiles.map((t) =>
           t.variation ? (
             <VariationTile key={t.key} photo={photo} g={g} tile={t} width={tileW} selected={t.variation.id === viewId} />
+          ) : t.state === 'awaiting' ? (
+            <AwaitingTile key={t.key} photo={photo} g={g} tile={t} width={tileW} />
+          ) : t.state === 'staged' ? (
+            <StagedTile key={t.key} photo={photo} g={g} tile={t} width={tileW} />
           ) : t.state === 'failed' || t.state === 'missing' ? (
-            <FailedTile key={t.key} g={g} tile={t} width={tileW} />
+            <FailedTile key={t.key} photo={photo} g={g} tile={t} width={tileW} />
           ) : (
             <PendingTile key={t.key} tile={t} width={tileW} planning={planning} />
           ),

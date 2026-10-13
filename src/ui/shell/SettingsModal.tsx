@@ -1,7 +1,10 @@
 /**
  * Settings (tabs):
- * - Project: name, ZIP, hardiness zone, "Look up climate" (AI) → climate
- *   card, overall style, location notes.
+ * - Project: name, overall style; location: ZIP (fills the hardiness zone and
+ *   coordinates from the bundled PRISM 2023 table), zone, property location
+ *   (ZIP centre / photo GPS / exact), deer pressure, frost dates & soil
+ *   (server site profile), native-plant link-outs, "Look up climate" (AI) →
+ *   climate card, location notes.
  * - Image generation: default provider (from /api/health) and quality
  *   (store.studio.provider / quality, remembered on this device).
  * - Appearance: System / Light / Dark.
@@ -18,6 +21,7 @@ import {
   EyeOff,
   FolderInput,
   Archive,
+  Info,
   KeyRound,
   Leaf,
   Loader2,
@@ -39,6 +43,11 @@ import type { ImageProviderId } from '../../../shared/api';
 import type { ClimateProfile, ProjectLocation } from '../../../shared/types';
 import { ARCHITECTURAL_STYLES, DESIGN_THEMES } from '../../assets/design';
 import { fetchClimate } from '../../lib/studio';
+import { ZONE_SOURCE_LABELS } from '../../site/format';
+import { useInvasivesReady, useZipLookup } from '../../site/hooks';
+import { locationForUserZone, locationForZip } from '../../site/location';
+import { SiteSection } from '../../site/ui/SiteSection';
+import { lookupZip, normalizeZip } from '../../site/zip';
 import * as db from '../../state/persistence';
 import { useStore, type StudioState } from '../../state/store';
 import { Badge, Button, Field, Modal, Segmented, TextArea, TextInput, cn } from '../common';
@@ -130,6 +139,11 @@ function ProjectTab() {
   const [zoneError, setZoneError] = useState(false);
   const [looking, setLooking] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  /** Latest ZIP typed — answers for older keystrokes are ignored. */
+  const zipSeq = useRef(0);
+  const zipState = useZipLookup(project?.location.zip);
+  // Start loading the US-RIIS list so plant ratings include invasive flags.
+  useInvasivesReady();
   const styles = useMemo(() => {
     try {
       return [...new Set([...ARCHITECTURAL_STYLES.map((s) => s.name), ...DESIGN_THEMES.map((t) => t.name)])].sort((a, b) => a.localeCompare(b));
@@ -148,6 +162,29 @@ function ProjectTab() {
   };
   const zipOk = isValidZip(zip);
   const climate = location.climate;
+  const zipInfo = zipState.status === 'found' ? zipState.info : null;
+
+  /** A complete ZIP fills the zone (zoneSource 'zip-table') and coordinates from the bundled table. */
+  const applyZip = async (value: string) => {
+    const z = normalizeZip(value);
+    const seq = ++zipSeq.current;
+    const cur = useStore.getState().project?.location ?? {};
+    if (!z) {
+      if (!value.trim()) setLocation({ zip: undefined });
+      return;
+    }
+    if (z === cur.zip && cur.hardinessZone) return;
+    const [info, previous] = await Promise.all([lookupZip(z), cur.zip && cur.zip !== z ? lookupZip(cur.zip) : Promise.resolve(null)]);
+    if (seq !== zipSeq.current || useStore.getState().project?.id !== project.id) return;
+    const latest = useStore.getState().project?.location ?? {};
+    if (!info) {
+      setLocation({ zip: z });
+      return;
+    }
+    setLocation(locationForZip(latest, info, previous));
+    setZone(info.zone);
+    setZoneError(false);
+  };
 
   const lookUp = async () => {
     if (looking) return;
@@ -164,9 +201,13 @@ function ProjectTab() {
     try {
       const result = await fetchClimate({ zip: z || null, hardinessZone: normalizedZone, notes: location.notes?.trim() || null }, controller.signal);
       if (useStore.getState().project?.id !== projectId) return;
-      setLocation({ climate: result, hardinessZone: result.hardinessZone });
-      setZone(result.hardinessZone);
-      useStore.getState().notify(`Climate updated — USDA zone ${result.hardinessZone}.`, 'success');
+      // A zone from the ZIP table or typed by the user stays the source of truth; the AI profile follows it.
+      const cur = useStore.getState().project?.location ?? {};
+      const keep = (cur.zoneSource === 'zip-table' || cur.zoneSource === 'user') && cur.hardinessZone ? cur.hardinessZone : null;
+      const zoneNow = keep ?? result.hardinessZone;
+      setLocation(keep ? { climate: { ...result, hardinessZone: keep } } : { climate: result, hardinessZone: zoneNow, zoneSource: 'ai' });
+      setZone(zoneNow);
+      useStore.getState().notify(`Climate updated — USDA zone ${zoneNow}.`, 'success');
     } catch (err) {
       if (!controller.signal.aborted) useStore.getState().notify(`Couldn't look up the climate: ${errorText(err)}`, 'error');
     } finally {
@@ -221,7 +262,7 @@ function ProjectTab() {
               onChange={(e) => {
                 const v = e.target.value.replace(/[^\d-]/g, '').slice(0, 10);
                 setZip(v);
-                if (isValidZip(v)) setLocation({ zip: v.trim() || undefined });
+                if (isValidZip(v)) void applyZip(v);
               }}
             />
           </Field>
@@ -237,18 +278,20 @@ function ProjectTab() {
                 setZoneError(false);
                 // Save as soon as it's a valid zone (blur may never come if the dialog closes with Escape).
                 const n = normalizeZone(e.target.value);
-                if (n && n !== useStore.getState().project?.location.hardinessZone) setLocation({ hardinessZone: n });
+                const cur = useStore.getState().project?.location ?? {};
+                if (n && n !== cur.hardinessZone) setLocation(locationForUserZone(cur, n));
               }}
               onBlur={() => {
                 const v = zone.trim();
+                const cur = useStore.getState().project?.location ?? {};
                 if (!v) {
-                  setLocation({ hardinessZone: undefined });
+                  if (cur.hardinessZone) setLocation(locationForUserZone(cur, undefined));
                   return;
                 }
                 const n = normalizeZone(v);
                 if (!n) return setZoneError(true);
                 setZone(n);
-                if (n !== location.hardinessZone) setLocation({ hardinessZone: n });
+                if (n !== cur.hardinessZone) setLocation(locationForUserZone(cur, n));
               }}
             />
           </Field>
@@ -264,9 +307,13 @@ function ProjectTab() {
             </Button>
           </div>
         </div>
+        <ZoneSourceLine location={location} zipUnknown={zipState.status === 'unknown'} />
         {!aiEnabled && (
-          <p className="text-xs text-muted">Climate lookup needs AI on the server. You can still type your hardiness zone — it’s used for plant feasibility.</p>
+          <p className="text-xs text-muted">
+            The AI climate summary needs AI on the server. Your zone, frost dates and soil work without it.
+          </p>
         )}
+        <SiteSection project={project} setLocation={setLocation} zipInfo={zipInfo} />
         {climate && <ClimateCard climate={climate} onRemove={() => setLocation({ climate: undefined })} />}
         <Field label="Notes about the property" hint="Shared with the AI: microclimate, HOA rules, deer, how you use the yard and rooms…">
           <TextArea
@@ -279,6 +326,28 @@ function ProjectTab() {
         </Field>
       </Group>
     </>
+  );
+}
+
+/** Where the hardiness zone came from (PRISM attribution for the ZIP table). */
+function ZoneSourceLine({ location, zipUnknown }: { location: ProjectLocation; zipUnknown: boolean }) {
+  if (zipUnknown && location.zoneSource !== 'user') {
+    return (
+      <p className="flex items-start gap-1.5 text-xs text-muted">
+        <Info className="mt-0.5 size-3.5 shrink-0 text-subtle" aria-hidden />
+        This ZIP isn’t in Mode’s zone table — type your hardiness zone (find it at planthardiness.ars.usda.gov).
+      </p>
+    );
+  }
+  if (!location.hardinessZone || !location.zoneSource) return null;
+  return (
+    <p className="flex items-start gap-1.5 text-xs text-muted">
+      <Info className="mt-0.5 size-3.5 shrink-0 text-subtle" aria-hidden />
+      <span>
+        Zone {location.hardinessZone}: {ZONE_SOURCE_LABELS[location.zoneSource]}
+        {location.zoneSource === 'zip-table' && '. Read at the ZIP centre — hilly or coastal spots can differ by half a zone.'}
+      </span>
+    </p>
   );
 }
 

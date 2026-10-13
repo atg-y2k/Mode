@@ -1,6 +1,10 @@
 /**
- * Studio center pane (SPEC §3.14): the viewer — or the side-by-side grid of a
- * run — above the variations strip and the prompt dock.
+ * Studio center pane (SPEC §3.14, §5.2): the viewer — or the side-by-side
+ * grid of a run, or the staging view of a returned hand-off — above the
+ * variations strip and the prompt dock. Also hosts the hand-off companion
+ * (inline card / Picture-in-Picture), the review step before every run, and
+ * the ways a returned image comes back (paste, drop, clipboard offer,
+ * Downloads watcher).
  *
  * Keyboard: ←/→ step through the variations of the current run, F favorite,
  * Esc back to the original (closes the grid first), [ or ] toggle the areas
@@ -13,6 +17,13 @@ import { ConfirmModal } from '../common';
 import { deleteRun, stepVariation, viewVariation } from './actions';
 import { CompareGrid } from './CompareGrid';
 import { recoverInterruptedRuns } from './generate';
+import { installHandoffCleanup } from './handoff/actions';
+import { CompanionDock } from './handoff/Companion';
+import { ClipboardOfferBanner, HandoffImportEffects, useHandoffDrop } from './handoff/ImportLayer';
+import { installHandoffPrefs } from './handoff/prefs';
+import { ReviewModal } from './handoff/ReviewModal';
+import { useHandoffSession } from './handoff/session';
+import { StagingView } from './handoff/StagingView';
 import { useActivePhoto } from './hooks';
 import { PromptDock } from './PromptDock';
 import { setStudioUI, useStudioUI } from './ui';
@@ -94,7 +105,14 @@ export function StudioView() {
   const { photo, space } = useActivePhoto();
   const projectId = useStore((s) => s.project?.id);
   const gridId = useStore((s) => s.studio.gridGenerationId);
+  const staging = useHandoffSession((s) => s.staging);
+  const drop = useHandoffDrop();
   useStudioShortcuts();
+
+  useEffect(() => {
+    installHandoffPrefs();
+    installHandoffCleanup();
+  }, []);
 
   // Runs a previous session left 'running' were interrupted by the reload.
   useEffect(() => {
@@ -113,19 +131,32 @@ export function StudioView() {
           <ImageOff className="size-6" />
           Choose a photo to start designing.
         </div>
+        <ReviewModal />
       </div>
     );
   }
 
   const grid = gridId ? photo.generations.find((g) => g.id === gridId) : undefined;
+  const stagingHere = staging && staging.photoId === photo.id ? staging : null;
   return (
     <div className="flex h-full w-full flex-col bg-bg">
-      <div className="relative min-h-0 flex-1">
-        {grid ? <CompareGrid photo={photo} space={space} generation={grid} /> : <Viewer photo={photo} space={space} />}
+      <div className="relative min-h-0 flex-1" {...drop.handlers}>
+        {stagingHere ? (
+          <StagingView key={stagingHere.plannedId} photo={photo} stagingRef={stagingHere} />
+        ) : grid ? (
+          <CompareGrid photo={photo} space={space} generation={grid} />
+        ) : (
+          <Viewer photo={photo} space={space} />
+        )}
+        <CompanionDock />
+        <ClipboardOfferBanner />
+        {drop.overlay}
       </div>
       <VariationStrip photo={photo} />
       <PromptDock photo={photo} space={space} />
       <ConfirmDelete />
+      <ReviewModal />
+      <HandoffImportEffects />
     </div>
   );
 }

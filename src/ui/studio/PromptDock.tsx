@@ -2,18 +2,67 @@
  * The prompt bar under the viewer — the Studio's core loop in one place:
  * target areas (chips from the photo) → describe it or add design elements →
  * Generate → compare (grid / strip) → refine. Bound to the photo's draft
- * brief; scope, variation count and image provider sit next to Generate.
+ * brief; scope, strictness, variation count and how runs render (hand-off to
+ * the user's ChatGPT / Gemini app, or an image API when the server has one)
+ * sit next to Generate.
  */
-import { Blocks, Check, ImagePlus, Lightbulb, MousePointerClick, Plus, Sparkles, Target, X } from 'lucide-react';
+import { Blocks, Check, ImagePlus, Inbox, Lightbulb, MessageCircle, MousePointerClick, Plus, Sparkle, Sparkles, Target, X } from 'lucide-react';
 import { useMemo, useRef, type ReactNode } from 'react';
-import { emptyBrief, type Photo, type Space } from '../../../shared/types';
+import { emptyBrief, type DesignBrief, type Photo, type Space } from '../../../shared/types';
 import { findVariation, useStore } from '../../state/store';
 import { cn } from '../common';
 import { openElement, runOrNotify, viewVariation } from './actions';
 import { generationBlocker } from './generate';
+import { setDefaultHandoffApp } from './handoff/actions';
+import { usePendingHandoffs } from './handoff/Companion';
+import { appLabel } from './handoff/planned';
+import { effectiveRenderMode, hasImageProviders } from './handoff/prefs';
+import { setHandoffSession } from './handoff/session';
 import { briefTargetIds } from './maskFromZones';
 import { NO_IDEAS } from './panels/briefOps';
 import { ideasForBrief } from './planRequest';
+
+type Strictness = NonNullable<DesignBrief['strictness']>;
+
+const STRICTNESS: [Strictness, string, string][] = [
+  ['strict', 'Strict', 'Only the requested change, exactly — nothing else is touched'],
+  ['balanced', 'Balanced', 'The requested change, with sensible details to make it look built'],
+  ['creative', 'Creative', 'May refine and embellish details within the picked areas'],
+];
+
+/** Small segmented control in the dock's settings row. */
+function DockSegmented<T extends string>({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: T;
+  options: { value: T; label: ReactNode; title: string }[];
+  onChange: (value: T) => void;
+}) {
+  return (
+    <div role="radiogroup" aria-label={label} className="inline-flex h-8 rounded-lg bg-surface-2 p-0.5 text-xs">
+      {options.map((o) => (
+        <button
+          key={o.value}
+          type="button"
+          role="radio"
+          aria-checked={value === o.value}
+          title={o.title}
+          onClick={() => onChange(o.value)}
+          className={cn(
+            'inline-flex items-center gap-1 rounded-md px-2.5 font-medium whitespace-nowrap transition-colors',
+            value === o.value ? 'bg-surface text-text shadow-sm' : 'text-muted hover:text-text',
+          )}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 const COUNTS = [1, 2, 3, 4, 5, 6];
 
@@ -86,8 +135,13 @@ export function PromptDock({ photo, space }: { photo: Photo; space: Space | unde
   const brief = photo.draft ?? emptyBrief();
   const scene = photo.scene;
   const base = findVariation(photo, studio.viewVariationId);
-  const blocker = generationBlocker({ health });
+  const renderMode = effectiveRenderMode(studio, health);
+  const hand = renderMode === 'handoff';
+  const blocker = generationBlocker({ health, studio }, renderMode);
   const providers = health?.imageProviders ?? [];
+  const apiAvailable = hasImageProviders(health);
+  const pending = usePendingHandoffs();
+  const waitingHere = pending.filter((p) => p.photoId === photo.id).length;
 
   const zoneById = useMemo(() => new Map((scene?.zones ?? []).map((z) => [z.id, z])), [scene?.zones]);
   const ideas = useMemo(() => ideasForBrief(board ?? [], brief, space?.id ?? null), [board, brief, space?.id]);
@@ -143,6 +197,11 @@ export function PromptDock({ photo, space }: { photo: Photo; space: Space | unde
     hint = { tone: 'muted', text: 'Add your ZIP code in Settings so plant choices are checked against your hardiness zone and climate.' };
   else if (health && !health.ai.enabled)
     hint = { tone: 'muted', text: 'AI planning is off on this server — each variation follows a simple template of your brief.' };
+  else if (hand && described && pending.length === 0)
+    hint = {
+      tone: 'muted',
+      text: `Mode plans each variation and prepares the photo + prompt; you paste them into ${appLabel(studio.handoffApp)} and bring the images back.`,
+    };
 
   const emptyBrief_ = !described && brief.targetZoneIds.length === 0 && ideas.length === 0;
 
@@ -151,7 +210,13 @@ export function PromptDock({ photo, space }: { photo: Photo; space: Space | unde
       type="button"
       onClick={generate}
       disabled={!canGenerate}
-      title={canGenerate ? 'Generate (Ctrl/⌘ + Enter)' : (blocker ?? 'Describe the change or add an element first')}
+      title={
+        canGenerate
+          ? hand
+            ? `Plan the variations and prepare them for ${appLabel(studio.handoffApp)} (Ctrl/⌘ + Enter)`
+            : 'Generate (Ctrl/⌘ + Enter)'
+          : (blocker ?? 'Describe the change or add an element first')
+      }
       className="inline-flex h-11 shrink-0 items-center gap-2 rounded-xl bg-accent px-4 text-sm font-semibold text-accent-fg shadow-sm transition-colors hover:bg-accent-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:pointer-events-none disabled:opacity-45"
     >
       <Sparkles className="size-4" />
@@ -276,6 +341,54 @@ export function PromptDock({ photo, space }: { photo: Photo; space: Space | unde
 
         {/* Run settings + guidance */}
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
+          <DockSegmented
+            label="How variations are rendered"
+            value={hand ? studio.handoffApp : 'api'}
+            onChange={(v) => {
+              if (v === 'api') useStore.getState().setStudio({ renderMode: 'api' });
+              else setDefaultHandoffApp(v);
+            }}
+            options={[
+              {
+                value: 'chatgpt' as const,
+                label: (
+                  <>
+                    <MessageCircle className="size-3.5" />
+                    <span>ChatGPT</span>
+                  </>
+                ),
+                title: 'Hand off to your ChatGPT app: Mode prepares the photo and prompt, you paste them and bring the image back (uses your subscription)',
+              },
+              {
+                value: 'gemini' as const,
+                label: (
+                  <>
+                    <Sparkle className="size-3.5" />
+                    <span>Gemini</span>
+                  </>
+                ),
+                title: 'Hand off to your Gemini app: Mode prepares the photo and prompt, you paste them and bring the image back (uses your subscription)',
+              },
+              ...(apiAvailable
+                ? [{ value: 'api' as const, label: <span>API</span>, title: 'Render automatically with the image API key configured on the server' }]
+                : []),
+            ]}
+          />
+          <DockSegmented
+            label="How closely to follow the brief"
+            value={brief.strictness ?? 'balanced'}
+            onChange={(v) =>
+              useStore.getState().updateDraft(
+                photo.id,
+                (d) => {
+                  if (v === 'balanced') delete d.strictness;
+                  else d.strictness = v;
+                },
+                {},
+              )
+            }
+            options={STRICTNESS.map(([value, label, title]) => ({ value, label, title }))}
+          />
           <div role="radiogroup" aria-label="What may change" className="inline-flex h-8 rounded-lg bg-surface-2 p-0.5 text-xs">
             {(
               [
@@ -313,7 +426,7 @@ export function PromptDock({ photo, space }: { photo: Photo; space: Space | unde
               ))}
             </select>
           </label>
-          {providers.length > 1 && (
+          {!hand && providers.length > 1 && (
             <label className="inline-flex h-8 items-center rounded-lg bg-surface-2 px-1.5 text-xs" title="Image provider for the next run">
               <span className="sr-only">Image provider</span>
               <select
@@ -340,6 +453,17 @@ export function PromptDock({ photo, space }: { photo: Photo; space: Space | unde
                   ))}
               </select>
             </label>
+          )}
+          {waitingHere > 0 && (
+            <button
+              type="button"
+              onClick={() => setHandoffSession({ companion: 'open' })}
+              className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-accent-soft px-2.5 text-xs font-semibold text-accent hover:brightness-95"
+              title="Open the hand-off card"
+            >
+              <Inbox className="size-3.5" />
+              {waitingHere} hand-off{waitingHere === 1 ? '' : 's'} waiting
+            </button>
           )}
           {hint && (
             <p
