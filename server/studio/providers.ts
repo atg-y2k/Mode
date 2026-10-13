@@ -118,7 +118,15 @@ interface OpenAIImagesResponse {
   error?: { message?: string; code?: string | null; type?: string | null; param?: string | null };
 }
 
+/** GPT Image 1.x tops out at 'high'. */
 const OPENAI_QUALITY: Record<ImageQuality, string> = { draft: 'low', standard: 'medium', high: 'high' };
+/** GPT Image 2.5 (Flare / Sunburst) adds 'xhigh' and 'max'; 'high' is the recommended everyday setting. */
+const OPENAI_QUALITY_25: Record<ImageQuality, string> = { draft: 'medium', standard: 'high', high: 'xhigh' };
+
+/** Quality value for this model ('xhigh' / 'max' only exist on GPT Image 2.5+). */
+export function openAIQualityFor(model: string, quality: ImageQuality): string {
+  return /^gpt-image-(?:[2-9]|\d{2,})/.test(model) ? OPENAI_QUALITY_25[quality] : OPENAI_QUALITY[quality];
+}
 
 function isGptImageModel(model: string): boolean {
   return model.startsWith('gpt-image') || model.startsWith('chatgpt-image');
@@ -206,7 +214,7 @@ export function createOpenAIProvider(opts: OpenAIProviderOptions): ImageProvider
     form.append('n', '1');
     if (gptImage) {
       form.append('size', 'auto');
-      form.append('quality', OPENAI_QUALITY[req.quality]);
+      form.append('quality', openAIQualityFor(model, req.quality));
       if (withFidelity) form.append('input_fidelity', 'high');
     } else {
       form.append('size', '1024x1024');
@@ -376,7 +384,8 @@ export function createGeminiProvider(opts: GeminiProviderOptions): ImageProvider
 
 type Env = Record<string, string | undefined>;
 
-export const DEFAULT_OPENAI_IMAGE_MODEL = 'gpt-image-1';
+/** gpt-image-1 shuts down 2026-10-23; GPT Image 2.5 Flare is the everyday editing model. */
+export const DEFAULT_OPENAI_IMAGE_MODEL = 'gpt-image-2.5-flare';
 export const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
 export const DEFAULT_GEMINI_IMAGE_MODEL = 'gemini-2.5-flash-image';
 

@@ -8,7 +8,7 @@ describe('loadConfig', () => {
       aiEnabled: false,
       claudeModel: DEFAULT_CLAUDE_MODEL,
       imageProvider: null,
-      openaiImageModel: 'gpt-image-1',
+      openaiImageModel: 'gpt-image-2.5-flare',
       openaiBaseUrl: 'https://api.openai.com/v1',
       accessToken: null,
       rateLimitPer10Min: 60,
@@ -60,7 +60,7 @@ describe('loadConfig', () => {
     expect(loadConfig({}).imageProviders).toEqual([]);
     const both = loadConfig({ OPENAI_API_KEY: 'o', GEMINI_API_KEY: 'g', IMAGE_PROVIDER: 'gemini' });
     expect(both.imageProviders).toEqual([
-      { id: 'openai', model: 'gpt-image-1', isDefault: false },
+      { id: 'openai', model: 'gpt-image-2.5-flare', isDefault: false },
       { id: 'gemini', model: 'gemini-2.5-flash-image', isDefault: true },
     ]);
     expect(both.imageProvider).toBe('openai'); // render / photo assets use OpenAI

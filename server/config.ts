@@ -8,7 +8,8 @@ import { resolve } from 'node:path';
 import type { ImageProviderId } from '../shared/api';
 
 export const DEFAULT_CLAUDE_MODEL = 'claude-opus-5-5';
-export const DEFAULT_OPENAI_IMAGE_MODEL = 'gpt-image-1';
+/** gpt-image-1 shuts down 2026-10-23; GPT Image 2.5 Flare is the everyday editing model. */
+export const DEFAULT_OPENAI_IMAGE_MODEL = 'gpt-image-2.5-flare';
 export const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
 export const DEFAULT_GEMINI_IMAGE_MODEL = 'gemini-2.5-flash-image';
 export const DEFAULT_PORT = 8787;

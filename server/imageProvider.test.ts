@@ -129,6 +129,6 @@ describe('createImageProvider', () => {
     expect(createImageProvider(testConfig())).toBeNull();
     const provider = createImageProvider(testConfig({ imageProvider: 'openai', openaiApiKey: 'k' }));
     expect(provider?.name).toBe('openai');
-    expect(provider?.model).toBe('gpt-image-1');
+    expect(provider?.model).toBe('gpt-image-2.5-flare');
   });
 });

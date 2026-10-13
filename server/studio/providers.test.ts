@@ -194,7 +194,7 @@ describe('Gemini provider', () => {
 describe('createProvidersFromEnv', () => {
   it('configures providers from keys and picks the default', () => {
     const both = createProvidersFromEnv({ OPENAI_API_KEY: 'sk', GOOGLE_API_KEY: 'g', IMAGE_PROVIDER: 'gemini' });
-    expect(both.providers.openai?.model).toBe('gpt-image-1');
+    expect(both.providers.openai?.model).toBe('gpt-image-2.5-flare');
     expect(both.providers.gemini?.model).toBe('gemini-2.5-flash-image');
     expect(both.defaultProvider).toBe('gemini');
 
@@ -208,5 +208,16 @@ describe('createProvidersFromEnv', () => {
 
     const off = createProvidersFromEnv({ OPENAI_API_KEY: 'sk', IMAGE_PROVIDER: 'none' });
     expect(off.defaultProvider).toBeNull();
+  });
+});
+
+describe('openAIQualityFor', () => {
+  it('uses the GPT Image 2.5 scale for 2.5+ models and the 1.x scale otherwise', async () => {
+    const { openAIQualityFor } = await import('./providers');
+    expect(openAIQualityFor('gpt-image-2.5-flare', 'draft')).toBe('medium');
+    expect(openAIQualityFor('gpt-image-2.5-sunburst', 'standard')).toBe('high');
+    expect(openAIQualityFor('gpt-image-2.5-sunburst', 'high')).toBe('xhigh');
+    expect(openAIQualityFor('gpt-image-1', 'high')).toBe('high');
+    expect(openAIQualityFor('gpt-image-1-mini', 'draft')).toBe('low');
   });
 });
