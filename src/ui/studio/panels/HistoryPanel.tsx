@@ -153,7 +153,7 @@ function RunCard({ g, photo, scene, favoritesOnly }: { g: Generation; photo: Pho
           <span className="flex-1 text-text">
             {progress.stage === 'planning' ? 'Planning the variations…' : `Rendering · ${progress.done} of ${progress.total} ready${progress.failed ? ` · ${progress.failed} failed` : ''}`}
           </span>
-          <Button size="sm" variant="ghost" onClick={() => cancelRun(g.id)}>
+          <Button size="sm" className="max-lg:h-9" variant="ghost" onClick={() => cancelRun(g.id)}>
             Cancel
           </Button>
         </div>
@@ -197,14 +197,14 @@ function RunCard({ g, photo, scene, favoritesOnly }: { g: Generation; photo: Pho
 
       <div className="flex flex-wrap items-center gap-1.5 border-t border-line pt-2.5">
         {(g.mode === 'compare' || g.variations.length > 1) && (
-          <Button size="sm" variant="ghost" icon={<LayoutGrid className="size-3.5" />} onClick={() => openRunGrid(g.id)}>
+          <Button size="sm" variant="ghost" icon={<LayoutGrid className="size-3.5 max-lg:h-9" />} onClick={() => openRunGrid(g.id)}>
             Side by side
           </Button>
         )}
         <Button
           size="sm"
           variant="ghost"
-          icon={<RotateCcw className="size-3.5" />}
+          icon={<RotateCcw className="size-3.5 max-lg:h-9" />}
           loading={starting}
           disabled={!!blocker || !!progress}
           title={blocker ?? 'Run the same brief again'}
@@ -219,11 +219,11 @@ function RunCard({ g, photo, scene, favoritesOnly }: { g: Generation; photo: Pho
         >
           Re-run
         </Button>
-        <Button size="sm" variant="ghost" icon={<Copy className="size-3.5" />} title="Load this run's brief into the Design tab to change it" onClick={() => restoreBrief(photo.id, g.id)}>
+        <Button size="sm" variant="ghost" icon={<Copy className="size-3.5 max-lg:h-9" />} title="Load this run's brief into the Design tab to change it" onClick={() => restoreBrief(photo.id, g.id)}>
           Edit brief
         </Button>
         <span className="flex-1" />
-        <IconButton label="Delete run" size="sm" onClick={() => setConfirmDelete(true)}>
+        <IconButton label="Delete run" size="sm" className="max-lg:size-9" onClick={() => setConfirmDelete(true)}>
           <Trash2 className="size-3.5" />
         </IconButton>
       </div>

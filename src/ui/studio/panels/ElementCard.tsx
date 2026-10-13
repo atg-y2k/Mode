@@ -75,7 +75,7 @@ export const ElementCard = memo(function ElementCard({ el, photoId, scene, locat
           </span>
           <ChevronDown className={cn('size-4 shrink-0 text-subtle transition-transform', expanded && 'rotate-180')} aria-hidden />
         </button>
-        <IconButton label={`Remove ${el.label}`} size="sm" onClick={() => editBrief(photoId, (b) => removeElement(b, el.id))}>
+        <IconButton label={`Remove ${el.label}`} size="sm" className="max-lg:size-9" onClick={() => editBrief(photoId, (b) => removeElement(b, el.id))}>
           <X className="size-4" />
         </IconButton>
       </div>
@@ -123,14 +123,14 @@ export const ElementCard = memo(function ElementCard({ el, photoId, scene, locat
 
           <div className="flex items-center justify-between gap-2 border-t border-line pt-3">
             <div className="flex gap-1">
-              <IconButton label="Move up" size="sm" disabled={index === 0} onClick={() => editBrief(photoId, (b) => moveElement(b, el.id, -1))}>
+              <IconButton label="Move up" size="sm" className="max-lg:size-9" disabled={index === 0} onClick={() => editBrief(photoId, (b) => moveElement(b, el.id, -1))}>
                 <ArrowUp className="size-4" />
               </IconButton>
-              <IconButton label="Move down" size="sm" disabled={index >= count - 1} onClick={() => editBrief(photoId, (b) => moveElement(b, el.id, 1))}>
+              <IconButton label="Move down" size="sm" className="max-lg:size-9" disabled={index >= count - 1} onClick={() => editBrief(photoId, (b) => moveElement(b, el.id, 1))}>
                 <ArrowDown className="size-4" />
               </IconButton>
             </div>
-            <Button size="sm" variant="ghost" icon={<Trash2 className="size-3.5" />} onClick={() => editBrief(photoId, (b) => removeElement(b, el.id))}>
+            <Button size="sm" variant="ghost" icon={<Trash2 className="size-3.5 max-lg:h-9" />} onClick={() => editBrief(photoId, (b) => removeElement(b, el.id))}>
               Remove element
             </Button>
           </div>
@@ -192,7 +192,7 @@ function WherePicker({ el, photoId, scene, relevantKinds }: { el: ElementSpec; p
           {sceneJob ? 'Mapping the scene… areas to choose from appear here when it is done.' : 'Map the scene to point this element at specific areas. Until then Mode decides where it goes.'}
         </p>
         {!sceneJob && (
-          <Button size="sm" className="self-start" icon={<ScanSearch className="size-3.5" />} onClick={() => void mapScene(photoId)}>
+          <Button size="sm" className="self-start max-lg:h-9" icon={<ScanSearch className="size-3.5" />} onClick={() => void mapScene(photoId)}>
             Map the scene
           </Button>
         )}
@@ -310,7 +310,7 @@ function DimensionBlock({ el, dim, photoId }: { el: ElementSpec; dim: ElementDim
           <Button
             size="sm"
             variant="ghost"
-            icon={<GitCompare className="size-3.5" />}
+            icon={<GitCompare className="size-3.5 max-lg:h-9" />}
             title={blocker ?? 'Render one variation per option on your photo, everything else unchanged'}
             onClick={() => setCompare(defaultCompareSelection(el, dim, 4))}
           >
@@ -345,14 +345,14 @@ function DimensionBlock({ el, dim, photoId }: { el: ElementSpec; dim: ElementDim
             <Button
               size="sm"
               variant="primary"
-              className="flex-1"
+              className="flex-1 max-lg:h-9"
               icon={<GitCompare className="size-3.5" />}
               disabled={!compare || compare.length < 2 || !!blocker}
               onClick={() => void startCompare()}
             >
               {compare && compare.length >= 2 ? `Compare ${compare.length} on my photo` : 'Pick at least 2'}
             </Button>
-            <Button size="sm" variant="ghost" onClick={() => setCompare(null)}>
+            <Button size="sm" className="max-lg:h-9" variant="ghost" onClick={() => setCompare(null)}>
               Cancel
             </Button>
           </div>
@@ -478,11 +478,11 @@ function TailorSection({ el, photoId }: { el: ElementSpec; photoId: string }) {
         />
       )}
       <div className="flex flex-wrap gap-2">
-        <Button size="sm" variant="soft" icon={<Sparkles className="size-3.5" />} disabled={!aiReady} onClick={run}>
+        <Button size="sm" variant="soft" icon={<Sparkles className="size-3.5 max-lg:h-9" />} disabled={!aiReady} onClick={run}>
           {job?.status === 'done' ? 'Tailor again' : 'Tailor options'}
         </Button>
         {!asking && aiReady && (
-          <Button size="sm" variant="ghost" onClick={() => setAsking(true)}>
+          <Button size="sm" className="max-lg:h-9" variant="ghost" onClick={() => setAsking(true)}>
             Ask something specific
           </Button>
         )}

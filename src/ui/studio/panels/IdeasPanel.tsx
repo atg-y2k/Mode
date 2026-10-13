@@ -207,10 +207,10 @@ function NoteComposer({ onDone }: { onDone: () => void }) {
         aria-label="Note"
       />
       <div className="flex justify-end gap-2">
-        <Button size="sm" variant="ghost" onClick={onDone}>
+        <Button size="sm" className="max-lg:h-9" variant="ghost" onClick={onDone}>
           Cancel
         </Button>
-        <Button size="sm" variant="primary" type="submit" loading={saving} disabled={!title.trim() && !note.trim()}>
+        <Button size="sm" className="max-lg:h-9" variant="primary" type="submit" loading={saving} disabled={!title.trim() && !note.trim()}>
           Add note
         </Button>
       </div>
@@ -306,7 +306,7 @@ function IdeaCard({ item, project }: { item: IdeaItem; project: Project }) {
               {price && <span className="text-[11px] font-semibold text-text">{price}</span>}
             </div>
           </div>
-          <IconButton label={`Delete ${item.title || 'idea'}`} size="sm" onClick={() => setConfirmDelete(true)}>
+          <IconButton label={`Delete ${item.title || 'idea'}`} size="sm" className="max-lg:size-9" onClick={() => setConfirmDelete(true)}>
             <Trash2 className="size-3.5" />
           </IconButton>
         </div>
@@ -374,7 +374,7 @@ function IdeaCard({ item, project }: { item: IdeaItem; project: Project }) {
 
         {item.kind === 'image' && <AiJobStatus jobKey={describeJobKey(item.id)} hint="Style, materials, plants and colors — used in your generations." onRetry={() => describeIdeaItem(item.id)} />}
         {item.kind === 'image' && !item.aiDescription && !describeJob && aiReady && (
-          <Button size="sm" variant="soft" className="self-start" icon={<Sparkles className="size-3.5" />} onClick={() => describeIdeaItem(item.id)}>
+          <Button size="sm" variant="soft" className="self-start max-lg:h-9" icon={<Sparkles className="size-3.5" />} onClick={() => describeIdeaItem(item.id)}>
             Describe with AI
           </Button>
         )}

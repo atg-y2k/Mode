@@ -158,7 +158,7 @@ export function Chip({
       onFocus={onHover ? () => onHover(true) : undefined}
       onBlur={onHover ? () => onHover(false) : undefined}
       className={cn(
-        'inline-flex min-h-8 max-w-full items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition-colors',
+        'inline-flex min-h-9 max-w-full items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition-colors lg:min-h-8',
         'focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:pointer-events-none disabled:opacity-50',
         pressed ? 'border-accent bg-accent-soft text-accent' : 'border-line bg-surface text-muted hover:border-line-strong hover:text-text',
         className,
@@ -300,7 +300,7 @@ export function AiProgress({ job, hint, onCancel, className }: { job: AiJob; hin
         </p>
         {hint && <p className="mt-0.5 text-muted">{hint}</p>}
       </div>
-      <Button size="sm" variant="ghost" onClick={onCancel ?? (() => cancelAiJob(job.key))}>
+      <Button size="sm" className="max-lg:h-9" variant="ghost" onClick={onCancel ?? (() => cancelAiJob(job.key))}>
         Cancel
       </Button>
     </div>
@@ -321,7 +321,7 @@ export function AiJobStatus({ jobKey, hint, onRetry, className }: { jobKey: stri
         onDismiss={() => clearAiJob(jobKey)}
         action={
           onRetry && (
-            <Button size="sm" onClick={onRetry}>
+            <Button size="sm" className="max-lg:h-9" onClick={onRetry}>
               Try again
             </Button>
           )
@@ -347,10 +347,10 @@ export function AiUnavailableNote({ feature, className }: { feature: string; cla
       className={className}
       action={
         <>
-          <Button size="sm" onClick={() => openSettings('server')}>
+          <Button size="sm" className="max-lg:h-9" onClick={() => openSettings('server')}>
             How to turn on AI
           </Button>
-          <Button size="sm" variant="ghost" onClick={() => void useStore.getState().refreshHealth()}>
+          <Button size="sm" className="max-lg:h-9" variant="ghost" onClick={() => void useStore.getState().refreshHealth()}>
             Check again
           </Button>
         </>
@@ -423,15 +423,15 @@ export function ClimateCallout({ setting, className }: { setting: 'interior' | '
         action={
           hasPlace && aiReady ? (
             <>
-              <Button size="sm" variant="primary" onClick={lookUpClimate}>
+              <Button size="sm" className="max-lg:h-9" variant="primary" onClick={lookUpClimate}>
                 Look up climate
               </Button>
-              <Button size="sm" variant="ghost" onClick={() => openSettings('project')}>
+              <Button size="sm" className="max-lg:h-9" variant="ghost" onClick={() => openSettings('project')}>
                 Project settings
               </Button>
             </>
           ) : (
-            <Button size="sm" variant="primary" onClick={() => openSettings('project')}>
+            <Button size="sm" className="max-lg:h-9" variant="primary" onClick={() => openSettings('project')}>
               {hasPlace ? 'Open project settings' : 'Add ZIP code'}
             </Button>
           )

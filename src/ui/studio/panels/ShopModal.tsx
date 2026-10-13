@@ -293,7 +293,7 @@ function ProductCard({ product, zone }: { product: ProductResult; zone: string |
             variant={onBoard ? 'ghost' : 'primary'}
             disabled={onBoard}
             loading={busy}
-            icon={onBoard ? <Check className="size-3.5" /> : <Plus className="size-3.5" />}
+            icon={onBoard ? <Check className="size-3.5 max-lg:h-9" /> : <Plus className="size-3.5" />}
             onClick={() => void add()}
           >
             {onBoard ? 'On your board' : 'Add to idea board'}

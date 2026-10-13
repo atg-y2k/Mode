@@ -57,7 +57,7 @@ export function DesignPanel() {
 function MobileSpacesButton() {
   return (
     <div className="mt-3 lg:hidden">
-      <Button size="sm" onClick={() => useStore.getState().setView({ mobilePane: 'spaces' })}>
+      <Button size="sm" className="max-lg:h-9" onClick={() => useStore.getState().setView({ mobilePane: 'spaces' })}>
         Open spaces
       </Button>
     </div>
@@ -266,7 +266,7 @@ function AreasSection({ photo, scene, brief }: { photo: Photo; scene: SceneMap |
             {sceneJob ? 'Mapping the scene… you can pick areas when it finishes.' : 'Map the scene to pick exactly which areas may change. Until then the whole photo may change.'}
           </p>
           {!sceneJob && (
-            <Button size="sm" className="self-start" icon={<ScanSearch className="size-3.5" />} onClick={() => void mapScene(photo.id)}>
+            <Button size="sm" className="self-start max-lg:h-9" icon={<ScanSearch className="size-3.5" />} onClick={() => void mapScene(photo.id)}>
               Map the scene
             </Button>
           )}
@@ -361,7 +361,7 @@ function InspirationSection({ project, space, photoId, brief }: { project: Proje
       {relevant.length === 0 ? (
         <div className="flex flex-col items-start gap-2">
           <p className="text-xs text-muted">Inspiration images, notes, design themes and real products from your idea board guide every variation.</p>
-          <Button size="sm" icon={<Lightbulb className="size-3.5" />} onClick={openIdeas}>
+          <Button size="sm" icon={<Lightbulb className="size-3.5 max-lg:h-9" />} onClick={openIdeas}>
             Add inspiration
           </Button>
         </div>
@@ -460,13 +460,13 @@ function GenerateFooter({ photo, brief }: { photo: Photo; brief: DesignBrief }) 
       ) : null}
       <div className="flex items-center gap-2">
         <div className="flex items-center rounded-lg border border-line" role="group" aria-label="Number of variations">
-          <IconButton label="Fewer variations" size="sm" disabled={count <= 1} onClick={() => setCount(count - 1)}>
+          <IconButton label="Fewer variations" size="sm" className="max-lg:size-9" disabled={count <= 1} onClick={() => setCount(count - 1)}>
             <Minus className="size-3.5" />
           </IconButton>
           <span className="w-5 text-center text-sm font-medium tabular-nums text-text" aria-live="polite">
             {count}
           </span>
-          <IconButton label="More variations" size="sm" disabled={count >= 6} onClick={() => setCount(count + 1)}>
+          <IconButton label="More variations" size="sm" className="max-lg:size-9" disabled={count >= 6} onClick={() => setCount(count + 1)}>
             <Plus className="size-3.5" />
           </IconButton>
         </div>

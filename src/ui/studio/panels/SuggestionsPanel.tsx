@@ -89,7 +89,7 @@ function Suggestions({ photo, scene, setting }: { photo: Photo; scene: SceneMap 
             icon={<ScanSearch className="size-4" aria-hidden />}
             action={
               !sceneJob && (
-                <Button size="sm" onClick={() => void mapScene(photo.id)}>
+                <Button size="sm" className="max-lg:h-9" onClick={() => void mapScene(photo.id)}>
                   Map the scene
                 </Button>
               )
@@ -174,13 +174,13 @@ function RecommendationCard({ rec, photoId, scene }: { rec: Recommendation; phot
         </div>
       )}
       <div className="flex flex-wrap gap-2 pt-0.5">
-        <Button size="sm" icon={<Plus className="size-3.5" />} onClick={() => addRecommendationToBrief(photoId, rec)}>
+        <Button size="sm" icon={<Plus className="size-3.5 max-lg:h-9" />} onClick={() => addRecommendationToBrief(photoId, rec)}>
           Add to brief
         </Button>
         <Button
           size="sm"
           variant="primary"
-          icon={<ArrowRight className="size-3.5" />}
+          icon={<ArrowRight className="size-3.5 max-lg:h-9" />}
           loading={starting}
           disabled={!!blocker}
           title={blocker ?? 'Generate variations of this suggestion now'}

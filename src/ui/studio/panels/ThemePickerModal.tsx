@@ -112,7 +112,7 @@ function ThemeCard({ theme, suits, added, styleName }: { theme: DesignTheme; sui
             variant={added ? 'ghost' : 'primary'}
             disabled={added}
             loading={busy}
-            icon={added ? <Check className="size-3.5" /> : <Plus className="size-3.5" />}
+            icon={added ? <Check className="size-3.5 max-lg:h-9" /> : <Plus className="size-3.5" />}
             onClick={async () => {
               setBusy(true);
               try {
