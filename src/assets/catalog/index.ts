@@ -23,6 +23,7 @@ import type {
 import { deltaE, hexToLab, normalizeHex } from '../../engine/color';
 import type { Lab } from '../../engine/types';
 import { DECOR } from './decor';
+import { isUsNative } from './helpers';
 import { FIXTURES } from './fixtures';
 import { MATERIALS } from './materials';
 import { PAINT_COLORS } from './paints';
@@ -154,7 +155,6 @@ interface AssetIndex {
   tags: string[];
   /** Derived facts: category, plant type, light, water, flags, bloom, native range, beam… */
   keywords: string[];
-  description: string;
 }
 
 const assetIndexCache = new WeakMap<AssetDef, AssetIndex>();
@@ -167,7 +167,10 @@ function plantKeywords(p: PlantInfo): string[] {
   if (p.evergreen) k.push('evergreen');
   else if (!p.indoor) k.push('deciduous');
   if (p.deerResistant) k.push('deer resistant');
-  if (p.native) k.push(`native ${p.native}`);
+  if (p.native) {
+    k.push(`origin ${p.native}`);
+    if (!p.indoor && isUsNative(p.native)) k.push('native');
+  }
   if (p.bloom) k.push(`bloom ${p.bloom}`, 'flowering');
   k.push(p.indoor ? 'indoor houseplant' : 'outdoor');
   return k;
@@ -191,7 +194,6 @@ function assetIndex(a: AssetDef): AssetIndex {
     subcategory: norm(a.subcategory),
     tags: a.tags.map(norm).filter(Boolean),
     keywords: keywords.map(norm).filter(Boolean),
-    description: norm(a.description),
   };
   assetIndexCache.set(a, idx);
   return idx;
@@ -213,10 +215,9 @@ function scoreAsset(a: AssetDef, q: string, toks: string[]): number {
     const s = Math.max(
       fieldScore(ix.name, t, 60, 40),
       fieldScore(ix.botanical, t, 35, 0),
-      listScore(ix.tags, t, 30, 25, 12),
-      fieldScore(ix.subcategory, t, 25, 12),
-      listScore(ix.keywords, t, 18, 15, 0),
-      fieldScore(ix.description, t, 8, 0),
+      listScore(ix.tags, t, 30, 25, 0),
+      fieldScore(ix.subcategory, t, 25, 0),
+      listScore(ix.keywords, t, 30, 15, 0),
     );
     if (s === 0) return 0; // every word of the query must match somewhere
     score += s;
@@ -306,7 +307,7 @@ function scorePaint(p: PaintColor, q: string, toks: string[]): number {
     const s = Math.max(
       fieldScore(ix.name, t, 60, 40),
       t.startsWith('#') && t.length > 1 && p.hex.startsWith(t) ? 50 : 0,
-      listScore(ix.tags, t, 30, 25, 12),
+      listScore(ix.tags, t, 30, 25, 0),
       fieldScore(ix.collection, t, 25, 12),
       variants(t).includes(p.family) ? 25 : 0,
     );
@@ -431,10 +432,10 @@ export function materialsForSurface(surface: SurfaceKind): MaterialDef[] {
 // Zones
 // ---------------------------------------------------------------------------
 
-/** "7a" -> 7, "10b" -> 10, invalid -> undefined. Also accepts "Zone 7b", "USDA zone 6", "8". */
+/** "7a" -> 7, "10b" -> 10, invalid -> undefined. Also accepts "Zone 7b", "USDA zone: 6", "8". */
 export function parseZone(zone: string | undefined | null): number | undefined {
   if (typeof zone !== 'string') return undefined;
-  const m = /^\s*(?:usda\s*)?(?:(?:hardiness\s*)?zone\s*)?(\d{1,2})\s*([ab])?\s*$/i.exec(zone);
+  const m = /^\s*(?:usda\s*)?(?:(?:hardiness\s*)?zone\s*:?\s*)?(\d{1,2})\s*([ab])?\s*$/i.exec(zone);
   if (!m) return undefined;
   const n = Number(m[1]);
   return n >= 1 && n <= 13 ? n : undefined;
@@ -460,12 +461,8 @@ const SUN_SHORT: Record<SunExposure, string> = { 'full-sun': 'full', 'part-sun':
 const LIGHT_SHORT: Record<SunExposure, string> = { 'full-sun': 'bright', 'part-sun': 'indirect', shade: 'low' };
 const WATER_SHORT: Record<WaterNeed, string> = { low: 'low', medium: 'med', high: 'high' };
 
-/** North American natives get a "native" flag (useful for native / pollinator themes). */
 function nativeFlag(native: string | undefined): string | null {
-  if (!native || /^hybrid/i.test(native)) return null;
-  return /\b(US|Canada|Texas|Arizona|New Mexico|Mexico|Rocky Mountains|Americas?|Florida)\b/.test(native)
-    ? `native: ${native}`
-    : null;
+  return native && isUsNative(native) ? `native: ${native}` : null;
 }
 
 function plantLine(a: AssetDef): string {
@@ -485,8 +482,9 @@ function plantLine(a: AssetDef): string {
   if (nat) flags.push(nat);
   if (flags.length) parts.push(flags.join(', '));
   if (p.bloom) parts.push(`bloom: ${p.bloom}`);
-  const cost = costText(a.cost);
-  if (cost) parts.push(p.containerSize ? `${cost}/${p.containerSize}` : cost);
+  // Plant prices are per container (or per flat), so name the container instead of the unit.
+  const cost = a.cost ? costText(a.cost, p.containerSize ? `/${p.containerSize}` : undefined) : '';
+  if (cost) parts.push(cost);
   return parts.join(' | ');
 }
 
@@ -516,7 +514,7 @@ function fixtureLine(a: AssetDef): string {
 }
 
 function objectLine(a: AssetDef): string {
-  const where = a.tags.includes('indoor') && a.tags.includes('outdoor') ? 'indoor+outdoor' : a.tags.includes('indoor') ? 'indoor' : a.tags.includes('outdoor') ? 'outdoor' : '';
+  const where = [a.tags.includes('indoor') && 'indoor', a.tags.includes('outdoor') && 'outdoor'].filter(Boolean).join('+');
   const parts = [`${a.category} ${a.id}`, a.name, a.subcategory ?? a.category];
   if (where) parts.push(where);
   parts.push(`${num(a.realHeightFt)}ft tall, ${num(a.realHeightFt * a.aspect)}ft wide`);

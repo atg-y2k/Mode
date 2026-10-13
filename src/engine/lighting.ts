@@ -148,9 +148,23 @@ function dither(i: number): number {
   return (h & 0xffff) / 65536;
 }
 
-/** Dithered 8-bit sRGB code of a linear value (Uint8ClampedArray clamps the result). */
+const ENCODE_SIZE = 32768;
+/** linear 0..1 → sRGB code 0..255 (float) at 1/32768 steps (≤ 0.1 code error near black, far less above). */
+const ENCODE_LUT: Float32Array = (() => {
+  const t = new Float32Array(ENCODE_SIZE + 1);
+  for (let i = 0; i <= ENCODE_SIZE; i++) t[i] = linearToSrgb8(i / ENCODE_SIZE);
+  return t;
+})();
+
+/** Dithered 8-bit sRGB code of a linear value (clamped to 0..1). */
 function encode(v: number, d: number): number {
-  return Math.floor(linearToSrgb8(v) + d);
+  const i = v >= 1 ? ENCODE_SIZE : v > 0 ? (v * ENCODE_SIZE + 0.5) | 0 : 0;
+  return (ENCODE_LUT[i] + d) | 0;
+}
+
+/** encode() for values already known to be in 0..1. */
+function encodeUnit(v: number, d: number): number {
+  return (ENCODE_LUT[(v * ENCODE_SIZE + 0.5) | 0] + d) | 0;
 }
 
 /** Identity below `knee`, then a C1 rational shoulder that approaches 1. */
@@ -660,11 +674,13 @@ function lightPrims(l: PlacedLight, gain: number, W: number, H: number): Prim[] 
     }
   }
   // Indirect bounce: a broad, faint wash so a lit room (or garden) glows as a whole, not just in pools.
+  // Like the halos it only matters in the dark, hence the extra gain factor.
+  const bounce = reflect * gain * BOUNCE;
   if (l.beam === 'strip' || l.beam === 'string') {
     const e = lightEndPoint(l);
-    specs.push({ x, y, x2: e.x, y2: e.y, R: R * BOUNCE_RADIUS, K: 1, amp: reflect * BOUNCE, color });
+    specs.push({ x, y, x2: e.x, y2: e.y, R: R * BOUNCE_RADIUS, K: 1, amp: bounce, color });
   } else {
-    specs.push({ x, y, R: R * BOUNCE_RADIUS, K: 1, amp: reflect * BOUNCE, color });
+    specs.push({ x, y, R: R * BOUNCE_RADIUS, K: 1, amp: bounce, color });
   }
   const out: Prim[] = [];
   for (const sp of specs) {
@@ -847,6 +863,7 @@ export function renderLights(img: ImageDataLike, lights: PlacedLight[], s: Light
     }
   }
   if (!fine.length && !coarse.length) return;
+  const coarseEmit = coarse.some((p) => p.emissive);
 
   // --- coarse field: illum + emit (3 floats each) per node, spans per node row
   const GW = Math.floor((W - 1) / S) + 2;
@@ -891,12 +908,14 @@ export function renderLights(img: ImageDataLike, lights: PlacedLight[], s: Light
   const useAlbedo = !!albedo && albedo.width === W && albedo.height === H && albedo.data.length >= W * H * 4;
   const src = useAlbedo ? (albedo as ImageDataLike).data : img.data;
   const g0 = useAlbedo ? ONE : gradeGain(s);
-  const respR = responseLut(g0[0]);
-  const respG = responseLut(g0[1]);
-  const respB = responseLut(g0[2]);
-  const albR = albedoLut(g0[0]);
-  const albG = albedoLut(g0[1]);
-  const albB = albedoLut(g0[2]);
+  const surface: SurfaceLuts = {
+    respR: responseLut(g0[0]),
+    respG: responseLut(g0[1]),
+    respB: responseLut(g0[2]),
+    albR: albedoLut(g0[0]),
+    albG: albedoLut(g0[1]),
+    albB: albedoLut(g0[2]),
+  };
 
   const fIllum = f32('fIllum', W * 3, false);
   const fEmit = f32('fEmit', W * 3, false);
@@ -944,66 +963,128 @@ export function renderLights(img: ImageDataLike, lights: PlacedLight[], s: Light
       }
     }
 
-    const xs = Math.min(fSpan[0], cx0);
-    const xe = Math.max(fSpan[1], cx1);
-    if (xs > xe) continue;
-    const row = y * W;
-    for (let x = xs; x <= xe; x++) {
-      const j = x * 3;
-      let ir = fIllum[j];
-      let ig = fIllum[j + 1];
-      let ib = fIllum[j + 2];
-      let er = fEmit[j];
-      let eg = fEmit[j + 1];
-      let eb = fEmit[j + 2];
-      fIllum[j] = fIllum[j + 1] = fIllum[j + 2] = 0;
-      fEmit[j] = fEmit[j + 1] = fEmit[j + 2] = 0;
-      if (x >= cx0 && x <= cx1) {
-        const fx = x * invS;
-        const n = fx | 0;
-        const t = fx - n;
+    // Fold the interpolated coarse field into the row accumulators (incremental lerp per node interval).
+    if (cx0 <= cx1) {
+      const nFirst = (cx0 * invS) | 0;
+      const nLast = (cx1 * invS) | 0;
+      for (let n = nFirst; n <= nLast; n++) {
         const v0 = n * 6;
         const v1 = n + 1 < GW ? v0 + 6 : v0;
-        ir += vRow[v0] + (vRow[v1] - vRow[v0]) * t;
-        ig += vRow[v0 + 1] + (vRow[v1 + 1] - vRow[v0 + 1]) * t;
-        ib += vRow[v0 + 2] + (vRow[v1 + 2] - vRow[v0 + 2]) * t;
-        er += vRow[v0 + 3] + (vRow[v1 + 3] - vRow[v0 + 3]) * t;
-        eg += vRow[v0 + 4] + (vRow[v1 + 4] - vRow[v0 + 4]) * t;
-        eb += vRow[v0 + 5] + (vRow[v1 + 5] - vRow[v0 + 5]) * t;
-      }
-      const i = (row + x) * 4;
-      // Response ≤ 1, so this bounds the addition on every channel.
-      const mx = Math.max(ir, ig, ib) + Math.max(er, eg, eb);
-      if (mx < INVISIBLE_ADD[d[i]] && mx < INVISIBLE_ADD[d[i + 1]] && mx < INVISIBLE_ADD[d[i + 2]]) continue;
-      const cr = src[i];
-      const cg = src[i + 1];
-      const cb = src[i + 2];
-      let kr = respR[cr];
-      let kg = respG[cg];
-      let kb = respB[cb];
-      // Open blue sky is far away: lights don't brighten it.
-      if (cb > cr + 24) {
-        const sr = albR[cr];
-        const sb = albB[cb];
-        const sky = blueness(sr, sb) * smoothstep(0.15, 0.4, LR * sr + LG * albG[cg] + LB * sb);
-        if (sky > 0) {
-          const k = 1 - (1 - SKY_RESPONSE) * sky;
-          kr *= k;
-          kg *= k;
-          kb *= k;
+        const xa = Math.max(cx0, n * S);
+        const xb = Math.min(cx1, n * S + S - 1);
+        const t0 = (xa - n * S) * invS;
+        let a0 = vRow[v0] + (vRow[v1] - vRow[v0]) * t0;
+        let a1 = vRow[v0 + 1] + (vRow[v1 + 1] - vRow[v0 + 1]) * t0;
+        let a2 = vRow[v0 + 2] + (vRow[v1 + 2] - vRow[v0 + 2]) * t0;
+        const d0 = (vRow[v1] - vRow[v0]) * invS;
+        const d1 = (vRow[v1 + 1] - vRow[v0 + 1]) * invS;
+        const d2 = (vRow[v1 + 2] - vRow[v0 + 2]) * invS;
+        for (let x = xa, j = xa * 3; x <= xb; x++, j += 3) {
+          fIllum[j] += a0;
+          fIllum[j + 1] += a1;
+          fIllum[j + 2] += a2;
+          a0 += d0;
+          a1 += d1;
+          a2 += d2;
+        }
+        if (coarseEmit) {
+          let e0 = vRow[v0 + 3] + (vRow[v1 + 3] - vRow[v0 + 3]) * t0;
+          let e1 = vRow[v0 + 4] + (vRow[v1 + 4] - vRow[v0 + 4]) * t0;
+          let e2 = vRow[v0 + 5] + (vRow[v1 + 5] - vRow[v0 + 5]) * t0;
+          const f0 = (vRow[v1 + 3] - vRow[v0 + 3]) * invS;
+          const f1 = (vRow[v1 + 4] - vRow[v0 + 4]) * invS;
+          const f2 = (vRow[v1 + 5] - vRow[v0 + 5]) * invS;
+          for (let x = xa, j = xa * 3; x <= xb; x++, j += 3) {
+            fEmit[j] += e0;
+            fEmit[j + 1] += e1;
+            fEmit[j + 2] += e2;
+            e0 += f0;
+            e1 += f1;
+            e2 += f2;
+          }
         }
       }
-      const r = addLight(d[i], ir * kr + er);
-      const g = addLight(d[i + 1], ig * kg + eg);
-      const b = addLight(d[i + 2], ib * kb + eb);
-      const dt = dither(row + x);
-      // Never darker than before (dither could otherwise round a tiny addition down).
-      const nr = encode(r, dt);
-      const ng = encode(g, dt);
-      const nb = encode(b, dt);
-      if (nr > d[i]) d[i] = nr;
-      if (ng > d[i + 1]) d[i + 1] = ng;
-      if (nb > d[i + 2]) d[i + 2] = nb;
     }
+    const xs = Math.min(fSpan[0], cx0);
+    const xe = Math.max(fSpan[1], cx1);
+    if (xs <= xe) composeRow(d, src, y * W, xs, xe, fIllum, fEmit, surface);
+  }
+}
+
+/** Per-channel lookups describing how the photographed surfaces respond to added light. */
+interface SurfaceLuts {
+  respR: Float32Array;
+  respG: Float32Array;
+  respB: Float32Array;
+  albR: Float32Array;
+  albG: Float32Array;
+  albB: Float32Array;
+}
+
+/**
+ * Adds one row's accumulated light (illum × surface response + emissive) to
+ * pixels xs..xe of row `row` (pixel index of x = 0), consuming (zeroing) the
+ * accumulators. Kept small and monomorphic so it optimizes as a tight loop.
+ */
+function composeRow(
+  d: Uint8ClampedArray,
+  src: Uint8ClampedArray,
+  row: number,
+  xs: number,
+  xe: number,
+  illum: Float32Array,
+  emit: Float32Array,
+  L: SurfaceLuts,
+): void {
+  const { respR, respG, respB, albR, albG, albB } = L;
+  for (let x = xs; x <= xe; x++) {
+    const j = x * 3;
+    const ir = illum[j];
+    const ig = illum[j + 1];
+    const ib = illum[j + 2];
+    const er = emit[j];
+    const eg = emit[j + 1];
+    const eb = emit[j + 2];
+    illum[j] = 0;
+    illum[j + 1] = 0;
+    illum[j + 2] = 0;
+    emit[j] = 0;
+    emit[j + 1] = 0;
+    emit[j + 2] = 0;
+    const i = (row + x) * 4;
+    const c0 = d[i];
+    const c1 = d[i + 1];
+    const c2 = d[i + 2];
+    // Response ≤ 1, so this bounds the addition on every channel.
+    const mi = ir > ig ? (ir > ib ? ir : ib) : ig > ib ? ig : ib;
+    const me = er > eg ? (er > eb ? er : eb) : eg > eb ? eg : eb;
+    const mx = mi + me;
+    if (mx < INVISIBLE_ADD[c0] && mx < INVISIBLE_ADD[c1] && mx < INVISIBLE_ADD[c2]) continue;
+    const sr = src[i];
+    const sg = src[i + 1];
+    const sb = src[i + 2];
+    let kr = respR[sr];
+    let kg = respG[sg];
+    let kb = respB[sb];
+    // Open blue sky is far away: lights don't brighten it.
+    if (sb > sr + 24) {
+      const ar = albR[sr];
+      const ab = albB[sb];
+      const sky = blueness(ar, ab) * smoothstep(0.15, 0.4, LR * ar + LG * albG[sg] + LB * ab);
+      if (sky > 0) {
+        const k = 1 - (1 - SKY_RESPONSE) * sky;
+        kr *= k;
+        kg *= k;
+        kb *= k;
+      }
+    }
+    const dt = dither(i >> 2);
+    // Never darker than before (dither could otherwise round a tiny addition down).
+    const nr = encodeUnit(addLight(c0, ir * kr + er), dt);
+    const ng = encodeUnit(addLight(c1, ig * kg + eg), dt);
+    const nb = encodeUnit(addLight(c2, ib * kb + eb), dt);
+    if (nr > c0) d[i] = nr;
+    if (ng > c1) d[i + 1] = ng;
+    if (nb > c2) d[i + 2] = nb;
   }
 }

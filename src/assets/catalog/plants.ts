@@ -18,7 +18,7 @@
  */
 import type { PlantArt } from '../../../shared/art';
 import type { AssetDef, PlantInfo, SunExposure } from '../../../shared/types';
-import { builtinAsset } from './helpers';
+import { builtinAsset, isUsNative } from './helpers';
 
 const FULL: SunExposure[] = ['full-sun'];
 const FULL_PART: SunExposure[] = ['full-sun', 'part-sun'];
@@ -1985,7 +1985,8 @@ export const PLANTS: AssetDef[] = ENTRIES.map((e) =>
     subcategory: e.subcategory,
     art: { kind: 'plant', ...e.art },
     realHeightFt: e.realHeightFt ?? e.plant.matureHeightFt,
-    tags: e.tags,
+    // Outdoor US natives (incl. cultivars of native species) always carry the 'native' tag.
+    tags: [...new Set([...e.tags, ...(!e.plant.indoor && isUsNative(e.plant.native) ? ['native'] : [])])],
     description: e.description,
     cost: { low: e.cost[0], high: e.cost[1], unit: e.costUnit ?? 'each' },
     plant: { ...e.plant, indoor: e.plant.indoor ?? false },

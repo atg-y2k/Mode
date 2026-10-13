@@ -40,6 +40,17 @@ export function kebab(s: string): string {
 }
 
 /**
+ * Native to the US / Canada (what "native plant" means for a US landscape),
+ * judged from PlantInfo.native, e.g. "Eastern US", "Texas & northeastern
+ * Mexico", "Rocky Mountains (species)". Hybrids and exotics are not;
+ * cultivars of native species ("nativars") are.
+ */
+export function isUsNative(native: string | undefined): boolean {
+  if (!native || /^hybrid/i.test(native)) return false;
+  return /\b(US|Canada|Texas|Arizona|New Mexico|Rocky Mountains|Florida)\b/.test(native);
+}
+
+/**
  * Input for a built-in asset: everything but the derived fields. Give the
  * real-world size either as `realHeightFt` or — for wide, low things whose
  * width is the familiar dimension (rugs, recessed lights, LED strips) — as
