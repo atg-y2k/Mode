@@ -1,22 +1,32 @@
 /**
  * What the variation strip and the compare grid show for a run (pure):
  * finished variations in planned order, placeholders for variations still
- * planning / rendering, failed ones (with their error, retryable), and — for
- * compare runs from an earlier session — options that never rendered.
+ * planning / rendering, failed ones (with their error, retryable), manual
+ * hand-offs waiting for the user or waiting in staging, and — for compare
+ * runs from an earlier session without a recorded plan — options that never
+ * rendered.
  */
-import type { ElementDimension, ElementOption, ElementSpec, Generation, Variation } from '../../../shared/types';
+import type { ElementDimension, ElementOption, ElementSpec, Generation, HandoffApp, PlannedVariation, Variation } from '../../../shared/types';
 import type { RunInfo, SlotState } from './runs';
+
+export type TileState = SlotState | 'missing' | 'awaiting' | 'staged';
 
 export interface Tile {
   key: string;
-  state: SlotState | 'missing';
+  state: TileState;
   variation?: Variation;
   /** Planned title, option label or the variation's title. */
   label: string;
   optionId?: string;
-  /** Live slot key (retry a single failed variation). */
+  /** Slot key to retry a single failed variation (live slot, or the planned item's id). */
   slotKey?: string;
   error?: string;
+  /** The run's planned item behind this tile (hand-offs, runs recorded with a plan). */
+  plannedId?: string;
+  /** Hand-off result waiting for Accept / Reject. */
+  staged?: PlannedVariation['staged'];
+  /** App a waiting hand-off was prepared for. */
+  app?: HandoffApp;
 }
 
 export interface CompareContext {
@@ -79,6 +89,8 @@ export function runTiles(g: Generation, info: RunInfo | undefined): Tile[] {
     return tiles;
   }
 
+  if (g.planned && g.planned.length > 0) return plannedTiles(g, g.planned, byId);
+
   const ordered = [...g.variations].sort((a, b) => a.createdAt - b.createdAt);
   const ctx = compareContext(g);
   if (!ctx || !g.compare) return ordered.map(variationTile);
@@ -94,6 +106,50 @@ export function runTiles(g: Generation, info: RunInfo | undefined): Tile[] {
       tiles.splice(Math.min(tiles.length, index(o.id)), 0, { key: `missing:${o.id}`, state: 'missing', label: o.label, optionId: o.id });
     }
   }
+  return tiles;
+}
+
+/** Tiles from the persisted plan (hand-off runs, and API runs after a reload). */
+function plannedTiles(g: Generation, planned: readonly PlannedVariation[], byId: Map<string, Variation>): Tile[] {
+  const used = new Set<string>();
+  const tiles: Tile[] = [];
+  for (const p of planned) {
+    const base = {
+      key: `planned:${p.id}`,
+      label: p.optionLabel || p.title,
+      plannedId: p.id,
+      ...(p.optionId ? { optionId: p.optionId } : {}),
+    };
+    switch (p.status) {
+      case 'done': {
+        const v = p.variationId ? byId.get(p.variationId) : undefined;
+        if (v) {
+          used.add(v.id);
+          tiles.push({ ...variationTile(v), plannedId: p.id });
+        }
+        break; // accepted, then deleted: nothing to show
+      }
+      case 'rejected':
+        break; // skipped by the user
+      case 'awaiting-handoff':
+        tiles.push({ ...base, state: 'awaiting', ...(p.handoff ? { app: p.handoff.app } : {}) });
+        break;
+      case 'staged':
+        tiles.push({ ...base, state: 'staged', staged: p.staged, ...(p.staged?.source.app ? { app: p.staged.source.app } : {}) });
+        break;
+      case 'pending':
+        tiles.push(
+          g.status === 'running'
+            ? { ...base, state: 'pending' }
+            : { ...base, state: 'failed', slotKey: p.id, error: p.error || 'Interrupted before it rendered.' },
+        );
+        break;
+      case 'failed':
+        tiles.push({ ...base, state: 'failed', slotKey: p.id, error: p.error || 'This variation failed.' });
+        break;
+    }
+  }
+  for (const v of g.variations) if (!used.has(v.id)) tiles.push(variationTile(v));
   return tiles;
 }
 
