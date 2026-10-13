@@ -36,15 +36,18 @@ export interface GenericGlow {
   name: string;
   beam: LightBeam;
   kelvin: number;
+  /** Two or three words for the card. */
+  short: string;
+  /** Tooltip: what it's good for. */
   hint: string;
 }
 
 /** Light without fixture art: just the glow. */
 export const GENERIC_GLOWS: readonly GenericGlow[] = [
-  { id: 'glow-omni', name: 'Glow', beam: 'omni', kelvin: 2700, hint: 'Soft round glow — lamps, lanterns, windows' },
-  { id: 'glow-spot', name: 'Spotlight', beam: 'spot', kelvin: 3000, hint: 'Aimed beam — art, trees, house numbers' },
-  { id: 'glow-strip', name: 'Light strip', beam: 'strip', kelvin: 3000, hint: 'Drag a line — under cabinets, coves, steps' },
-  { id: 'glow-string', name: 'String lights', beam: 'string', kelvin: 2200, hint: 'Drag between two points — patios, pergolas' },
+  { id: 'glow-omni', name: 'Glow', beam: 'omni', kelvin: 2700, short: 'Round glow', hint: 'Soft round glow — lamps, lanterns, lit windows' },
+  { id: 'glow-spot', name: 'Spotlight', beam: 'spot', kelvin: 3000, short: 'Aimed beam', hint: 'Aimed beam — art, trees, house numbers' },
+  { id: 'glow-strip', name: 'Light strip', beam: 'strip', kelvin: 3000, short: 'Drag a line', hint: 'Even line of light — under cabinets, coves, steps' },
+  { id: 'glow-string', name: 'String lights', beam: 'string', kelvin: 2200, short: 'Drag end to end', hint: 'Bulbs hanging between two points — patios, pergolas' },
 ];
 
 export function glowPlacement(g: GenericGlow): LightPlacement {

@@ -7,9 +7,11 @@ export interface PatternPlan {
   spanX: number;
   spanY: number;
   /**
-   * Smallest feature (inches) that should span ≥ ~2 px while generating. When
-   * the requested resolution is coarser, the tile is generated supersampled
-   * and box-filtered down, so fine detail averages instead of aliasing.
+   * Feature size (inches) that should span ≥ ~2 px while generating — about
+   * a third of the pattern's element (board, brick, pebble). When the
+   * requested resolution is coarser, the tile is generated supersampled and
+   * box-filtered down, so small elements average instead of aliasing. Joints
+   * and edges are anti-aliased analytically and don't need this.
    */
   minFeatureIn: number;
   /** Paints albedo (+ explicit shading) and relief; returns the finish options. */

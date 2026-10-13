@@ -99,7 +99,7 @@ function BackButton() {
 }
 
 /** Inline-editable project name (click or Enter to edit; Enter/blur saves; Escape cancels). */
-export function ProjectName({ className }: { className?: string }) {
+export function ProjectName({ className, large }: { className?: string; large?: boolean }) {
   const name = useStore((s) => s.project?.name ?? '');
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(name);
@@ -136,7 +136,8 @@ export function ProjectName({ className }: { className?: string }) {
           }
         }}
         className={cn(
-          'h-9 min-w-0 max-w-full rounded-lg border border-accent bg-surface px-2 font-display text-lg text-text focus:outline-none focus:ring-2 focus:ring-accent/25',
+          'h-9 min-w-0 max-w-full rounded-lg border border-accent bg-surface px-2 font-display text-text focus:outline-none focus:ring-2 focus:ring-accent/25',
+          large ? 'text-xl' : 'text-lg',
           className,
         )}
       />
@@ -151,7 +152,8 @@ export function ProjectName({ className }: { className?: string }) {
         setEditing(true);
       }}
       className={cn(
-        'min-w-0 truncate rounded-lg px-2 py-1 text-left font-display text-lg leading-tight text-text transition-colors hover:bg-surface-2 focus-visible:outline-2 focus-visible:outline-accent',
+        'min-w-0 truncate rounded-lg px-2 py-1 text-left font-display leading-tight text-text transition-colors hover:bg-surface-2 focus-visible:outline-2 focus-visible:outline-accent',
+        large ? 'text-xl' : 'text-lg',
         className,
       )}
     >

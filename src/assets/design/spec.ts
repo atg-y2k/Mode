@@ -18,6 +18,7 @@ import {
   type SceneMap,
   type SceneZone,
   type SunExposure,
+  type TexturePattern,
 } from '../../../shared/types';
 import { ELEMENT_DEFS, optionPlants } from './elements';
 import { paletteFeasibility, type FeasibilityContext } from './feasibility';
@@ -100,8 +101,11 @@ export function optionFeasibility(type: ElementType, dimensionId: string, option
 }
 
 /**
- * Copies of the dimensions with `feasibility` set on every built-in plant
- * option for this context. AI options keep the feasibility the AI gave them.
+ * Copies of the dimensions with `feasibility` computed for every built-in
+ * plant option (matched by dimension + option id, so AI twins merged into a
+ * built-in id are rated too) for this context. Other AI options keep the
+ * feasibility the AI gave them. Cheap — call it at render time so badges
+ * follow changes to the project's zone / climate and the targeted zones.
  */
 export function withPlantFeasibility(type: ElementType, dims: readonly ElementDimension[], ctx: FeasibilityContext): ElementDimension[] {
   return dims.map((dim) => ({
@@ -311,18 +315,31 @@ export function mergeDimensions(
 }
 
 /**
+ * Patterns made of visible modules (stones, tiles, boards) whose unit size is
+ * what the eye compares. Continuous surfaces (gravel, grass, mulch, concrete,
+ * stucco, marble, terrazzo, carpet) read as texture at any span.
+ */
+const MODULAR_PATTERNS: ReadonlySet<TexturePattern> = new Set<TexturePattern>([
+  'wood-planks', 'herringbone', 'chevron', 'tile-grid', 'subway', 'hex-tile', 'brick', 'stone-pavers', 'flagstone',
+  'cobblestone', 'lap-siding', 'board-batten', 'shingle-siding', 'roof-shingles', 'standing-seam', 'deck-boards',
+  'stone-veneer', 'shiplap',
+]);
+
+/**
  * A shared swatch span (inches) for a dimension whose options are textures of
- * very different scales (e.g. Pathway → stone size), so `textureSwatch(spec,
- * size, span)` shows the sizes at true relative scale. Undefined when the
- * options are of similar scale (use the per-texture default).
+ * very different scales (e.g. Pathway → stone size: 20 in flagstone vs 4 in
+ * cobbles vs 3/8 in gravel), so `textureSwatch(spec, size, span)` shows every
+ * option over the same real-world area and the sizes compare truthfully. The
+ * span fits about 2.5 of the largest modular unit (18–144 in). Undefined when
+ * the options are of similar scale (use the per-texture default).
  */
 export function swatchSpanIn(dim: ElementDimension): number | undefined {
-  const scales = dim.options
-    .map((o) => (o.visual?.kind === 'texture' ? Math.sqrt(o.visual.texture.unitWidthIn * o.visual.texture.unitHeightIn) : undefined))
-    .filter((s): s is number => s !== undefined && Number.isFinite(s) && s > 0);
-  if (scales.length < 2) return undefined;
-  const max = Math.max(...scales);
-  const min = Math.min(...scales);
-  if (max / min < 1.8) return undefined;
-  return Math.round(Math.min(144, Math.max(18, max * 2.5)));
+  const textures = dim.options.flatMap((o) => (o.visual?.kind === 'texture' ? [o.visual.texture] : []));
+  if (textures.length < 2) return undefined;
+  const scale = (t: { unitWidthIn: number; unitHeightIn: number }) => Math.sqrt(t.unitWidthIn * t.unitHeightIn);
+  const all = textures.map(scale).filter((s) => Number.isFinite(s) && s > 0);
+  const modular = textures.filter((t) => MODULAR_PATTERNS.has(t.pattern)).map(scale).filter((s) => Number.isFinite(s) && s > 0);
+  if (modular.length === 0 || all.length < 2) return undefined;
+  if (Math.max(...all) / Math.min(...all) < 1.8) return undefined;
+  return Math.round(Math.min(144, Math.max(18, Math.max(...modular) * 2.5)));
 }

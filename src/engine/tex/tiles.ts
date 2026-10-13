@@ -77,7 +77,7 @@ function ceramic(spec: NormSpec, o: CeramicOptions) {
   return {
     spanX: o.cols * (o.unitW + o.joint),
     spanY: o.rows * (o.unitH + o.joint),
-    minFeatureIn: Math.max(0.06, Math.min(o.joint, o.cushion) * 1.2),
+    minFeatureIn: Math.min(o.unitW, o.unitH) / 3,
     render(s: Surface) {
       const rng = specRng(spec, 10);
       const n = o.cols * o.rows;
@@ -168,7 +168,7 @@ export const hexTile: PatternFactory = (spec) => {
   return {
     spanX,
     spanY,
-    minFeatureIn: Math.max(0.05, joint * 1.2),
+    minFeatureIn: across / 3,
     render(s) {
       const rng = specRng(spec, 11);
       const tones: Vec3[] = [];
@@ -239,7 +239,7 @@ export const brick: PatternFactory = (spec) => {
   return {
     spanX: cols * pitch,
     spanY: rows * (unitH + joint),
-    minFeatureIn: Math.max(0.1, joint * 0.8),
+    minFeatureIn: unitH / 2,
     render(s) {
       const rng = specRng(spec, 12);
       const n = cols * rows;

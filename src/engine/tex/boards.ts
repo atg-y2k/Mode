@@ -4,7 +4,7 @@
  * standing-seam metal profiles.
  */
 import { addStreaks, cellsFor, fbmField } from './noise';
-import { grainScale, makeGrain, woodTone, type Grain } from './wood';
+import { grainScale, makeGrain, plainTone, woodTone, type Grain } from './wood';
 import type { PatternFactory, PatternPlan } from './plan';
 import type { Rng } from './rng';
 import { jointColor, jointWidth, pickTone, specRng, type NormSpec } from './spec';
@@ -150,7 +150,7 @@ function rowBoards(spec: NormSpec, o: RowBoardsOptions): PatternPlan {
   return {
     spanX: o.period,
     spanY: pitch * o.rows,
-    minFeatureIn: Math.max(0.12, Math.min(o.boardW / 6, 0.2)),
+    minFeatureIn: o.boardW / 3,
     render(s) {
       const rng = specRng(spec, 1);
       const joints = rowJoints(
@@ -165,6 +165,7 @@ function rowBoards(spec: NormSpec, o: RowBoardsOptions): PatternPlan {
       const sc = grainScale(ppi, o.fiberAmp);
       const grains: Grain[] = [];
       const grng = specRng(spec, 2);
+      const plain = o.grain < 0.15;
       const { rgb, height } = s;
       const faceW = o.boardW;
       const screwR = 0.11;
@@ -181,7 +182,7 @@ function rowBoards(spec: NormSpec, o: RowBoardsOptions): PatternPlan {
         const dl = Math.min(uf, lenF - uf);
         const edge = Math.min(da, dl);
         const cov = clamp(edge * ppi + 0.5, 0, 1);
-        let t = woodTone(g, sc, u, v);
+        let t = plain ? plainTone(g, sc, u, v) : woodTone(g, sc, u, v);
         let hgt = -o.bevelDepth * (1 - smoothstep(0, o.bevel, edge));
         if (o.screwsEvery) {
           // Two fasteners per joist crossing, ~3/4" in from each edge.
@@ -223,7 +224,7 @@ function plankDims(spec: NormSpec, minLen: number): { boardW: number; len: numbe
 export const woodPlanks: PatternFactory = (spec) => {
   const { boardW, len } = plankDims(spec, 48);
   const period = len >= 36 ? Math.min(len, 120) : Math.ceil(36 / len) * len;
-  const rows = clamp(Math.ceil(44 / boardW), 6, 16);
+  const rows = clamp(Math.ceil(80 / boardW), 8, 24);
   const seam = jointWidth(spec, 0.02);
   return rowBoards(spec, {
     boardW,
@@ -306,7 +307,7 @@ export const lapSiding: PatternFactory = (spec) => {
   return {
     spanX: period,
     spanY: reveal * rows,
-    minFeatureIn: 0.25,
+    minFeatureIn: reveal / 3,
     render(s) {
       const rng = specRng(spec, 1);
       const joints = rowJoints(rng, rows, period, () => 1, Math.min(period * 0.2, 24), period);
@@ -317,7 +318,7 @@ export const lapSiding: PatternFactory = (spec) => {
       addStreaks(fibers, s.w, s.h, s.sx * 2.5, spec.seed ^ 0x51, 1);
       addStreaks(fibers, s.w, s.h, s.sx * 0.5, spec.seed ^ 0x52, 0.5);
       const ppi = (s.sx + s.sy) / 2;
-      const shadowLen = clamp(reveal * 0.12, 0.3, 1.1);
+      const shadowLen = clamp(reveal * 0.1, 0.25, 0.9);
       const thick = 0.45;
       const { rgb, height } = s;
       forEachBoardPixel(s, reveal, period, joints, (i, b, u, v) => {
@@ -327,7 +328,7 @@ export const lapSiding: PatternFactory = (spec) => {
           tones.set(b.id, c);
         }
         // Lap shadow under the course above, then the board tilting toward the light.
-        let k = 0.5 + 0.5 * smoothstep(0, shadowLen, v);
+        let k = 0.4 + 0.6 * smoothstep(0, shadowLen, v);
         k *= 0.95 + 0.07 * (v / reveal);
         k *= 1 + fibers[i] * 0.022;
         // Rounded butt edge catching light at the bottom of each course.
@@ -359,7 +360,7 @@ export const boardBatten: PatternFactory = (spec) => {
   return {
     spanX: spacing * cols,
     spanY: 48,
-    minFeatureIn: 0.3,
+    minFeatureIn: batten / 2,
     render(s) {
       const { w, h, sx, sy, rgb, height } = s;
       const trng = specRng(spec, 4);
@@ -376,7 +377,7 @@ export const boardBatten: PatternFactory = (spec) => {
       const half = batten / 2;
       const raise = 0.75;
       const round = 0.12;
-      const shadowW = 0.55;
+      const shadowW = 0.7;
       for (let x = 0; x < w; x++) {
         const xIn = (x + 0.5) / sx;
         const col = Math.min(cols - 1, Math.floor(xIn / spacing));
@@ -390,7 +391,7 @@ export const boardBatten: PatternFactory = (spec) => {
         const bh = raise * smoothstep(0, round, edgeIn);
         // Cast shadow to the right of each batten (light from the left).
         const right = lx - half; // distance right of the batten's right edge (when lx small)
-        const sh = !onBatten && lx < spacing / 2 ? 0.62 + 0.38 * smoothstep(0, shadowW, right) : 1;
+        const sh = !onBatten && lx < spacing / 2 ? 0.5 + 0.5 * smoothstep(0, shadowW, right) : 1;
         const bt = battenTone[bcol];
         const bd = boardTone[col];
         for (let y = 0; y < h; y++) {
@@ -404,7 +405,7 @@ export const boardBatten: PatternFactory = (spec) => {
           height[i] = onBatten ? bh : 0;
         }
       }
-      return { bump: 0.6, ao: 0.5, aoRadiusIn: 0.6 };
+      return { bump: 0.8, ao: 0.6, aoRadiusIn: 0.6 };
     },
   };
 };
@@ -415,7 +416,7 @@ export const standingSeam: PatternFactory = (spec) => {
   return {
     spanX: panel * cols,
     spanY: 60,
-    minFeatureIn: 0.35,
+    minFeatureIn: 0.5,
     render(s) {
       const { w, h, sx, sy, rgb, height } = s;
       const trng = specRng(spec, 5);

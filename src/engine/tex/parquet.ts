@@ -76,7 +76,7 @@ export const herringbone: PatternFactory = (spec) => {
   return {
     spanX: mx * px,
     spanY: my * py,
-    minFeatureIn: Math.max(0.1, W / 8),
+    minFeatureIn: W / 2,
     render(s) {
       shadePlanks(s, spec, mx * my * 2, W, L, (xIn, yIn, out) => {
         // Screen → pattern coordinates (inverse 45° rotation).
@@ -134,7 +134,7 @@ export const chevron: PatternFactory = (spec) => {
   return {
     spanX: cols * C,
     spanY: my * py,
-    minFeatureIn: Math.max(0.1, W / 8),
+    minFeatureIn: W / 2,
     render(s) {
       shadePlanks(s, spec, cols * my, W, L, (xIn, yIn, out) => {
         const col = Math.min(cols - 1, Math.floor(xIn / C));

@@ -66,7 +66,7 @@ export const grass: PatternFactory = (spec) => {
   return {
     spanX: span,
     spanY: span,
-    minFeatureIn: 0.09,
+    minFeatureIn: 0.25,
     render(s: Surface) {
       const { w, h, sx, sy, rgb, height } = s;
       const ppi = (sx + sy) / 2;
@@ -143,7 +143,7 @@ export const mulch: PatternFactory = (spec) => {
   return {
     spanX: span,
     spanY: span,
-    minFeatureIn: Math.max(0.06, chip * 0.06),
+    minFeatureIn: chip / 4,
     render(s: Surface) {
       const { w, h, sx, sy, rgb, height } = s;
       const ppi = (sx + sy) / 2;

@@ -99,6 +99,7 @@ function AddAssetBody({
   const [view, setView] = useState<'cutout' | 'original'>('cutout');
   const [cut, setCut] = useState<CutResult | null>(null);
   const [cutting, setCutting] = useState(false);
+  const [cutError, setCutError] = useState<string | null>(null);
 
   const [details, setDetails] = useState<AssetDetails>(() => emptyDetails(defaultCategory));
   const [showErrors, setShowErrors] = useState(false);
@@ -126,6 +127,7 @@ function AddAssetBody({
       setView('cutout');
       setCut(null);
       setCutting(false);
+      setCutError(null);
       setDetails((d) => ({ ...d, name: d.name.trim() ? d.name : nameFromFilename(file.name) }));
       setPhase('edit');
     } catch (err) {
@@ -138,7 +140,10 @@ function AddAssetBody({
   // Background removal, re-run (debounced) as the tolerance changes.
   const hasCut = cut !== null;
   useEffect(() => {
-    if (!source || keepOriginal) return;
+    if (!source || keepOriginal) {
+      setCutting(false);
+      return;
+    }
     const run = ++runRef.current;
     setCutting(true);
     const timer = setTimeout(
@@ -146,9 +151,12 @@ function AddAssetBody({
         try {
           const removed = removeBackground(source, { tolerance });
           const result: CutResult = { image: trimTransparent(removed), kept: opaqueShare(removed), removedAny: hasTransparency(removed) };
-          if (run === runRef.current) setCut(result);
+          if (run === runRef.current) {
+            setCut(result);
+            setCutError(null);
+          }
         } catch (err) {
-          if (run === runRef.current) setError(`Couldn’t remove the background: ${errorText(err)}`);
+          if (run === runRef.current) setCutError(`Couldn’t remove the background: ${errorText(err).replace(/\.$/, '')}. Keep the original background, or try another photo.`);
         } finally {
           if (run === runRef.current) setCutting(false);
         }
@@ -176,6 +184,8 @@ function AddAssetBody({
   const finalImage = keepOriginal ? original : cut?.image ?? null;
   const preview = keepOriginal || view === 'original' ? original : cut?.image ?? source;
   const previewIsStale = !keepOriginal && view === 'cutout' && (cutting || !cut);
+  /** Saving waits for the cut-out to catch up with the tolerance slider. */
+  const notReady = !finalImage || (!keepOriginal && cutting);
 
   const safeClose = useStableCallback(() => {
     if (saving) return;
@@ -184,7 +194,7 @@ function AddAssetBody({
 
   const save = async (place: boolean) => {
     setShowErrors(true);
-    if (hasErrors(validateDetails(details)) || !finalImage || saving) return;
+    if (hasErrors(validateDetails(details)) || !finalImage || notReady || saving) return;
     setSaving(place ? 'place' : 'save');
     setError(null);
     try {
@@ -247,13 +257,13 @@ function AddAssetBody({
         <Button
           variant={canPlace ? 'secondary' : 'primary'}
           loading={saving === 'save'}
-          disabled={!finalImage || (!!saving && saving !== 'save')}
+          disabled={notReady || (!!saving && saving !== 'save')}
           onClick={() => void save(false)}
         >
           Save to library
         </Button>
         {canPlace && (
-          <Button variant="primary" loading={saving === 'place'} disabled={!finalImage || (!!saving && saving !== 'place')} onClick={() => void save(true)}>
+          <Button variant="primary" loading={saving === 'place'} disabled={notReady || (!!saving && saving !== 'place')} onClick={() => void save(true)}>
             Save &amp; place
           </Button>
         )}
@@ -358,6 +368,7 @@ function AddAssetBody({
               </div>
             )}
 
+            {!keepOriginal && cutError && <Callout tone="warning">{cutError}</Callout>}
             {!keepOriginal && cut && !cutting && cut.kept < 0.03 && (
               <Callout tone="warning">Almost everything was removed. Lower the tolerance, or keep the original background.</Callout>
             )}

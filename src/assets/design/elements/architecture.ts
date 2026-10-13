@@ -82,7 +82,7 @@ export const EXTERIOR_PAINT: ElementInput = {
   description: 'Body, trim and accent colors for the house — or new siding.',
   icon: 'PaintRoller',
   setting: 'exterior',
-  zoneKinds: ['facade', 'trim'],
+  zoneKinds: ['facade', 'trim', 'columns', 'windows', 'front-door', 'garage-door'],
   dimensions: [
     {
       id: 'scheme',

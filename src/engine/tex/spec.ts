@@ -138,12 +138,29 @@ export function pickTone(rng: Rng, spec: NormSpec, opts: ToneOptions = {}): Vec3
   let c = pal[rng.int(pal.length)];
   if (pal.length > 1) c = mix3(c, pal[rng.int(pal.length)], rng.next() * (opts.blend ?? 0.45) * v);
   const l = Math.exp(rng.normal() * (opts.light ?? 0.22) * v);
-  const hs = (opts.hue ?? 0.05) * v;
+  // Hue jitter scaled by saturation, so whites and grays don't pick up tints.
+  const mx = Math.max(c[0], c[1], c[2]);
+  const sat = mx > 1e-6 ? (mx - Math.min(c[0], c[1], c[2])) / mx : 0;
+  const hs = (opts.hue ?? 0.05) * v * (0.2 + 0.8 * sat);
   return [
     c[0] * l * Math.exp(rng.normal() * hs),
     c[1] * l * Math.exp(rng.normal() * hs),
     c[2] * l * Math.exp(rng.normal() * hs),
   ];
+}
+
+/**
+ * A blended per-element tone for materials whose palette describes a mix
+ * (granule blends, weathered cedar): the palette mean pulled part-way
+ * (`pull`) toward one random entry, with lightness jitter.
+ */
+export function blendTone(rng: Rng, spec: NormSpec, pull: number, light: number): Vec3 {
+  const m = paletteMean(spec.palette);
+  const c = spec.palette[rng.int(spec.palette.length)];
+  const v = 0.12 + 0.88 * spec.variation;
+  const t = pull * (0.4 + 0.6 * rng.next()) * v;
+  const l = Math.exp(rng.normal() * light * v);
+  return [(m[0] + (c[0] - m[0]) * t) * l, (m[1] + (c[1] - m[1]) * t) * l, (m[2] + (c[2] - m[2]) * t) * l];
 }
 
 /** Root RNG for a spec, separated per purpose by `tag`. */

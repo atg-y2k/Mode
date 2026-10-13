@@ -20,9 +20,10 @@ export function hashString(s: string): number {
 }
 
 const HEX6 = /^#?([0-9a-f]{6})$/i;
-const HEX3 = /^#?([0-9a-f])([0-9a-f])([0-9a-f])$/i;
+/** Short form only with '#', so plain words like 'bad' are not read as colors. */
+const HEX3 = /^#([0-9a-f])([0-9a-f])([0-9a-f])$/i;
 
-/** '#ABC' / 'abc' / '#aabbcc' → '#aabbcc'; anything else → undefined. */
+/** '#ABC' / '#aabbcc' / 'aabbcc' → '#aabbcc'; anything else → undefined. */
 export function normalizeHex(input: string | null | undefined): string | undefined {
   if (typeof input !== 'string') return undefined;
   const s = input.trim();

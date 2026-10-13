@@ -235,6 +235,9 @@ function ProjectTab() {
               onChange={(e) => {
                 setZone(e.target.value);
                 setZoneError(false);
+                // Save as soon as it's a valid zone (blur may never come if the dialog closes with Escape).
+                const n = normalizeZone(e.target.value);
+                if (n && n !== useStore.getState().project?.location.hardinessZone) setLocation({ hardinessZone: n });
               }}
               onBlur={() => {
                 const v = zone.trim();

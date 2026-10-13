@@ -176,7 +176,7 @@ export function SpacesSidebar({ variant = 'desktop' }: { variant?: 'desktop' | '
     >
       {variant === 'mobile' && (
         <div className="flex flex-col gap-0.5 border-b border-line px-3 pb-3 pt-3">
-          <ProjectName className="-ml-2 text-xl" />
+          <ProjectName className="-ml-2 max-w-full self-start" large />
           <SaveStatus />
         </div>
       )}

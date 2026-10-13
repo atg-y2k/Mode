@@ -7,7 +7,7 @@ import type { PatternFactory } from './plan';
 import type { Rng } from './rng';
 import { jointColor, jointWidth, paletteMean, pickTone, specRng, type NormSpec } from './spec';
 import { clamp, mix3, scale3, wrap, type Surface, type Vec3 } from './surface';
-import { makeSites, voronoiMap } from './voronoi';
+import { makeSites, pebbleMap, voronoiMap } from './voronoi';
 
 /** Sandy / mortar joint fill a little darker than the stone. */
 function defaultJoint(spec: NormSpec, k: number): Vec3 {
@@ -115,7 +115,7 @@ export const stonePavers: PatternFactory = (spec) => {
   return {
     spanX: gx * pmx,
     spanY: gy * pmy,
-    minFeatureIn: Math.max(0.12, joint),
+    minFeatureIn: Math.min(mx, my) / 2,
     render(s) {
       const rng = specRng(spec, 20);
       const { owner, pavers } = packPavers(rng, gx, gy);
@@ -197,15 +197,21 @@ interface VoronoiStoneOptions {
   toneHue: number;
   mottle: number;
   speckle: number;
-  /** Fraction of the cell kept as the stone (shrinks it inside its cell; gravel). */
   ao: number;
+  /**
+   * Pebbles: > 0 rounds each stone into an ellipse of about this fraction of
+   * the cell (random size, aspect and orientation) inside its Voronoi cell.
+   */
+  pebble: number;
+  /** Joint width variation along the edges (0..1). */
+  jointVar: number;
 }
 
 function voronoiStones(spec: NormSpec, o: VoronoiStoneOptions) {
   return {
     spanX: o.gx * o.cell,
     spanY: o.gy * o.cell,
-    minFeatureIn: Math.max(0.05, Math.min(o.joint, o.cell * 0.15)),
+    minFeatureIn: o.cell / 6,
     render(s: Surface) {
       const rng = specRng(spec, 30);
       const sites = makeSites(rng, o.gx, o.gy, o.cell, o.cell, o.jitter, o.weight, o.stagger);
@@ -226,9 +232,21 @@ function voronoiStones(spec: NormSpec, o: VoronoiStoneOptions) {
       const map = voronoiMap(s, sites, wx, wy);
       const tones: Vec3[] = [];
       const lift: number[] = [];
+      // Pebble ellipse per site: inverse radii along its axes and orientation.
+      const ea = new Float32Array(n);
+      const eb = new Float32Array(n);
+      const ec = new Float32Array(n);
+      const es = new Float32Array(n);
       for (let k = 0; k < n; k++) {
         tones.push(pickTone(rng, spec, { light: o.toneLight, hue: o.toneHue, blend: 0.7 }));
         lift.push(rng.range(-1, 1));
+        const r = o.cell * o.pebble * rng.range(0.7, 1.15);
+        const asp = rng.range(1, 1.6);
+        ea[k] = 1 / (r * Math.sqrt(asp));
+        eb[k] = Math.sqrt(asp) / r;
+        const th = rng.next() * Math.PI;
+        ec[k] = Math.cos(th);
+        es[k] = Math.sin(th);
       }
       const off = offsets(rng, n, w, h);
       const rough = fbmField(w, h, cellsFor(w, o.roughScale * sx), cellsFor(h, o.roughScale * sy), 4, 0.55, spec.seed ^ 0x303);
@@ -242,12 +260,22 @@ function voronoiStones(spec: NormSpec, o: VoronoiStoneOptions) {
         for (let x = 0; x < w; x++) {
           const i = y * w + x;
           const id = map.id[i];
-          const edge = map.edge[i] - half;
+          let edge = map.edge[i] - half * (1 + o.jointVar * mott[i]);
+          if (o.pebble > 0) {
+            // Elliptical pebble: distance-like measure in inches from its rim.
+            const dx = map.dx[i];
+            const dy = map.dy[i];
+            const pa = (dx * ec[id] + dy * es[id]) * ea[id];
+            const pb = (-dx * es[id] + dy * ec[id]) * eb[id];
+            const rr = Math.sqrt(pa * pa + pb * pb);
+            const rim = (1 - rr) / Math.max(ea[id], eb[id]);
+            if (rim < edge) edge = rim;
+          }
           const cov = clamp(edge * ppi + 0.5, 0, 1);
           const j = shifted(x, y, off[id * 2], off[id * 2 + 1], w, h);
           const t = tones[id];
           const k = 1 + mott[j] * o.mottle + speck[i] * o.speckle + rough[j] * o.mottle * 0.5;
-          const jk = 1 + speck[i] * 0.12;
+          const jk = 1 + speck[i] * 0.2 + mott[i] * 0.25;
           const p = i * 3;
           rgb[p] = jc[0] * jk * (1 - cov) + t[0] * k * cov;
           rgb[p + 1] = jc[1] * jk * (1 - cov) + t[1] * k * cov;
@@ -286,59 +314,142 @@ export const flagstone: PatternFactory = (spec) => {
     mottle: 0.11,
     speckle: 0.03,
     ao: 1.6,
+    pebble: 0,
+    jointVar: 0.5,
   });
 };
 
-export const cobblestone: PatternFactory = (spec) => {
-  const cell = clamp((spec.uw + spec.uh) / 2, 1.5, 16);
-  const g = clamp(Math.round(40 / cell / 2) * 2, 4, 24);
-  const joint = jointWidth(spec, clamp(cell * 0.1, 0.25, 1));
-  return voronoiStones(spec, {
-    cell,
-    gx: g,
-    gy: g,
-    jitter: 0.35,
-    weight: 0.05,
-    stagger: true,
-    joint,
-    jointColor: jointColor(spec, defaultJoint(spec, 0.35)),
-    warp: cell * 0.05,
-    warpScale: cell * 0.5,
-    round: cell * 0.32,
-    dome: cell * 0.18,
-    rough: cell * 0.02,
-    roughScale: cell * 0.3,
-    toneLight: 0.2,
-    toneHue: 0.05,
-    mottle: 0.08,
-    speckle: 0.08,
-    ao: 1.6 / Math.max(0.5, cell * 0.25),
-  });
-};
 
+interface PebbleBedOptions {
+  cell: number;
+  g: number;
+  jitter: number;
+  /** Pebble radius range as a fraction of the cell, and max aspect ratio. */
+  rMin: number;
+  rMax: number;
+  aspect: number;
+  /** Dome height as a fraction of the radius (range) and random elevation (fraction of cell). */
+  domeMin: number;
+  domeMax: number;
+  zJitter: number;
+  /** What shows between pebbles. */
+  under: Vec3;
+  underDepth: number;
+  toneLight: number;
+  toneHue: number;
+  bump: number;
+}
+
+/**
+ * A bed of rounded stones over an under-layer (pebbleMap): gravel and river
+ * rock overlap densely; cobbles sit apart in mortar.
+ */
+function pebbleBed(spec: NormSpec, o: PebbleBedOptions) {
+  const span = o.g * o.cell;
+  return {
+    spanX: span,
+    spanY: span,
+    minFeatureIn: o.cell / 3,
+    render(s: Surface) {
+      const { w, h, sx, sy, rgb, height } = s;
+      const cell = o.cell;
+      const rng = specRng(spec, 31);
+      const sites = makeSites(rng, o.g, o.g, cell, cell, o.jitter, 0, true);
+      const n = o.g * o.g;
+      const shapes = {
+        ia: new Float32Array(n),
+        ib: new Float32Array(n),
+        cos: new Float32Array(n),
+        sin: new Float32Array(n),
+        dome: new Float32Array(n),
+        z: new Float32Array(n),
+      };
+      const tones: Vec3[] = [];
+      for (let k = 0; k < n; k++) {
+        const r = cell * rng.range(o.rMin, o.rMax);
+        const asp = rng.range(1, o.aspect);
+        shapes.ia[k] = 1 / (r * Math.sqrt(asp));
+        shapes.ib[k] = Math.sqrt(asp) / r;
+        const th = rng.next() * Math.PI;
+        shapes.cos[k] = Math.cos(th);
+        shapes.sin[k] = Math.sin(th);
+        shapes.dome[k] = r * rng.range(o.domeMin, o.domeMax);
+        shapes.z[k] = rng.next() * cell * o.zJitter;
+        tones.push(pickTone(rng, spec, { light: o.toneLight, hue: o.toneHue, blend: 0.7 }));
+      }
+      const map = pebbleMap(s, sites, shapes);
+      const mott = fbmField(w, h, cellsFor(w, cell * 0.5 * sx), cellsFor(h, cell * 0.5 * sy), 2, 0.5, spec.seed ^ 0x311);
+      const speck = new Float32Array(w * h);
+      addWhiteNoise(speck, w, h, spec.seed ^ 0x312, 1);
+      const patch = fbmField(w, h, cellsFor(w, 8 * sx), cellsFor(h, 8 * sy), 3, 0.5, spec.seed ^ 0x313);
+      const under = o.under;
+      for (let i = 0, p = 0; i < w * h; i++, p += 3) {
+        const id = map.id[i];
+        const pk = 1 + patch[i] * 0.06;
+        if (id < 0) {
+          const k = (0.8 + speck[i] * 0.22 + mott[i] * 0.3) * pk;
+          rgb[p] = under[0] * k;
+          rgb[p + 1] = under[1] * k;
+          rgb[p + 2] = under[2] * k;
+          height[i] = -o.underDepth;
+          continue;
+        }
+        const t = tones[id];
+        // Slightly darker toward the rim where the stone turns away.
+        const rim = map.rr[i];
+        const k = (1 + mott[i] * 0.07 + speck[i] * 0.04) * (1 - 0.18 * rim * rim * rim) * pk;
+        rgb[p] = t[0] * k;
+        rgb[p + 1] = t[1] * k;
+        rgb[p + 2] = t[2] * k;
+        height[i] = map.height[i];
+      }
+      return { bump: o.bump, ao: 2.2 / cell, aoRadiusIn: cell * 0.45, maxSlope: 1.4 };
+    },
+  };
+}
+
+/** Gravel / river rock: dense overlapping pebbles of mixed size, color and orientation. */
 export const gravel: PatternFactory = (spec) => {
   const cell = clamp((spec.uw + spec.uh) / 2, 0.15, 6);
-  const g = clamp(Math.round(18 / cell), 10, 72);
-  return voronoiStones(spec, {
+  return pebbleBed(spec, {
     cell,
-    gx: g,
-    gy: g,
+    g: clamp(Math.round(18 / cell), 10, 72),
     jitter: 0.9,
-    weight: 0.1,
-    stagger: true,
-    joint: jointWidth(spec, cell * 0.12),
-    jointColor: jointColor(spec, scale3(paletteMean(spec.palette), 0.22)),
-    warp: cell * 0.12,
-    warpScale: cell * 0.6,
-    round: cell * 0.4,
-    dome: cell * 0.3,
-    rough: cell * 0.015,
-    roughScale: cell * 0.4,
+    rMin: 0.5,
+    rMax: 0.8,
+    aspect: 1.7,
+    domeMin: 0.45,
+    domeMax: 0.7,
+    zJitter: 0.35,
+    under: jointColor(spec, scale3(paletteMean(spec.palette), 0.3)),
+    underDepth: cell * 0.1,
     toneLight: 0.3,
     toneHue: 0.08,
-    mottle: 0.06,
-    speckle: 0.05,
-    ao: 2.5 / cell,
+    bump: 0.75,
+  });
+};
+
+/** Cobblestone: rounded stones in rough rows, set apart in mortar or sand. */
+export const cobblestone: PatternFactory = (spec) => {
+  const cell = clamp((spec.uw + spec.uh) / 2, 1.5, 16);
+  const joint = jointWidth(spec, clamp(cell * 0.12, 0.3, 1.2));
+  // Stones fill the cell minus the joint (radius as a fraction of the cell).
+  const fill = clamp(0.5 - joint / (2 * cell), 0.3, 0.5);
+  return pebbleBed(spec, {
+    cell,
+    g: clamp(Math.round(40 / cell / 2) * 2, 4, 24),
+    jitter: 0.3,
+    rMin: fill * 1.12,
+    rMax: fill * 1.32,
+    aspect: 1.25,
+    domeMin: 0.28,
+    domeMax: 0.4,
+    zJitter: 0.04,
+    under: jointColor(spec, defaultJoint(spec, 0.5)),
+    underDepth: cell * 0.05,
+    toneLight: 0.2,
+    toneHue: 0.05,
+    bump: 1,
   });
 };
 
@@ -368,7 +479,7 @@ export const stoneVeneer: PatternFactory = (spec) => {
   return {
     spanX,
     spanY,
-    minFeatureIn: Math.max(0.1, joint * 0.8),
+    minFeatureIn: course / 3,
     render(s) {
       const rng = specRng(spec, 40);
       const heights = partition(rng, spanY, course, 0.45);
@@ -434,7 +545,7 @@ export const stoneVeneer: PatternFactory = (spec) => {
           const ins = half + inset[id] * 0.25;
           const du = Math.min(u - ins, c.lens[kk] - ins - u);
           const dv = Math.min(v - half, c.h - half - v - inset[id] * 0.5);
-          const rr = Math.min(1.2, course * 0.3);
+          const rr = Math.min(0.7, course * 0.2);
           const ax = Math.max(rr - du, 0);
           const ay = Math.max(rr - dv, 0);
           const edge = rr - Math.sqrt(ax * ax + ay * ay) + edgeN[i] * (0.18 + joint * 0.4);

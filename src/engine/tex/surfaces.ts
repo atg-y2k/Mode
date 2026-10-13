@@ -5,8 +5,8 @@
 import { addFbm, addStreaks, addWhiteNoise, cellsFor, fbmField } from './noise';
 import type { PatternFactory } from './plan';
 import { hash3 } from './rng';
-import { jointColor, jointWidth, paletteMean, pickTone, specRng, type NormSpec } from './spec';
-import { clamp, luminance, mix3, scale3, smoothstep, type Surface, type Vec3 } from './surface';
+import { jointColor, jointWidth, paletteMean, pickTone, specRng } from './spec';
+import { clamp, mix3, scale3, smoothstep, type Surface, type Vec3 } from './surface';
 
 /** Signed distance (inches) to the nearest grid line of a `cell`-inch grid; negative inside the joint. */
 function gridEdge(xIn: number, yIn: number, cell: number, half: number): number {
@@ -23,11 +23,11 @@ export const concrete: PatternFactory = (spec) => {
   const slab = Math.max(spec.uw, spec.uh);
   const joints = spec.joint !== null && spec.joint.widthIn > 0 && slab >= 18;
   const slabs = slab >= 60 ? 1 : 2;
-  const span = joints ? clamp(slab, 18, 240) * slabs : 48;
+  const span = joints ? clamp(slab, 18, 240) * slabs : 60;
   return {
     spanX: span,
     spanY: span,
-    minFeatureIn: joints ? Math.max(0.12, spec.joint!.widthIn) : 0.12,
+    minFeatureIn: 0.5,
     render(s: Surface) {
       const { w, h, sx, sy, rgb, height } = s;
       const ppi = (sx + sy) / 2;
@@ -35,8 +35,9 @@ export const concrete: PatternFactory = (spec) => {
       const v = spec.variation;
       const tones: Vec3[] = [];
       for (let k = 0; k < 4; k++) tones.push(pickTone(rng, spec, { light: 0.05, hue: 0.015, blend: 0.4 }));
-      const big = fbmField(w, h, cellsFor(w, 14 * sx), cellsFor(h, 14 * sy), 4, 0.55, spec.seed ^ 0x701);
-      const mid = fbmField(w, h, cellsFor(w, 2 * sx), cellsFor(h, 2 * sy), 3, 0.5, spec.seed ^ 0x702);
+      // Cloudy cure variation, trowel blotches, sand/aggregate grain.
+      const big = fbmField(w, h, cellsFor(w, 18 * sx), cellsFor(h, 18 * sy), 5, 0.6, spec.seed ^ 0x701);
+      const mid = fbmField(w, h, cellsFor(w, 1.6 * sx), cellsFor(h, 1.6 * sy), 3, 0.6, spec.seed ^ 0x702);
       const fine = new Float32Array(w * h);
       addWhiteNoise(fine, w, h, spec.seed ^ 0x703, 1);
       const broom = new Float32Array(w * h);
@@ -44,6 +45,9 @@ export const concrete: PatternFactory = (spec) => {
       const jc = joints ? jointColor(spec, [0, 0, 0]) : ([0, 0, 0] as Vec3);
       const half = joints ? jointWidth(spec, 0.25) / 2 : 0;
       const seed = spec.seed;
+      // Fine grain fades as it drops below pixel size, so coarse tiles aren't noisy.
+      const grainAmp = 0.05 * clamp(ppi / 12, 0.3, 1);
+      const bigAmp = 0.07 + 0.09 * v;
       for (let y = 0; y < h; y++) {
         const yIn = (y + 0.5) / sy;
         for (let x = 0; x < w; x++) {
@@ -51,14 +55,15 @@ export const concrete: PatternFactory = (spec) => {
           const xIn = (x + 0.5) / sx;
           const slabId = joints ? (Math.floor(xIn / slab) + Math.floor(yIn / slab) * 2) & 3 : 0;
           const t = tones[slabId];
-          // Aggregate specks: sparse pixels a little lighter or darker.
           const hsh = hash3(x, y, seed) & 255;
-          const speck = hsh < 6 ? -0.12 : hsh > 250 ? 0.08 : 0;
-          const k = 1 + big[i] * (0.05 + 0.07 * v) + mid[i] * 0.025 + fine[i] * 0.035 + broom[i] * 0.012 + speck;
+          const speck = hsh < 5 ? -0.14 : hsh > 251 ? 0.08 : 0;
+          const bg = big[i];
+          const k =
+            1 + bg * bigAmp + Math.max(0, bg - 0.25) * -0.25 * v + mid[i] * 0.04 + fine[i] * grainAmp + broom[i] * 0.014 + speck * clamp(ppi / 10, 0.3, 1);
           let r = t[0] * k;
           let g = t[1] * k;
           let b = t[2] * k;
-          let hgt = mid[i] * 0.008 + fine[i] * 0.003;
+          let hgt = mid[i] * 0.01 + fine[i] * 0.004;
           if (joints) {
             const e = gridEdge(xIn, yIn, slab, half);
             const cov = clamp(e * ppi + 0.5, 0, 1);
@@ -86,32 +91,33 @@ export const concrete: PatternFactory = (spec) => {
 // ---------------------------------------------------------------------------
 
 export const stucco: PatternFactory = (spec) => ({
-  spanX: 24,
-  spanY: 24,
-  minFeatureIn: 0.08,
+  spanX: 30,
+  spanY: 30,
+  minFeatureIn: 0.3,
   render(s: Surface) {
     const { w, h, sx, sy, rgb, height } = s;
     const rng = specRng(spec, 80);
     const t = pickTone(rng, spec, { light: 0.02, hue: 0.01, blend: 0.3 });
-    const pal2 = spec.palette.length > 1 ? spec.palette[1] : scale3(t, 0.93);
-    const mott = fbmField(w, h, cellsFor(w, 7 * sx), cellsFor(h, 7 * sy), 4, 0.55, spec.seed ^ 0x801);
+    const pal2 = spec.palette.length > 1 ? spec.palette[1] : scale3(t, 0.94);
+    const mott = fbmField(w, h, cellsFor(w, 8 * sx), cellsFor(h, 8 * sy), 4, 0.55, spec.seed ^ 0x801);
+    // Sand-float grain: dense small bumps.
     const sand = new Float32Array(w * h);
-    addFbm(sand, w, h, cellsFor(w, 0.16 * sx), cellsFor(h, 0.16 * sy), 2, 0.5, spec.seed ^ 0x802, 1);
-    addWhiteNoise(sand, w, h, spec.seed ^ 0x803, 0.5);
-    // Skip-trowel: flat raised patches with soft edges.
-    const trowel = fbmField(w, h, cellsFor(w, 3.5 * sx), cellsFor(h, 2.5 * sy), 4, 0.55, spec.seed ^ 0x804);
-    const amp = 0.4 + 0.6 * spec.variation;
+    addFbm(sand, w, h, cellsFor(w, 0.3 * sx), cellsFor(h, 0.3 * sy), 3, 0.6, spec.seed ^ 0x802, 1);
+    addWhiteNoise(sand, w, h, spec.seed ^ 0x803, 0.3);
+    // Trowel texture: soft, low swirls (no hard-edged patches).
+    const trowel = fbmField(w, h, cellsFor(w, 2.2 * sx), cellsFor(h, 1.6 * sy), 3, 0.55, spec.seed ^ 0x804);
+    const amp = 0.5 + 0.5 * spec.variation;
     for (let i = 0, p = 0; i < w * h; i++, p += 3) {
-      const patch = smoothstep(-0.05, 0.12, trowel[i]);
       const m = mott[i];
-      const c = mix3(t, pal2, clamp(0.5 + m * 1.5, 0, 1) * 0.35);
-      const k = 1 + m * 0.04 + sand[i] * 0.03 * (1 - patch * 0.6) + patch * 0.015;
+      const c = mix3(t, pal2, clamp(0.5 + m * 1.6, 0, 1) * 0.4);
+      const tr = smoothstep(-0.3, 0.45, trowel[i]);
+      const k = 1 + m * 0.045 + sand[i] * 0.02 * (1.1 - tr * 0.5);
       rgb[p] = c[0] * k;
       rgb[p + 1] = c[1] * k;
       rgb[p + 2] = c[2] * k;
-      height[i] = (sand[i] * 0.02 * (1 - patch * 0.7) + patch * 0.06) * amp;
+      height[i] = (sand[i] * 0.045 * (1.1 - tr * 0.6) + tr * 0.04) * amp;
     }
-    return { bump: 1.1, ao: 6, aoRadiusIn: 0.15 };
+    return { bump: 1, ao: 5, aoRadiusIn: 0.12 };
   },
 });
 
@@ -120,45 +126,38 @@ export const stucco: PatternFactory = (spec) => ({
 // ---------------------------------------------------------------------------
 
 export const carpet: PatternFactory = (spec) => {
-  const pitch = clamp(Math.min(spec.uw, spec.uh), 0.06, 1);
+  const pile = clamp(Math.min(spec.uw, spec.uh), 0.05, 1);
   return {
     spanX: 18,
     spanY: 18,
-    minFeatureIn: Math.max(0.12, pitch),
+    minFeatureIn: 0.3,
     render(s: Surface) {
       const { w, h, sx, sy, rgb, height } = s;
-      const rng = specRng(spec, 90);
-      // Tuft lattice (rounded so it tiles), each tuft a heathered tone.
-      const nx = Math.max(1, Math.round(18 / pitch));
-      const ny = nx;
-      const ntones = 64;
-      const tones: Vec3[] = [];
-      for (let k = 0; k < ntones; k++) tones.push(pickTone(rng, spec, { light: 0.1, hue: 0.03, blend: 1 }));
-      const pile = fbmField(w, h, cellsFor(w, 5 * sx), cellsFor(h, 5 * sy), 3, 0.5, spec.seed ^ 0x901);
-      const fuzz = new Float32Array(w * h);
-      addWhiteNoise(fuzz, w, h, spec.seed ^ 0x902, 1);
-      const seed = spec.seed;
-      const cw = w / nx;
-      const ch = h / ny;
-      for (let y = 0; y < h; y++) {
-        const ty = Math.floor(y / ch);
-        const fy = (y + 0.5) / ch - ty - 0.5;
-        for (let x = 0; x < w; x++) {
-          const tx = Math.floor(x / cw);
-          const fx = (x + 0.5) / cw - tx - 0.5;
-          const tuft = hash3(tx % nx, ty % ny, seed);
-          const t = tones[tuft & (ntones - 1)];
-          const i = y * w + x;
-          const dome = 1 - (fx * fx + fy * fy) * 2;
-          const k = (1 + pile[i] * 0.05 + fuzz[i] * 0.07) * (0.92 + 0.08 * dome);
-          const p = i * 3;
-          rgb[p] = t[0] * k;
-          rgb[p + 1] = t[1] * k;
-          rgb[p + 2] = t[2] * k;
-          height[i] = dome * 0.02 + pile[i] * 0.02;
+      const pal = spec.palette;
+      // Heather: neighbouring yarn colors drift through soft blobs at tuft scale.
+      const pick = fbmField(w, h, cellsFor(w, Math.max(0.2, pile) * sx), cellsFor(h, Math.max(0.2, pile) * sy), 2, 0.6, spec.seed ^ 0x901);
+      const shade = fbmField(w, h, cellsFor(w, 7 * sx), cellsFor(h, 7 * sy), 3, 0.5, spec.seed ^ 0x902);
+      const tufts = new Float32Array(w * h);
+      addFbm(tufts, w, h, cellsFor(w, Math.max(0.08, pile * 0.6) * sx), cellsFor(h, Math.max(0.08, pile * 0.6) * sy), 2, 0.5, spec.seed ^ 0x903, 1);
+      addWhiteNoise(tufts, w, h, spec.seed ^ 0x904, 0.6);
+      const n = pal.length;
+      const mean = paletteMean(pal);
+      const contrast = 0.06 + 0.08 * spec.variation;
+      for (let i = 0, p = 0; i < w * h; i++, p += 3) {
+        let c: Vec3 = mean;
+        if (n > 1) {
+          // Mostly the blended yarn, drifting toward individual palette yarns.
+          const f = clamp((pick[i] * 0.5 + 0.5) * (n - 1), 0, n - 1 - 1e-3);
+          const k = Math.floor(f);
+          c = mix3(mean, mix3(pal[k], pal[k + 1], f - k), 0.55);
         }
+        const k = 1 + tufts[i] * contrast + shade[i] * 0.05;
+        rgb[p] = c[0] * k;
+        rgb[p + 1] = c[1] * k;
+        rgb[p + 2] = c[2] * k;
+        height[i] = tufts[i] * 0.03;
       }
-      return { bump: 0.5, ao: 3, aoRadiusIn: Math.max(0.1, pitch) };
+      return { bump: 0.35, ao: 2, aoRadiusIn: 0.1 };
     },
   };
 };
@@ -167,7 +166,12 @@ export const carpet: PatternFactory = (spec) => {
 // Marble
 // ---------------------------------------------------------------------------
 
-/** Veins of `spec` over the whole surface; `tiles` > 0 shifts the field per tile so veins break at joints. */
+/**
+ * Veined marble: a few main veins following one direction, warped by smooth
+ * noise and fading in and out along their length, thin crossing veins, soft
+ * clouds. With an explicit joint and a unit ≤ 48 in it is laid as tiles,
+ * each tile showing a different part of the stone.
+ */
 export const marble: PatternFactory = (spec) => {
   const unit = Math.max(spec.uw, spec.uh);
   const tiled = spec.joint !== null && spec.joint.widthIn > 0 && unit <= 48;
@@ -176,63 +180,72 @@ export const marble: PatternFactory = (spec) => {
   return {
     spanX: span,
     spanY: span,
-    minFeatureIn: tiled ? Math.max(0.05, spec.joint!.widthIn) : 0.08,
+    minFeatureIn: 0.5,
     render(s: Surface) {
       const { w, h, sx, sy, rgb, height } = s;
       const ppi = (sx + sy) / 2;
       const rng = specRng(spec, 100);
       const base = spec.palette[0];
       const vein = spec.palette.length > 1 ? spec.palette[1] : scale3(base, 0.45);
-      const accent = spec.palette.length > 2 ? spec.palette[2] : mix3(base, vein, 0.4);
-      const turb = fbmField(w, h, cellsFor(w, 9 * sx), cellsFor(h, 9 * sy), 5, 0.55, spec.seed ^ 0xa01, 'abs');
-      const turb2 = fbmField(w, h, cellsFor(w, 4 * sx), cellsFor(h, 4 * sy), 4, 0.6, spec.seed ^ 0xa02);
-      const cloud = fbmField(w, h, cellsFor(w, 12 * sx), cellsFor(h, 12 * sy), 4, 0.55, spec.seed ^ 0xa03);
-      const crystal = new Float32Array(w * h);
-      addWhiteNoise(crystal, w, h, spec.seed ^ 0xa04, 1);
-      // Main vein direction: integer cycles across the tile keep it periodic.
-      const fxA = rng.chance(0.5) ? 1 : 2;
+      const accent = spec.palette.length > 2 ? spec.palette[2] : mix3(base, vein, 0.35);
+      // Smooth flow for the main veins, finer warp for ragged vein edges.
+      const warp = fbmField(w, h, cellsFor(w, 22 * sx), cellsFor(h, 22 * sy), 3, 0.45, spec.seed ^ 0xa01);
+      const warp2 = fbmField(w, h, cellsFor(w, 4 * sx), cellsFor(h, 4 * sy), 4, 0.6, spec.seed ^ 0xa02);
+      const fade = fbmField(w, h, cellsFor(w, 12 * sx), cellsFor(h, 12 * sy), 3, 0.5, spec.seed ^ 0xa03);
+      const cloud = fbmField(w, h, cellsFor(w, 14 * sx), cellsFor(h, 14 * sy), 4, 0.55, spec.seed ^ 0xa05);
+      // Integer cycles across the tile keep the sinusoid periodic.
+      const fxA = 1 + rng.int(2);
       const fyA = rng.chance(0.5) ? 1 : -1;
-      const fxB = rng.int(3) + 2;
-      const fyB = rng.chance(0.5) ? 2 : 3;
-      const phaseA = rng.next() * 6.283;
-      const phaseB = rng.next() * 6.283;
-      const strength = 0.55 + 0.45 * spec.variation;
+      const fxB = 2 + rng.int(3);
+      const fyB = rng.chance(0.5) ? 3 : -2;
+      const phA = rng.next() * 6.283;
+      const phB = rng.next() * 6.283;
+      const strength = 0.6 + 0.4 * spec.variation;
       const tileOff: number[] = [];
       for (let k = 0; k < n * n; k++) tileOff.push(rng.int(w), rng.int(h));
       const half = tiled ? jointWidth(spec, 0.0625) / 2 : 0;
       const jc = tiled ? jointColor(spec, scale3(base, 0.8)) : base;
+      const crystal = new Float32Array(w * h);
+      addWhiteNoise(crystal, w, h, spec.seed ^ 0xa04, 1);
+      const TAU = 6.283185307;
       for (let y = 0; y < h; y++) {
         const yIn = (y + 0.5) / sy;
         for (let x = 0; x < w; x++) {
           const xIn = (x + 0.5) / sx;
-          let j = y * w + x;
+          let xx = x;
+          let yy = y;
           let edge = Infinity;
           if (tiled) {
             const tid = Math.min(n - 1, Math.floor(xIn / unit)) + Math.min(n - 1, Math.floor(yIn / unit)) * n;
-            let xx = x + tileOff[tid * 2];
+            xx += tileOff[tid * 2];
             if (xx >= w) xx -= w;
-            let yy = y + tileOff[tid * 2 + 1];
+            yy += tileOff[tid * 2 + 1];
             if (yy >= h) yy -= h;
-            j = yy * w + xx;
             edge = gridEdge(xIn, yIn, unit, half);
           }
-          const X = (j % w) / w;
-          const Y = Math.floor(j / w) / h;
-          const a = Math.abs(Math.sin(6.283 * (fxA * X + fyA * Y) + phaseA + turb[j] * 7));
-          const b = Math.abs(Math.sin(6.283 * (fxB * X + fyB * Y) + phaseB + turb2[j] * 5 + turb[j] * 3));
-          const main = Math.pow(1 - smoothstep(0, 0.09, a), 2) * strength;
-          const thin = Math.pow(1 - smoothstep(0, 0.035, b), 2) * 0.55 * strength;
-          const haze = (1 - smoothstep(0, 0.45, a)) * 0.18 * strength;
-          const cl = clamp(0.5 + cloud[j], 0, 1);
-          let r = base[0] + (accent[0] - base[0]) * cl * 0.35;
-          let g = base[1] + (accent[1] - base[1]) * cl * 0.35;
-          let bb = base[2] + (accent[2] - base[2]) * cl * 0.35;
-          const vm = Math.min(1, main + thin + haze);
+          const j = yy * w + xx;
+          const X = (xx + 0.5) / w;
+          const Y = (yy + 0.5) / h;
+          const wa = warp[j];
+          const w2 = warp2[j];
+          const a = Math.abs(Math.sin(TAU * (fxA * X + fyA * Y) + phA + wa * 2.8 + w2 * 0.22));
+          const b = Math.abs(Math.sin(TAU * (fxB * X + fyB * Y) + phB + wa * 2 + w2 * 0.35));
+          const fd = fade[j];
+          const along = clamp(0.6 + fd * 1.8, 0, 1);
+          const wA = 0.025 + 0.04 * clamp(0.5 + fd * 1.5, 0, 1);
+          const core = 1 - smoothstep(0, wA, a);
+          const main = (core * 0.8 + (1 - smoothstep(0, wA * 7, a)) * 0.2) * along;
+          const thin = (1 - smoothstep(0, 0.012, b)) * 0.45 * clamp(0.15 - fd * 1.5, 0, 1);
+          const vm = Math.min(1, (main + thin) * strength);
+          const cl = clamp(0.5 + cloud[j] * 1.2, 0, 1) * 0.3;
+          let r = base[0] + (accent[0] - base[0]) * cl;
+          let g = base[1] + (accent[1] - base[1]) * cl;
+          let bb = base[2] + (accent[2] - base[2]) * cl;
           r += (vein[0] - r) * vm;
           g += (vein[1] - g) * vm;
           bb += (vein[2] - bb) * vm;
-          const k = 1 + crystal[y * w + x] * 0.012;
           const i = y * w + x;
+          const k = 1 + crystal[i] * 0.01;
           const p = i * 3;
           if (edge < Infinity) {
             const cov = clamp(edge * ppi + 0.5, 0, 1);
@@ -265,7 +278,7 @@ export const terrazzo: PatternFactory = (spec) => {
   return {
     spanX: span,
     spanY: span,
-    minFeatureIn: Math.max(0.06, chip * 0.25),
+    minFeatureIn: chip / 3,
     render(s: Surface) {
       const { w, h, sx, sy, rgb, height } = s;
       const ppi = (sx + sy) / 2;
@@ -338,7 +351,6 @@ export const terrazzo: PatternFactory = (spec) => {
               const e = nx[q] * dx + ny[q] * dy - nd[q];
               if (e > d) d = e;
             }
-            // Polygon may be wound either way; flip if the centre reads outside.
             const cov = clamp(0.5 - d, 0, 1);
             if (cov <= 0) continue;
             const i = yy * w + (((px % w) + w) % w);
@@ -368,13 +380,7 @@ export const terrazzo: PatternFactory = (spec) => {
           }
         }
       }
-      void luminance;
       return { bump: tiled ? 1 : 0, ao: tiled ? 1 : 0, aoRadiusIn: 0.15 };
     },
   };
 };
-
-/** Mean palette color (exported for tests / swatches of continuous surfaces). */
-export function surfaceMean(spec: NormSpec): Vec3 {
-  return paletteMean(spec.palette);
-}

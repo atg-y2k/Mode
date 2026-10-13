@@ -83,7 +83,7 @@ export const FURNITURE: ElementInput = {
   description: 'Furniture style, layout, upholstery color and rug.',
   icon: 'Sofa',
   setting: 'interior',
-  zoneKinds: ['furniture', 'rug'],
+  zoneKinds: ['furniture', 'rug', 'floor'],
   dimensions: [
     {
       id: 'style',
@@ -194,7 +194,7 @@ export const DECOR: ElementInput = {
   description: 'Art, mirrors, plants, textiles and objects that finish the room.',
   icon: 'Frame',
   setting: 'interior',
-  zoneKinds: ['decor'],
+  zoneKinds: ['decor', 'wall'],
   dimensions: [
     {
       id: 'accents',

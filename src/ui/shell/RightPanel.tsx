@@ -182,11 +182,14 @@ function Badge({ spec, compact }: { spec: BadgeSpec; compact?: boolean }) {
 function TabButton({
   tab,
   selected,
+  focusable = selected,
   orientation,
   onSelect,
 }: {
   tab: TabDef<string>;
   selected: boolean;
+  /** In the tab order (roving tabindex); stays true for the current tab while the panel is collapsed. */
+  focusable?: boolean;
   orientation: 'vertical' | 'horizontal';
   onSelect: () => void;
 }) {
@@ -200,7 +203,7 @@ function TabButton({
       id={`panel-tab-${tab.id}`}
       aria-selected={selected}
       aria-controls="workspace-panel"
-      tabIndex={selected ? 0 : -1}
+      tabIndex={focusable ? 0 : -1}
       title={tab.title}
       data-tab={tab.id}
       onClick={onSelect}
@@ -274,6 +277,7 @@ export function DesktopRightPanel() {
               key={t.id}
               tab={t}
               selected={t.id === tab.id && !collapsed}
+              focusable={t.id === tab.id}
               orientation="vertical"
               onSelect={() => {
                 if (t.id === tab.id) setPanelCollapsed(!collapsed);

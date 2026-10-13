@@ -13,7 +13,7 @@ import type { AssetDef, PlantFeasibility, PlantInfo, SunExposure } from '../../.
 import type { PlantProfile } from './plants';
 
 export interface FeasibilityContext {
-  /** USDA hardiness zone number of the property (e.g. parseZone('7a') → 7). */
+  /** USDA hardiness zone number of the property (e.g. parseZone('7a') → 7; 7.5 for "7b" is read as zone 7). */
   zone?: number;
   /** The zone as the user knows it ("7a"), used in messages; defaults to `zone`. */
   zoneLabel?: string;
@@ -108,7 +108,8 @@ function zoneChecks(info: PlantInfo, ctx: FeasibilityContext): Check[] {
   if (ctx.zone === undefined || !Number.isFinite(ctx.zone)) {
     return [{ kind: 'zone', level: 'info', text: `Rated ${range} — add your ZIP code to confirm it's hardy` }];
   }
-  const z = ctx.zone;
+  // half zones ("7b" read as 7.5 by some callers) belong to their whole zone
+  const z = Math.floor(ctx.zone);
   const you = `you're zone ${ctx.zoneLabel ?? z}`;
   if (z >= min && z <= max) return [{ kind: 'zone', level: 'ok', text: `Hardy in ${range} ✓ (${you})` }];
   if (z === min - 1) {
@@ -274,9 +275,12 @@ export function profileFeasibility(profile: PlantProfile, ctx: FeasibilityContex
   return feasibilityOf(profile, profile.name, ctx);
 }
 
-/** "Boxwood 'Green Velvet'" → "Boxwood". */
+/** "Boxwood 'Green Velvet'" → "Boxwood"; cultivar names may contain apostrophes ("Catmint 'Walker's Low'"). */
 export function shortPlantName(name: string): string {
-  return name.replace(/\s*'[^']*'/g, '').replace(/\s*\([^)]*\)/g, '').trim();
+  return name
+    .replace(/\s*'.*?'(?=\s|$|[,;)])/g, '')
+    .replace(/\s*\([^)]*\)/g, '')
+    .trim();
 }
 
 function listNames(names: string[]): string {

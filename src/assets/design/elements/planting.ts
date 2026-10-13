@@ -312,7 +312,7 @@ export const TREES_SHRUBS: ElementInput = {
   description: 'Add trees or large shrubs to frame the house, give shade or screen a view.',
   icon: 'Trees',
   setting: 'exterior',
-  zoneKinds: ['tree', 'shrubs'],
+  zoneKinds: ['tree', 'shrubs', 'lawn', 'planting-bed'],
   dimensions: [
     {
       id: 'role',

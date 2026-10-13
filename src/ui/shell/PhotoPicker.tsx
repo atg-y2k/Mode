@@ -1,4 +1,5 @@
 /** The shared hidden photo input behind pickPhotos(spaceId). Mounted once by the workspace. */
+import { useStore } from '../../state/store';
 import { importPhotosToSpace, registerPhotoPicker, takePickerTarget } from './photoImport';
 
 export function PhotoPicker() {
@@ -14,7 +15,7 @@ export function PhotoPicker() {
       onChange={(e) => {
         const files = Array.from(e.target.files ?? []);
         e.target.value = '';
-        const spaceId = takePickerTarget();
+        const spaceId = takePickerTarget() ?? useStore.getState().selection.spaceId;
         if (spaceId && files.length) void importPhotosToSpace(spaceId, files);
       }}
     />

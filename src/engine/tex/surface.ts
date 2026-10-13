@@ -81,6 +81,11 @@ export interface FinishOptions {
   aoRadiusIn?: number;
   /** Diffuse share of the light (rest is ambient). Default 0.55. */
   diffuse?: number;
+  /**
+   * Caps relief slopes (rise / run) so silhouette steps between stacked
+   * elements shade like a rounded edge rather than a cliff. Default 4.
+   */
+  maxSlope?: number;
 }
 
 /** Light from the upper left, slightly raking (unit vector, y down). */
@@ -124,6 +129,8 @@ export function finishSurface(s: Surface, opts: FinishOptions = {}): Uint8Clampe
     const du = (dif / flat) * -LY;
     const dz = (dif / flat) * LZ;
     const a0 = amb / flat;
+    const ms = opts.maxSlope ?? 4;
+    const ms2 = ms * ms;
     for (let y = 0; y < h; y++) {
       const up = (y === 0 ? h - 1 : y - 1) * w;
       const dn = (y === h - 1 ? 0 : y + 1) * w;
@@ -131,8 +138,14 @@ export function finishSurface(s: Surface, opts: FinishOptions = {}): Uint8Clampe
       for (let x = 0; x < w; x++) {
         const l = x === 0 ? w - 1 : x - 1;
         const r = x === w - 1 ? 0 : x + 1;
-        const gx = (height[row + r] - height[row + l]) * kx;
-        const gy = (height[dn + x] - height[up + x]) * ky;
+        let gx = (height[row + r] - height[row + l]) * kx;
+        let gy = (height[dn + x] - height[up + x]) * ky;
+        const g2 = gx * gx + gy * gy;
+        if (g2 > ms2) {
+          const f = ms / Math.sqrt(g2);
+          gx *= f;
+          gy *= f;
+        }
         // n = (-gx, -gy, 1) / |…|; shade = (amb + dif·max(0, n·L)) / flat
         const d = (gx * dl + gy * du + dz) / Math.sqrt(gx * gx + gy * gy + 1);
         shade[row + x] = d > 0 ? a0 + d : a0;

@@ -83,6 +83,13 @@ const TINTS: Record<AssetCategory, Tint[]> = {
 
 const HEX_RE = /^#[0-9a-f]{6}$/i;
 
+/** Any angle → -180..180. */
+function normalizeDegrees(deg: number): number {
+  if (!Number.isFinite(deg)) return 0;
+  const a = (((deg + 180) % 360) + 360) % 360 - 180;
+  return a === -180 ? 180 : a;
+}
+
 export function ObjectInspector({ obj, photo, design }: { obj: PlacedObject; photo: Photo; design: Design }) {
   const library = useStore((s) => s.library);
   const asset = useMemo(() => findAsset(obj.assetId, library), [obj.assetId, library]);
@@ -102,6 +109,7 @@ export function ObjectInspector({ obj, photo, design }: { obj: PlacedObject; pho
   const realHeightPx = asset && ppf ? asset.realHeightFt * ppf : null;
 
   const name = obj.label || asset?.name || 'Missing item';
+  const rotation = Math.round(normalizeDegrees(obj.rotation));
   const tints = asset ? (TINTS[asset.category] ?? DECOR_TINTS) : [];
   const tintable = isVectorAsset(asset);
 
@@ -186,7 +194,7 @@ export function ObjectInspector({ obj, photo, design }: { obj: PlacedObject; pho
             <div className="min-w-0 flex-1">
               <Slider
                 label="Rotation"
-                value={Math.round(obj.rotation)}
+                value={rotation}
                 min={-180}
                 max={180}
                 step={1}
@@ -194,7 +202,7 @@ export function ObjectInspector({ obj, photo, design }: { obj: PlacedObject; pho
                 onChange={(v) => update({ rotation: v }, 'rotation')}
               />
             </div>
-            <IconButton label="Straighten" size="sm" disabled={Math.round(obj.rotation) === 0} onClick={() => update({ rotation: 0 })}>
+            <IconButton label="Straighten" size="sm" disabled={rotation === 0} onClick={() => update({ rotation: 0 })}>
               <RotateCcw className="size-4" />
             </IconButton>
           </div>
