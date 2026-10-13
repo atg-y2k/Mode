@@ -49,9 +49,21 @@ export function setMask(maskId: string, mask: Mask): void {
   markMaskDirty(maskId);
 }
 
+/** A read-only tab (another tab owns the project) keeps mask edits in memory only. */
+let masksReadOnly = false;
+
+export function setMasksReadOnly(readOnly: boolean): void {
+  masksReadOnly = readOnly;
+  if (readOnly) {
+    for (const t of pendingMaskWrites.values()) clearTimeout(t);
+    pendingMaskWrites.clear();
+  }
+}
+
 /** Call after mutating a mask's pixels in place. */
 export function markMaskDirty(maskId: string, persistDelayMs = 600): void {
   maskListener?.(maskId);
+  if (masksReadOnly) return;
   const prev = pendingMaskWrites.get(maskId);
   if (prev) clearTimeout(prev);
   pendingMaskWrites.set(
@@ -66,6 +78,7 @@ export function markMaskDirty(maskId: string, persistDelayMs = 600): void {
 
 /** Write any pending mask changes immediately (before export / page hide). */
 export async function flushMasks(): Promise<void> {
+  if (masksReadOnly) return;
   const ids = [...pendingMaskWrites.keys()];
   for (const id of ids) {
     clearTimeout(pendingMaskWrites.get(id));

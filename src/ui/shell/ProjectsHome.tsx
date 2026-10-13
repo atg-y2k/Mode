@@ -159,7 +159,7 @@ function Hero({ compact }: { compact: boolean }) {
           <p className="max-w-xl rounded-xl border border-line bg-surface px-3.5 py-2.5 text-xs leading-relaxed text-muted">
             {aiSummary(level)}{' '}
             <button type="button" onClick={() => openSettings('server')} className="font-medium text-accent underline-offset-2 hover:underline">
-              How to turn on AI
+              Add a Claude key (optional)
             </button>
           </p>
         )}

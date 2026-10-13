@@ -266,3 +266,36 @@ describe('HTTP client', () => {
     await expect(studio.studioGetBlob('/api/products/image?url=y', 1000)).rejects.toMatchObject({ code: 'bad_request', message: 'Not an image.' });
   });
 });
+
+describe('AI request trimming', () => {
+  it('trims oversized plan requests to the server limits so they validate', async () => {
+    const { fitPlanRequest } = await import('./studio');
+    const { AI_LIMITS, PlanRequestSchema } = await import('../../shared/api');
+    const big = {
+      image: 'data:image/jpeg;base64,AAAA',
+      sceneSummary: 's',
+      zones: Array.from({ length: 150 }, (_, i) => ({ id: `z${i}`, kind: 'lawn' as const, label: 'x'.repeat(500), description: 'd', sun: null })),
+      paths: [],
+      location: null,
+      climate: null,
+      brief: {
+        prompt: 'p',
+        scope: 'zones' as const,
+        plantMaturity: 'established' as const,
+        targetZoneLabels: [],
+        elements: Array.from({ length: 30 }, () => ({ type: 'pathway' as const, label: 'Path', where: [], choices: [], note: 'n'.repeat(5000) })),
+      },
+      ideas: Array.from({ length: 80 }, () => 'idea'),
+      ideaImages: [],
+      count: 12,
+      compare: null,
+      refine: null,
+    };
+    expect(PlanRequestSchema.safeParse(big).success).toBe(false);
+    const fitted = fitPlanRequest(big);
+    expect(PlanRequestSchema.safeParse(fitted).success).toBe(true);
+    expect(fitted.zones).toHaveLength(AI_LIMITS.zones);
+    expect(fitted.ideas).toHaveLength(AI_LIMITS.ideas);
+    expect(fitted.count).toBe(AI_LIMITS.variations);
+  });
+});

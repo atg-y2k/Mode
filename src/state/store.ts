@@ -554,6 +554,7 @@ export const useStore = create<AppState>()((set, get) => {
     cleanupQueue.delete(projectId);
     if (get().project?.id !== projectId) return;
     readOnlyOf = projectId;
+    runtime.setMasksReadOnly(true);
     if (saveTimer) {
       clearTimeout(saveTimer);
       saveTimer = null;
@@ -732,6 +733,7 @@ export const useStore = create<AppState>()((set, get) => {
     }
     cleanupQueue.delete(p.id);
     readOnlyOf = writable ? null : p.id;
+    runtime.setMasksReadOnly(!writable);
     revs.set(p.id, rec.rev);
     const { selection, readOnly } = get();
     const valid = (!selection.spaceId || !!findSpace(p, selection.spaceId)) && (!selection.photoId || !!findPhoto(p, selection.photoId));
@@ -903,6 +905,7 @@ export const useStore = create<AppState>()((set, get) => {
       const prev = get().project;
       const left = prev ? leaveProject(prev) : undefined;
       readOnlyOf = writable ? null : id;
+      runtime.setMasksReadOnly(!writable);
       revs.set(id, rec.rev);
       set({
         project: p,
@@ -930,6 +933,7 @@ export const useStore = create<AppState>()((set, get) => {
       const prev = get().project;
       const left = prev ? leaveProject(prev) : undefined;
       readOnlyOf = null;
+      runtime.setMasksReadOnly(false);
       set({ project: null, readOnly: null, selection: EMPTY_SELECTION, past: [], future: [], placement: null });
       if (prev) {
         await left;
@@ -956,6 +960,7 @@ export const useStore = create<AppState>()((set, get) => {
       if (get().project?.id !== p.id) return;
       if (!rec) {
         readOnlyOf = p.id; // nothing to save back: it was deleted elsewhere
+        runtime.setMasksReadOnly(true);
         get().notify('This project was deleted in another tab.', 'error');
         await get().closeProject();
         return;

@@ -34,6 +34,7 @@ import { requestSceneAnalysis, useSceneJob } from './sceneJobs';
 import { openAddSpace, openSettings } from './shellUI';
 import { SPACE_ICONS } from './spaceMeta';
 import { ProjectName, SaveStatus } from './TopBar';
+import { mapSceneOffline } from '../../vision/ui/jobs';
 
 const EMPTY_SPACES: Space[] = [];
 
@@ -426,10 +427,22 @@ function PhotoThumb({ photo, active, onDialog }: { photo: Photo; active: boolean
     { label: 'Rename…', icon: <Pencil className="size-4" />, onSelect: () => onDialog({ kind: 'rename-photo', photoId: photo.id }) },
     {
       label: photo.scene ? 'Re-map scene' : 'Map scene',
-      hint: !aiEnabled ? 'Needs AI (see Settings)' : job ? 'Already running' : photo.scene ? 'Replaces the current map (undoable)' : 'Find areas, paths and architecture',
+      hint: !aiEnabled
+        ? 'On this device (free) — add a Claude key for architecture & sun reading'
+        : job
+          ? 'Already running'
+          : photo.scene
+            ? 'Replaces the current map (undoable)'
+            : 'Find areas, paths and architecture',
       icon: <ScanSearch className="size-4" />,
-      disabled: !aiEnabled || !!job,
+      disabled: !!job,
       onSelect: () => {
+        if (!aiEnabled) {
+          // No Claude key: map with the free on-device models instead.
+          void mapSceneOffline(photo.id);
+          useStore.getState().notify(`Mapping “${photo.name}” on this device…`, 'info');
+          return;
+        }
         if (requestSceneAnalysis(photo.id, { force: true })) useStore.getState().notify(`Mapping the scene of “${photo.name}”…`, 'info');
       },
     },

@@ -396,6 +396,28 @@ export type ProductFromUrlResponse = z.infer<typeof ProductFromUrlResponseSchema
 const ZoneKindZ = z.enum(ZONE_KINDS);
 const ElementTypeZ = z.enum(ELEMENT_TYPES);
 
+/**
+ * Size limits for AI request lists and texts: a single request can't turn into
+ * an enormous (and expensive) Claude prompt. Clients trim to these first.
+ */
+export const AI_LIMITS = {
+  zones: 100,
+  paths: 40,
+  ideas: 50,
+  ideaText: 1500,
+  label: 200,
+  description: 1000,
+  elements: 24,
+  where: 20,
+  choices: 20,
+  options: 12,
+  optionText: 600,
+  compareOptions: 8,
+  variations: 8,
+} as const;
+const Label = z.string().max(AI_LIMITS.label);
+const Desc = z.string().max(AI_LIMITS.description);
+
 /** POST /api/studio/scene — categorize the photo and map its zones and paths. */
 export const SceneRequestSchema = z.object({
   image: DataUrlZ,
@@ -515,12 +537,14 @@ export const ElementOptionsRequestSchema = z.object({
   elementLabel: z.string(),
   image: DataUrlZ.nullable(),
   sceneSummary: z.string().max(8000),
-  zoneLabels: z.array(z.string()),
-  ideas: z.array(z.string()).describe('Idea board descriptions / notes'),
+  zoneLabels: z.array(Label).max(AI_LIMITS.zones),
+  ideas: z.array(z.string().max(AI_LIMITS.ideaText)).max(AI_LIMITS.ideas).describe('Idea board descriptions / notes'),
   location: LocationZ.nullable(),
   climate: z.string().max(4000).nullable(),
   /** Built-in dimensions so the AI refines rather than reinvents them. */
-  existing: z.array(z.object({ id: z.string(), label: z.string(), optionLabels: z.array(z.string()) })),
+  existing: z
+    .array(z.object({ id: Label, label: Label, optionLabels: z.array(Label).max(AI_LIMITS.options * 2) }))
+    .max(AI_LIMITS.elements),
   /** Optional user question, e.g. "what stone sizes would suit a cottage look?" */
   ask: z.string().max(1000).nullable(),
 });
@@ -536,8 +560,8 @@ export type ElementOptionsResult = z.infer<typeof ElementOptionsResultSchema>;
 export const RecommendRequestSchema = z.object({
   image: DataUrlZ,
   sceneSummary: z.string().max(8000),
-  zones: z.array(z.object({ id: z.string(), kind: ZoneKindZ, label: z.string() })),
-  ideas: z.array(z.string()),
+  zones: z.array(z.object({ id: Label, kind: ZoneKindZ, label: Label })).max(AI_LIMITS.zones),
+  ideas: z.array(z.string().max(AI_LIMITS.ideaText)).max(AI_LIMITS.ideas),
   location: LocationZ.nullable(),
   climate: z.string().max(4000).nullable(),
   focus: z.string().max(1000).nullable(),
@@ -572,21 +596,24 @@ export const DescribeIdeaResultSchema = z.object({
 });
 export type DescribeIdeaResult = z.infer<typeof DescribeIdeaResultSchema>;
 
+
 /** POST /api/studio/plan — turn a brief into N variation instructions (or one per compared option). */
 export const PlanRequestSchema = z.object({
   /** Base image the variations start from (original photo or a chosen variation). */
   image: DataUrlZ,
   sceneSummary: z.string().max(8000),
-  zones: z.array(
-    z.object({
-      id: z.string(),
-      kind: ZoneKindZ,
-      label: z.string(),
-      description: z.string(),
-      sun: z.enum(['full-sun', 'part-sun', 'shade']).nullable(),
-    }),
-  ),
-  paths: z.array(z.object({ id: z.string(), label: z.string(), description: z.string() })),
+  zones: z
+    .array(
+      z.object({
+        id: Label,
+        kind: ZoneKindZ,
+        label: Label,
+        description: Desc,
+        sun: z.enum(['full-sun', 'part-sun', 'shade']).nullable(),
+      }),
+    )
+    .max(AI_LIMITS.zones),
+  paths: z.array(z.object({ id: Label, label: Label, description: Desc })).max(AI_LIMITS.paths),
   location: LocationZ.nullable(),
   /** Climate profile summary (zone, frost, rainfall, notes) for plant feasibility. */
   climate: z.string().max(4000).nullable(),
@@ -596,30 +623,39 @@ export const PlanRequestSchema = z.object({
     plantMaturity: z.enum(['new', 'established', 'mature']),
     /** How freely variations may reinterpret the brief (default balanced). */
     strictness: z.enum(['strict', 'balanced', 'creative']).optional(),
-    targetZoneLabels: z.array(z.string()),
-    elements: z.array(
-      z.object({
-        type: ElementTypeZ,
-        label: z.string(),
-        where: z.array(z.string()).describe('Zone / path labels'),
-        choices: z.array(z.object({ dimension: z.string(), options: z.array(z.string()) })).describe('Chosen option prompt texts per dimension'),
-        note: z.string(),
-      }),
-    ),
+    targetZoneLabels: z.array(Label).max(AI_LIMITS.zones),
+    elements: z
+      .array(
+        z.object({
+          type: ElementTypeZ,
+          label: Label,
+          where: z.array(Label).max(AI_LIMITS.where).describe('Zone / path labels'),
+          choices: z
+            .array(z.object({ dimension: Label, options: z.array(z.string().max(AI_LIMITS.optionText)).max(AI_LIMITS.options) }))
+            .max(AI_LIMITS.choices)
+            .describe('Chosen option prompt texts per dimension'),
+          note: z.string().max(AI_LIMITS.ideaText),
+        }),
+      )
+      .max(AI_LIMITS.elements),
   }),
-  ideas: z.array(z.string()),
+  ideas: z.array(z.string().max(AI_LIMITS.ideaText)).max(AI_LIMITS.ideas),
   /** Up to 3 inspiration images. */
   ideaImages: z.array(DataUrlZ).max(3),
-  count: z.number(),
+  count: z.number().int().min(1).max(AI_LIMITS.variations),
   compare: z
     .object({
-      elementLabel: z.string(),
-      dimensionLabel: z.string(),
-      options: z.array(z.object({ id: z.string(), label: z.string(), promptText: z.string() })),
+      elementLabel: Label,
+      dimensionLabel: Label,
+      options: z
+        .array(z.object({ id: Label, label: Label, promptText: z.string().max(AI_LIMITS.optionText) }))
+        .max(AI_LIMITS.compareOptions),
     })
     .nullable(),
   /** "More like this" / refine: the variation we start from and what to change. */
-  refine: z.object({ title: z.string(), brief: z.string(), feedback: z.string().nullable() }).nullable(),
+  refine: z
+    .object({ title: Label, brief: z.string().max(8000), feedback: z.string().max(2000).nullable() })
+    .nullable(),
 });
 export type PlanRequest = z.infer<typeof PlanRequestSchema>;
 

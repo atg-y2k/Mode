@@ -11,6 +11,7 @@
  */
 import type { z } from 'zod';
 import {
+  AI_LIMITS,
   API_PATHS,
   ApiErrorBodySchema,
   ClimateRequestSchema,
@@ -434,6 +435,7 @@ export async function fetchElementOptions(
   signal?: AbortSignal,
   builtin?: ElementDimension[],
 ): Promise<{ dimensions: ElementDimension[]; tips: string[]; drafts: ElementOptionsResult['dimensions'] }> {
+  req = fitElementOptionsRequest(req);
   const { data } = await studioPost(
     API_PATHS.elementOptions,
     ElementOptionsRequestSchema,
@@ -447,7 +449,66 @@ export async function fetchElementOptions(
 }
 
 /** Recommendations with fresh ids (targetZoneIds filtered to the zones sent). */
+// ---------------------------------------------------------------------------
+// Request trimming: the server rejects AI requests over AI_LIMITS (so one call
+// can't become a huge, costly prompt); trim here so big projects still work.
+// ---------------------------------------------------------------------------
+
+const cut = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+const cutAll = (xs: readonly string[], items: number, chars: number): string[] => xs.slice(0, items).map((x) => cut(x, chars));
+
+/** Trims a plan request to the server's limits (zones, paths, ideas, elements, texts). */
+export function fitPlanRequest(req: PlanRequest): PlanRequest {
+  const L = AI_LIMITS;
+  return {
+    ...req,
+    zones: req.zones.slice(0, L.zones).map((z) => ({ ...z, id: cut(z.id, L.label), label: cut(z.label, L.label), description: cut(z.description, L.description) })),
+    paths: req.paths.slice(0, L.paths).map((p) => ({ id: cut(p.id, L.label), label: cut(p.label, L.label), description: cut(p.description, L.description) })),
+    brief: {
+      ...req.brief,
+      targetZoneLabels: cutAll(req.brief.targetZoneLabels, L.zones, L.label),
+      elements: req.brief.elements.slice(0, L.elements).map((e) => ({
+        ...e,
+        label: cut(e.label, L.label),
+        where: cutAll(e.where, L.where, L.label),
+        choices: e.choices.slice(0, L.choices).map((c) => ({ dimension: cut(c.dimension, L.label), options: cutAll(c.options, L.options, L.optionText) })),
+        note: cut(e.note, L.ideaText),
+      })),
+    },
+    ideas: cutAll(req.ideas, L.ideas, L.ideaText),
+    count: Math.min(Math.max(1, Math.round(req.count)), L.variations),
+    compare: req.compare
+      ? {
+          elementLabel: cut(req.compare.elementLabel, L.label),
+          dimensionLabel: cut(req.compare.dimensionLabel, L.label),
+          options: req.compare.options.slice(0, L.compareOptions).map((o) => ({ id: cut(o.id, L.label), label: cut(o.label, L.label), promptText: cut(o.promptText, L.optionText) })),
+        }
+      : null,
+    refine: req.refine ? { ...req.refine, title: cut(req.refine.title, L.label) } : null,
+  };
+}
+
+export function fitRecommendRequest(req: RecommendRequest): RecommendRequest {
+  const L = AI_LIMITS;
+  return {
+    ...req,
+    zones: req.zones.slice(0, L.zones).map((z) => ({ ...z, id: cut(z.id, L.label), label: cut(z.label, L.label) })),
+    ideas: cutAll(req.ideas, L.ideas, L.ideaText),
+  };
+}
+
+export function fitElementOptionsRequest(req: ElementOptionsRequest): ElementOptionsRequest {
+  const L = AI_LIMITS;
+  return {
+    ...req,
+    zoneLabels: cutAll(req.zoneLabels, L.zones, L.label),
+    ideas: cutAll(req.ideas, L.ideas, L.ideaText),
+    existing: req.existing.slice(0, L.elements).map((d) => ({ id: cut(d.id, L.label), label: cut(d.label, L.label), optionLabels: cutAll(d.optionLabels, L.options * 2, L.label) })),
+  };
+}
+
 export async function fetchRecommendations(req: RecommendRequest, signal?: AbortSignal): Promise<Recommendation[]> {
+  req = fitRecommendRequest(req);
   const { data } = await studioPost(API_PATHS.recommend, RecommendRequestSchema, req, RecommendResultSchema, STUDIO_TIMEOUTS_MS.recommend, signal);
   return recommendationsFromResult(data, new Set(req.zones.map((z) => z.id)));
 }
@@ -468,6 +529,7 @@ export async function describeIdea(image: Blob, note: string | null, signal?: Ab
 }
 
 export async function planVariations(req: PlanRequest, signal?: AbortSignal): Promise<PlanResult> {
+  req = fitPlanRequest(req);
   const { data } = await studioPost(API_PATHS.plan, PlanRequestSchema, req, PlanResultSchema, STUDIO_TIMEOUTS_MS.plan, signal);
   return data;
 }

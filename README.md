@@ -17,18 +17,30 @@ compare photoreal variations side by side.
   edging, planting beds, lawn, patio, outdoor lighting, front door, exterior
   paint, wall paint, flooring, interior lighting and cabinets. Add a free-text
   prompt, pick the areas that may change, and generate.
+- **Photoreal results through your own ChatGPT or Gemini.** Mode prepares the
+  photo with the area to change outlined plus a precise instruction; you paste
+  it into the ChatGPT or Gemini app (your subscription) and bring the result
+  back by pasting, dropping or downloading it. Mode lines it up with your
+  photo, corrects colour drift and keeps every pixel outside the area exactly
+  as photographed, then shows it in staging to accept or reject. Image API
+  keys are optional for fully automatic renders.
 - **Compare and refine.** Generate several takes, or *compare* one question
   (the path in four stone sizes, everything else unchanged) in a labeled
   grid. From any result: *More like this*, *Refine*, *Use as base*, favorite,
-  before/after slider, download.
+  before/after slider, download. History branches from any result.
 - **Grounded in real architecture, themes and purpose.** A built-in design
   knowledge base (architectural styles, design themes, and rules of thumb
   such as a 4–5 ft entry walk that leads clearly to the door) shapes the
   options, the AI's reasoning and its recommendations.
-- **Plants that will actually grow there.** Outdoor plant choices are checked
-  against your hardiness zone and climate (from your ZIP code), each spot's
-  sun, water needs and mature size, and you can render plants as newly
-  planted, established or mature.
+- **Plants that will actually grow there.** Your ZIP code fills in the USDA
+  hardiness zone offline; plant choices are checked against zone, each
+  spot's sun hours (from the photo's compass heading or a compass you set),
+  water, mature size, deer pressure and the USGS invasive-species list, with
+  frost dates and soil from NOAA and USDA. Render plants as planted, after
+  ~3 years, or mature.
+- **Free on-device precision.** Small models running in your browser sharpen
+  the AI's zone outlines to exact edges, let you tap to select an area, and
+  can map a photo with no AI key at all.
 - **Idea board.** Collect inspiration images, notes, design themes and real
   products (AI search of Home Depot, Lowe's and nurseries, or paste a link).
   Generations and suggestions draw on it.
@@ -53,13 +65,18 @@ npm run dev            # app on http://localhost:5173, API on :8787
 
 | Variable | Used for |
 | --- | --- |
-| `ANTHROPIC_API_KEY` | Scene understanding, design planning, element options, recommendations, idea descriptions, product search (Claude). |
-| `OPENAI_API_KEY` | Photoreal variations with OpenAI's image model (`OPENAI_IMAGE_MODEL`, default `gpt-image-1`). |
-| `GEMINI_API_KEY` | Photoreal variations with Google Gemini (`GEMINI_IMAGE_MODEL`, default `gemini-2.5-flash-image`). |
-| `IMAGE_PROVIDER` | Default image provider (`openai` or `gemini`); you can switch per run in the app. |
+| `ANTHROPIC_API_KEY` | Recommended. Scene understanding (architecture, sun, routes), design planning, element options, recommendations, idea descriptions, product search (Claude). |
+| `OPENAI_API_KEY` | Optional: automatic renders with GPT Image (`OPENAI_IMAGE_MODEL`, default `gpt-image-2.5-flare`). |
+| `GEMINI_API_KEY` | Optional: automatic renders with Google Gemini (`GEMINI_IMAGE_MODEL`). |
+| `IMAGE_PROVIDER` | Default image provider when image keys are set (`openai` or `gemini`). |
+| `HANDOFF_WATCH_DIR` | Folder to watch for downloaded hand-off results (default `~/Downloads`). |
 
-Configure at least one image provider for photoreal variations. Fine-tune
-mode works without any keys.
+With no keys at all, Mode still works: renders go through the manual hand-off
+to your ChatGPT or Gemini app, plans come from built-in templates, scenes can
+be mapped on your device, and Fine-tune needs nothing. Tips for the hand-off:
+start a new chat for each image, use *Download full size* (not right-click),
+and on Gemini with a Google AI plan use *More → Redo with Pro*; on a free
+Gemini account ChatGPT usually edits better.
 
 ### Production
 
@@ -80,6 +97,16 @@ header, a public domain, a Tailscale name — add it to `MODE_ALLOWED_HOSTS`
 `MODE_ALLOWED_HOSTS=mode.example.com,.home.example.net`). Behind a reverse
 proxy, also set `TRUST_PROXY=true` so the AI rate limit sees each client's
 address; the Downloads watcher then needs `MODE_ACCESS_TOKEN`.
+
+## Data sources
+
+Hardiness zones are derived from the USDA/OSU PRISM 2023 map (via phzmapi.org;
+not the official USDA map); invasive flags come from USGS US-RIIS v2.0 (CC0);
+frost dates from NOAA 1991–2020 climate normals; soil from USDA Soil Data
+Access. See [public/data/ATTRIBUTION.md](public/data/ATTRIBUTION.md). Rebuild
+the bundled tables with `npm run build:site-data`. The optional on-device
+SegFormer model is under NVIDIA's non-commercial licence and is only
+downloaded after you agree.
 
 ## Development
 
