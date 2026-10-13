@@ -1,15 +1,19 @@
 /**
  * Procedural SVG art for built-in assets (plants, light fixtures, decor).
  * Pure string generation — usable in the browser, tests and the server.
- *
- * Style: clean, slightly stylized "architectural illustration" look that sits
- * well on photos — layered organic shapes with 2-3 tones, soft inner shading
- * via gradients, no outlines/strokes heavier than 1px, transparent background.
- * Output is deterministic for a given spec (seeded PRNG).
  */
 import type { ArtResult, ArtSpec } from '../../../shared/art';
+import { renderPlant } from './plants';
+import { hashString, normalizeSeed } from './util';
 
-export declare function renderArt(spec: ArtSpec): ArtResult;
+export function renderArt(spec: ArtSpec): ArtResult {
+  const key = JSON.stringify(spec);
+  const prefix = 'm' + hashString(key).toString(36) + '-';
+  if (spec.kind === 'plant') return renderPlant(spec, prefix, normalizeSeed(spec.seed) ^ hashString(spec.form));
+  throw new Error('not yet');
+}
 
-/** Replace the main color of a spec (foliage / finish / color) — used for tinting placed objects. */
-export declare function tintArt(spec: ArtSpec, hex: string): ArtSpec;
+export function tintArt(spec: ArtSpec, hex: string): ArtSpec {
+  void hex;
+  return spec;
+}
