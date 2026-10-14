@@ -153,6 +153,8 @@ describe('US-RIIS invasive reasons', () => {
       ['Euonymus fortunei var. radicans', 'Climbing euonymus', '200'],
       ['Ficus elastica', 'Indian rubberplant', '202'],
       ['Mentha X piperita', 'Peppermint', '020'],
+      ['Acer palmatum', 'Japanese maple', '300'],
+      ['Lagerstroemia indica', 'Crape myrtle', '300'],
     ] as [string, string, string][],
   };
 
@@ -161,13 +163,35 @@ describe('US-RIIS invasive reasons', () => {
     expect(plantFeasibility(plant({ botanical: "Prunus laurocerasus 'Otto Luyken'" }), { zone: 7 }).rating).toBe('good');
   });
 
-  it('cautions on plants listed invasive in the region, with the source', () => {
+  it('notes a US-RIIS listing (national, not a verdict for this property) without a caution', () => {
     setInvasivesData(RIIS);
     const f = plantFeasibility(plant({ botanical: "Prunus laurocerasus 'Schipkaensis'" }, 'Skip laurel'), { zone: 7 });
-    expect(f.rating).toBe('caution');
-    expect(f.reasons[0]).toBe(
-      "Invasive risk: Cherry laurel (Prunus laurocerasus) is listed as a widespread invasive in the lower 48 states (USGS US-RIIS v2.0) — check your state's invasive plant list before planting",
+    expect(f.rating).toBe('good');
+    expect(f.reasons).toContain(
+      "USGS lists Cherry laurel (Prunus laurocerasus) as naturalized/invasive in parts of the lower 48 states — check your state's invasive plant list",
     );
+  });
+
+  it('rates Japanese maple and crape myrtle good in zone 7 with deer around, noting the USGS listing', () => {
+    setInvasivesData(RIIS);
+    const ctx = { zone: 7, zoneLabel: '7b', sun: 'full-sun', deerPressure: 'medium' } as const;
+    for (const [id, listed] of [
+      ['japanese-maple', 'Japanese maple (Acer palmatum)'],
+      ['crape-myrtle', 'Crape myrtle (Lagerstroemia indica)'],
+    ] as const) {
+      const f = profileFeasibility(PLANT_PROFILES[id], ctx);
+      expect(f.rating, id).toBe('good');
+      expect(f.reasons, id).toContain('Deer resistant ✓');
+      expect(f.reasons.join(' '), id).not.toMatch(/Invasive risk|Deer favorite/);
+      expect(f.reasons, id).toContain(`USGS lists ${listed} as naturalized/invasive in parts of the lower 48 states — check your state's invasive plant list`);
+    }
+  });
+
+  it('keeps the caution for plants on the curated watchlist', () => {
+    setInvasivesData(RIIS);
+    const f = plantFeasibility(plant({ botanical: 'Berberis thunbergii' }, 'Japanese barberry'), { zone: 7, sun: 'full-sun', deerPressure: 'medium' });
+    expect(f.rating).toBe('caution');
+    expect(f.reasons[0]).toMatch(/^Invasive risk: Japanese barberry is invasive across much of the East and Midwest/);
   });
 
   it('keeps the curated regional note when both lists know the plant', () => {
@@ -202,11 +226,13 @@ describe('US-RIIS invasive reasons', () => {
   it('uses the property region (Hawaii lists differ from the lower 48)', () => {
     setInvasivesData(RIIS);
     const rubber = plant({ type: 'tree', botanical: 'Ficus elastica', zoneMin: 10, zoneMax: 12 }, 'Rubber tree');
-    expect(plantFeasibility(rubber, { zone: 11, setting: 'exterior' }).reasons.join(' ')).toMatch(/invasive in the lower 48/);
-    expect(plantFeasibility(rubber, { zone: 11, setting: 'exterior', locality: 'HI' }).reasons.join(' ')).toMatch(/invasive in Hawaii/);
+    expect(plantFeasibility(rubber, { zone: 11, setting: 'exterior' }).reasons.join(' ')).toMatch(/invasive in parts of the lower 48 states/);
+    expect(plantFeasibility(rubber, { zone: 11, setting: 'exterior', locality: 'HI' }).reasons.join(' ')).toMatch(/invasive in parts of Hawaii/);
     const mint = plant({ type: 'perennial', botanical: 'Mentha × piperita' }, 'Peppermint');
     expect(plantFeasibility(mint, { zone: 6 }).reasons.join(' ')).not.toMatch(/invasive/i);
-    expect(plantFeasibility(mint, { zone: 4, locality: 'AK' }).rating).toBe('caution');
+    const alaska = plantFeasibility(mint, { zone: 5, locality: 'AK' });
+    expect(alaska.rating).toBe('good');
+    expect(alaska.reasons.join(' ')).toMatch(/USGS lists Peppermint \(Mentha X piperita\) as naturalized\/invasive in parts of Alaska/);
   });
 
   it('notes when only some forms of a species are listed', () => {
@@ -216,23 +242,31 @@ describe('US-RIIS invasive reasons', () => {
     expect(f.reasons.join(' ')).toMatch(/Euonymus fortunei var\. radicans \(a form of this species\)/);
   });
 
+  /** A deer favorite on the curated watchlist (made-up profile, to test the order of problems). */
+  const burningBush = { ...PLANT_PROFILES['emerald-arborvitae'], id: 'burning-bush', name: "Burning bush 'Compactus'", botanical: "Euonymus alatus 'Compactus'" };
+
   it('lists every problem of a single-plant option, the invasive flag before deer advice', () => {
-    setInvasivesData({ rows: [...RIIS.rows, ['Acer palmatum', 'Japanese maple', '300']] });
-    const f = paletteFeasibility([PLANT_PROFILES['japanese-maple']], 'any', { zone: 7, sun: 'part-sun', deerPressure: 'high' });
+    setInvasivesData(RIIS);
+    const f = paletteFeasibility([burningBush], 'any', { zone: 7, sun: 'part-sun', deerPressure: 'high' });
     expect(f?.rating).toBe('caution');
-    expect(f?.reasons[0]).toMatch(/^Invasive risk: Japanese maple \(Acer palmatum\) is listed as a widespread invasive/);
+    expect(f?.reasons[0]).toMatch(/^Invasive risk: Burning bush is invasive/);
     expect(f?.reasons[1]).toMatch(/^Deer favorite and deer pressure is high/);
     expect(f?.reasons.some((r) => /Hardy in zones/.test(r))).toBe(true);
     // In a palette, each problem plant contributes all its problems.
-    const pal = paletteFeasibility([PLANT_PROFILES['japanese-maple'], PLANT_PROFILES.coneflower], 'all', { zone: 7, sun: 'part-sun', deerPressure: 'high' });
-    expect(pal?.reasons.filter((r) => r.startsWith('Japanese maple:'))).toHaveLength(2);
+    const pal = paletteFeasibility([burningBush, PLANT_PROFILES.coneflower], 'all', { zone: 7, sun: 'part-sun', deerPressure: 'high' });
+    expect(pal?.reasons.filter((r) => r.startsWith('Burning bush:'))).toHaveLength(2);
   });
 
-  it('flags palettes that include a listed plant, naming it', () => {
-    setInvasivesData({ rows: [...RIIS.rows, ['Acer palmatum', 'Japanese maple', '300']] });
-    const f = paletteFeasibility([PLANT_PROFILES['japanese-maple'], PLANT_PROFILES.coneflower], 'all', { zone: 6, sun: 'full-sun' });
+  it('flags palettes that include a watchlist plant, naming it, and notes US-RIIS listings', () => {
+    setInvasivesData(RIIS);
+    const f = paletteFeasibility([burningBush, PLANT_PROFILES.coneflower], 'all', { zone: 6, sun: 'full-sun' });
     expect(f?.rating).toBe('caution');
-    expect(f?.reasons[0]).toMatch(/^Japanese maple: Invasive risk: Japanese maple \(Acer palmatum\)/);
+    expect(f?.reasons[0]).toMatch(/^Burning bush: Invasive risk: Burning bush is invasive/);
+    const listed = paletteFeasibility([PLANT_PROFILES['japanese-maple'], PLANT_PROFILES.coneflower], 'all', { zone: 6, sun: 'full-sun' });
+    expect(listed?.rating).toBe('good');
+    expect(listed?.reasons).toContain(
+      "Japanese maple: USGS lists Japanese maple (Acer palmatum) as naturalized/invasive in parts of the lower 48 states — check your state's invasive plant list",
+    );
   });
 });
 

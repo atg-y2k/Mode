@@ -126,7 +126,9 @@ export default defineConfig(() => {
     },
     build: {
       target: 'es2022',
-      sourcemap: true,
+      // Maps are still written to dist (to decode a stack trace) but the bundles no longer
+      // point to them, so browsers and DevTools never download them.
+      sourcemap: 'hidden' as const,
     },
     test: {
       environment: 'node',

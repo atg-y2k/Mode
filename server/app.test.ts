@@ -1,6 +1,7 @@
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { gunzipSync } from 'node:zlib';
 import Anthropic from '@anthropic-ai/sdk';
 import { afterAll, describe, expect, it } from 'vitest';
 import {
@@ -684,6 +685,8 @@ describe('static web app (production)', () => {
   writeFileSync(join(dir, 'assets', 'ort-wasm-simd-threaded.jsep.mjs'), 'export default 1');
   writeFileSync(join(dir, 'assets', 'ort-wasm-simd-threaded.jsep.wasm'), Buffer.from([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]));
   writeFileSync(join(dir, 'assets', 'app-abc123.css'), 'body{}');
+  const bigJs = `export const plants = ${JSON.stringify(Array.from({ length: 400 }, (_, i) => `plant ${i}`))};`;
+  writeFileSync(join(dir, 'assets', 'big-abc123.js'), bigJs);
   writeFileSync(join(dir, 'icon.svg'), '<svg xmlns="http://www.w3.org/2000/svg"/>');
   writeFileSync(join(dir, 'sw.js'), 'self.addEventListener("fetch", () => {})');
   afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -731,6 +734,27 @@ describe('static web app (production)', () => {
       expect(isolated(res), path).toEqual([null, null]);
     }
     expect((await app.request('/assets/ort-wasm-simd-threaded.jsep.wasm')).headers.get('content-type')).toBe('application/wasm');
+  });
+
+  it('gzips the app\'s files for browsers that accept it, never the API', async () => {
+    const gz = { headers: { 'Accept-Encoding': 'gzip, deflate, br' } };
+    const res = await app.request('/assets/big-abc123.js', gz);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-encoding')).toBe('gzip');
+    expect(res.headers.get('vary')).toMatch(/accept-encoding/i);
+    expect(res.headers.get('cache-control')).toContain('immutable');
+    expect(res.headers.get('cross-origin-embedder-policy')).toBe('credentialless');
+    expect(gunzipSync(Buffer.from(await res.arrayBuffer())).toString()).toBe(bigJs);
+    // Without Accept-Encoding: as stored.
+    const plain = await app.request('/assets/big-abc123.js');
+    expect(plain.headers.get('content-encoding')).toBeNull();
+    expect(await plain.text()).toBe(bigJs);
+    // Tiny files are not worth it; the API (event streams, JSON) is never touched.
+    expect((await app.request('/assets/app-abc123.css', gz)).headers.get('content-encoding')).toBeNull();
+    const health = await app.request('/api/health', gz);
+    expect(health.status).toBe(200);
+    expect(health.headers.get('content-encoding')).toBeNull();
+    expect(health.headers.get('vary') ?? '').not.toMatch(/accept-encoding/i);
   });
 
   it('keeps the API working', async () => {

@@ -1,12 +1,19 @@
 /**
  * Toast stack for store.notify(). Bottom-center, above the mobile bottom
- * navigation; inside a project on desktop it sits at the top edge instead, so
- * it never covers the prompt dock's controls (the next thing the user reaches
- * for). Errors are announced assertively, the rest politely. Also hosts the
- * "open in another tab" notice while the open project is read-only here.
+ * navigation; inside a project on desktop it sits just below the top bar,
+ * right-aligned over the right panel's header (left of the tab rail), so it
+ * covers neither the prompt dock, the Studio / Fine-tune switch and Settings,
+ * nor the photo's own tools, title bar and hand-off card.
+ * Errors are announced assertively, the rest politely. Rendered into
+ * document.body (outside #root, which a dialog makes inert) so toasts stay
+ * announced and dismissable while a dialog is open; ordinary toasts sit under
+ * an open dialog (z-40 < the dialog's z-50), errors and the read-only notice
+ * above it. Also hosts the "open in another tab" notice while the open
+ * project is read-only here.
  */
 import { CircleAlert, CircleCheck, Info, Lock, X } from 'lucide-react';
 import { useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useStore, type Toast } from '../../state/store';
 import { Button, cn } from '../common';
 
@@ -20,15 +27,21 @@ export function Toaster() {
   const toasts = useStore((s) => s.toasts);
   const inProject = useStore((s) => !!s.project);
   const readOnly = useStore((s) => (s.project ? s.readOnly : null));
-  // Desktop, in a project: newest toast nearest the top edge.
-  const stack = cn('flex w-full flex-col items-center gap-2', inProject && 'lg:flex-col-reverse');
-  return (
+  // An error or the read-only notice must be seen even over an open dialog; the rest stay under it.
+  const urgent = !!readOnly || toasts.some((t) => t.kind === 'error');
+  // Desktop, in a project: newest toast nearest the top edge, right-aligned.
+  const stack = cn('flex w-full flex-col items-center gap-2', inProject && 'lg:flex-col-reverse lg:items-end');
+  return createPortal(
     <div
       data-testid="toaster"
       className={cn(
-        'pointer-events-none fixed inset-x-0 z-[60] flex flex-col items-center gap-2 px-4',
-        // In a project: above the mobile bottom nav; on desktop at the top, clear of the prompt dock.
-        inProject ? 'bottom-[calc(4.5rem+env(safe-area-inset-bottom))] lg:bottom-auto lg:top-2' : 'bottom-[calc(1.25rem+env(safe-area-inset-bottom))]',
+        'pointer-events-none fixed inset-x-0 flex flex-col items-center gap-2 px-4',
+        urgent ? 'z-[60]' : 'z-40',
+        // In a project: above the mobile bottom nav; on desktop below the 3.5rem top bar, over the right
+        // panel (20rem, 22rem from xl) and left of its 5rem tab rail — clear of the photo and the dock.
+        inProject
+          ? 'bottom-[calc(4.5rem+env(safe-area-inset-bottom))] lg:bottom-auto lg:top-[4.25rem] lg:left-auto lg:right-[5.5rem] lg:w-[19rem] lg:items-end lg:px-0 xl:w-[21rem]'
+          : 'bottom-[calc(1.25rem+env(safe-area-inset-bottom))]',
       )}
     >
       {readOnly && <ReadOnlyNotice reason={readOnly} />}
@@ -46,7 +59,8 @@ export function Toaster() {
             <ToastItem key={t.id} toast={t} />
           ))}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

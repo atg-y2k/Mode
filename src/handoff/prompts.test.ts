@@ -161,6 +161,21 @@ describe('buildHandoffPrompt — ChatGPT (OpenAI phrasing)', () => {
   it('allows the described edging when the change asks for it', () => {
     const p = buildHandoffPrompt(ctx({ instruction: 'Edge the bed with a low steel edging strip.' }));
     expect(p).toContain('(the only edging is the one the change describes)');
+    expect(buildHandoffPrompt(ctx({ instruction: 'Lay bluestone with a steel edging strip along the walk.' }))).toContain('(the only edging is the one the change describes)');
+    expect(buildHandoffPrompt(ctx({ app: 'gemini', instruction: 'Lay bluestone with a steel edging strip along the walk.' }))).toContain('(the only edging is the one the change describes)');
+  });
+
+  it('never claims "the only edging" when the change asks for none', () => {
+    const only = '(the only edging is the one the change describes)';
+    for (const instruction of [
+      // The keyless plan's wording before and after the negated answers were gathered.
+      'Edit this photo of the home. For the Front walk: Pathway — stone size: medium pavers; edging: with a clean edge directly against the lawn or mulch, no border; path lighting: with no added path lighting.',
+      'Edit this photo of the home. For the Front walk: Pathway — stone size: medium pavers; shape: keeping its current route and line. No border edging and no added path lighting.',
+      'Lay bluestone pavers without any new edging.',
+      'Lay bluestone pavers, keeping the existing brick border as it is.',
+    ]) {
+      for (const app of ['chatgpt', 'gemini'] as const) expect(buildHandoffPrompt(ctx({ app, instruction })), instruction).not.toContain(only);
+    }
   });
 
   it('says "other" doors/windows when the change is about one', () => {
@@ -266,6 +281,26 @@ describe('buildHandoffPrompt — Gemini (semantic masking, narrative)', () => {
   });
 });
 
+describe('idea-board notes in a keyless instruction', () => {
+  const NOTES =
+    "Homeowner's notes and inspiration: Note \"Safety\": No thorny plants near the walk; Note \"Kids\": keep it wide enough for a stroller and two scooters side by side.";
+  const PATHWAY_BRIEF = `Edit this photo of the home. A welcoming bluestone walk to the front door. For the Concrete walkway to front door: Pathway — stone & color: natural bluestone in cool blue-gray with subtle lilac and rust variation and a matte non-slip finish; stone size: laid as large irregular flagstone slabs about 18–24 in across with 1 in joints of fine gray gravel; shape: keeping its current route and line; width: keeping its current width. No border edging and no added path lighting. ${NOTES} Change only Concrete walkway to front door. Keep the camera position, framing, perspective and lens exactly the same. Keep the same time of day, sun direction, shadows and weather. Keep the house's architecture — roofline, windows, doors, trim, siding and colors — and everything else exactly as it is. Photorealistic. New materials sit on the existing ground plane with correct perspective, scale and contact shadows matching the photo's light; edges blend naturally into the untouched surroundings. Add no text, people or vehicles.`;
+
+  it('reach the pasted prompt within the length limit, as context only', () => {
+    for (const app of ['chatgpt', 'gemini'] as const) {
+      const fromScene = promptContextFromScene(scene, brief({ targetZoneIds: ['walk'], plantMaturity: 'new' }), ['walk'], { app, instruction: PATHWAY_BRIEF, ratio: '3:2', markerColorName: 'magenta', references: [] }, { frame: FRAME });
+      const p = buildHandoffPrompt(fromScene);
+      expect(p.length, app).toBeLessThanOrEqual(MAX_PROMPT_CHARS);
+      expect(p).toContain(NOTES);
+      expect(p).toContain('No border edging and no added path lighting.');
+      // "No thorny plants" is not a planting change: no plant-size sentence, no "only edging" claim.
+      expect(p).not.toMatch(/nursery pots|only edging/);
+      // The lawn is still kept: the notes don't make it part of the change.
+      expect(fromScene.keep).toContain('the lawn outside the outline');
+    }
+  });
+});
+
 describe('length limit', () => {
   it('stays ≤ 1,800 chars with a huge instruction and keep list, keeping the required phrases', () => {
     const long = Array.from({ length: 30 }, (_, i) => `Sentence ${i + 1} adds more lavender, salvia and boxwood detail along the walk with exact spacing.`).join(' ');
@@ -311,6 +346,17 @@ describe('changeFromInstruction', () => {
   it('falls back to the whole instruction', () => {
     expect(changeFromInstruction('Keep everything.')).toBe('Keep everything.');
   });
+  it('keeps the idea-board sentence of a keyless plan', () => {
+    const c = changeFromInstruction(
+      `Edit this photo of the home. A welcoming walk. For the Front walk: Pathway — stone size: medium pavers. Homeowner's notes and inspiration: Note "Safety": No thorny plants near the walk; Note "Kids": room for a stroller. Change only Front walk. Keep the camera position, framing, perspective and lens exactly the same.`,
+    );
+    expect(c).toBe(`A welcoming walk. For the Front walk: Pathway — stone size: medium pavers. Homeowner's notes and inspiration: Note "Safety": No thorny plants near the walk; Note "Kids": room for a stroller.`);
+  });
+  it('drops the quoted "Edit this photo" opener inside a refinement', () => {
+    expect(changeFromInstruction('Starting from the previous result, change this: Make the stones larger. Keep everything else as rendered. Edit this photo of the home. Lay bluestone.')).toBe(
+      'Starting from the previous result, change this: Make the stones larger. Lay bluestone.',
+    );
+  });
   it('splits sentences without breaking "18 in." style abbreviations or decimals', () => {
     expect(splitSentences('Use 1.5 in. gravel joints and 18 in. slabs. Then plant.')).toEqual(['Use 1.5 in. gravel joints and 18 in. slabs.', 'Then plant.']);
   });
@@ -353,6 +399,28 @@ describe('promptContextFromScene', () => {
     expect(buildHandoffPrompt(c)).toContain('the lawn right beside it');
     // Whole-image edits have no area words to extend.
     expect(promptContextFromScene(scene, brief({ scope: 'whole' }), [], extras, { frame: FRAME, roomZoneIds: ['lawn'] }).areaText).toBe('');
+  });
+
+  it('says the walk only widens when its route is kept (or no route is chosen)', () => {
+    const area = (instruction: string) =>
+      promptContextFromScene(scene, brief({ targetZoneIds: ['walk'] }), ['walk'], { ...extras, instruction }, { frame: FRAME, roomZoneIds: ['lawn'] }).areaText;
+    const kept =
+      'Edit this photo of the home. A wider flagstone walk to the front door. For the Walkway: Pathway — stone size: laid as large irregular flagstone slabs; shape: keeping its current route and line; width: about 5 ft wide, generous enough for two people walking side by side. No border edging and no added path lighting.';
+    expect(area(kept)).toBe('the concrete walkway to front door in the lower center, and the lawn right beside it (where the walk widens)');
+    expect(area(kept)).not.toMatch(/re-lawn|no longer runs/);
+    // No shape choice at all: also only wider.
+    expect(area('Edit this photo of the home. For the Walkway: Pathway — width: about 6 ft wide, widening into a landing at the steps.')).toContain('(where the walk widens)');
+    // A curve, an offset or stepping stones move the line: the old strip is re-lawned.
+    for (const route of [
+      'following one gentle, wide curve with a radius of at least 10 ft to the steps',
+      'in crisp straight segments with two offset right-angle turns and a generous landing at each turn',
+      'as individual 18–24 in stepping stones set 24–26 in on center, flush with the surrounding lawn',
+    ]) {
+      expect(area(`Edit this photo of the home. For the Walkway: Pathway — shape: ${route}; width: about 5 ft wide.`)).toContain('(re-lawn where the old walk no longer runs)');
+    }
+    expect(buildHandoffPrompt(promptContextFromScene(scene, brief({ targetZoneIds: ['walk'] }), ['walk'], { ...extras, instruction: kept }, { frame: FRAME, roomZoneIds: ['lawn'] }))).toContain(
+      'the lawn right beside it (where the walk widens)',
+    );
   });
 
   it('keeps the driveway → door route when the change is elsewhere', () => {
@@ -423,6 +491,23 @@ describe('promptContextFromScene', () => {
     expect(c.keep).toEqual(['the windows and their trim', 'the walls and their color']);
     expect(c.light).toMatch(/daylight from the windows/);
     expect(buildHandoffPrompt(c)).toContain('Edit the attached photo of my mid-century modern living room (Image 1).');
+
+    // A wall-paint change that paints the trim can't also keep it.
+    const paint = (instruction: string) =>
+      promptContextFromScene({ ...room, keep: ['the original oak trim', 'the built-in bookcase'] }, brief({ targetZoneIds: ['wall'] }), ['wall'], { ...extras, instruction }, { frame: FRAME });
+    const white = paint('Edit this photo of the home. For the Walls: Wall paint — wall color: in a warm white; trim: with crisp white trim, baseboards and doors in semi-gloss.');
+    expect(white.keep).toEqual(['the windows', 'the floor', 'the built-in bookcase']);
+    expect(buildHandoffPrompt(white)).not.toMatch(/KEEP EXACTLY AS IS:[^\n]*trim/);
+    // Keeping the trim (the default) or saying no to it keeps it in the list.
+    for (const instruction of [
+      'Edit this photo of the home. For the Walls: Wall paint — wall color: in a warm white; trim: keeping the existing trim, baseboards and doors exactly as they are.',
+      'Paint the walls warm white with no trim changes.',
+    ]) {
+      const kept = paint(instruction);
+      expect(kept.keep, instruction).toContain('the windows and their trim');
+      expect(kept.keep).toContain('the original oak trim');
+      expect(buildHandoffPrompt(kept)).not.toContain('only edging');
+    }
   });
 
   it('works without a scene', () => {

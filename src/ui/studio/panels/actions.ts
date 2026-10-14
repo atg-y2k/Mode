@@ -264,7 +264,7 @@ export function generateRecommendation(photoId: string, rec: Recommendation): Pr
 
 /**
  * Queues scene mapping (re-mapping when `force`). Without Claude it maps on
- * this device instead (free; the photo's "Map on this device"), and only
+ * this device instead (free; the photo's "Map the scene"), and only
  * explains when neither can run.
  */
 export async function mapScene(photoId: string, force = false): Promise<void> {

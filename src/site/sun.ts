@@ -7,16 +7,18 @@
  *
  * Sun-hours model (an estimate for plant choice, not a shading study):
  * a yard/bed in front of a facade facing azimuth A gets direct sun while the
- * sun is at least ~5° above the horizon (lower sun is blocked by fences,
- * shrubs and neighbours) and within ±90° of A — i.e. in front of the house.
- * When the sun is behind the house, a typical 2-story house shades the yard.
- * Open sky otherwise (no trees or neighbouring buildings).
+ * sun is at least ~15° above the horizon (lower sun is blocked by neighbours,
+ * fences, shrubs and the house itself) and within ±90° of A — i.e. in front of
+ * the house. When the sun is behind the house, a typical 2-story house shades
+ * the yard. Open sky otherwise (no trees). Classification is the horticultural
+ * rule the rest of Mode states (guidance, feasibility, AI prompts): ≥ 6 h full
+ * sun, 3–6 h part sun, < 3 h shade.
  */
 import { getPosition, getTimes } from 'suncalc';
 import type { SunExposure } from '../../shared/types';
 
-/** Sun below this altitude counts as blocked by fences, shrubs and neighbours. */
-export const MIN_SUN_ALTITUDE_DEG = 5;
+/** Sun below this altitude counts as blocked by neighbours, fences, shrubs and the house itself. */
+export const MIN_SUN_ALTITUDE_DEG = 15;
 /** Integration step for sunHours. */
 export const SUN_STEP_MINUTES = 10;
 /** The sun lights a surface while it is within this many degrees of the surface's facing direction. */
@@ -53,9 +55,9 @@ export function isSunInFront(sunAzimuthDeg: number, facingDeg: number, halfAngle
   return angularDistance(sunAzimuthDeg, facingDeg) <= halfAngleDeg;
 }
 
-/** ≥ 6 h full sun, 2–6 h part sun, < 2 h shade. */
+/** ≥ 6 h full sun, 3–6 h part sun, < 3 h shade. */
 export function exposureFromHours(hours: number): SunExposure {
-  return hours >= 6 ? 'full-sun' : hours >= 2 ? 'part-sun' : 'shade';
+  return hours >= 6 ? 'full-sun' : hours >= 3 ? 'part-sun' : 'shade';
 }
 
 const COMPASS_8 = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'] as const;
@@ -98,7 +100,7 @@ function assertFinite(values: Record<string, number>) {
  * Estimated direct-sun hours for a surface/yard facing `azimuthDeg` (0 = north,
  * clockwise) at lat/lon on the 15th of `month` (1-12), assuming open sky and a
  * 2-story house shading the side behind it. Classification: ≥ 6 h full sun,
- * 2–6 h part sun, < 2 h shade. Throws RangeError for non-finite inputs.
+ * 3–6 h part sun, < 3 h shade. Throws RangeError for non-finite inputs.
  */
 export function sunHours(
   lat: number,

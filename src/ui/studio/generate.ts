@@ -54,13 +54,18 @@ import { cloneRunTarget, freezeRunTarget, runTargetMask } from './handoff/target
 import { maskForBrief, runTargetLost } from './maskFromZones';
 import { buildPlanRequest, ideasForBrief, resolveCompare, sceneSummaryText as sceneText, swapOptionInBrief, type PlanKnowledge } from './planRequest';
 import { forgetRunInfo, getRunInfo, patchRunInfo, patchSlot, setRunInfo, type RunSlot } from './runs';
+import { useStudioUI } from './ui';
 
 export interface StartRunOptions {
   photoId: string;
   /** 'variations' = N takes on the brief; 'compare' = one variation per option of one dimension. */
   mode: 'variations' | 'compare';
   compare?: { elementId: string; dimensionId: string; optionIds: string[] };
-  /** Start from this variation instead of the original (default: the variation shown in the viewer). */
+  /**
+   * Start from this variation instead of the original (null: the original).
+   * Default: the starting image the owner chose ("Use as base" / Branch —
+   * useStudioUI().baseVariationId), never merely the variation being viewed.
+   */
   baseVariationId?: string | null;
   /** Refine: what to change relative to the base variation ("more like this, but wider path"). */
   feedback?: string;
@@ -397,7 +402,8 @@ export async function startRun(opts: StartRunOptions): Promise<string> {
     if (!opts.brief) inherited ??= source?.target;
     refine = { title: moreLike.title, brief: moreLike.brief, feedback: null };
   } else {
-    const requested = opts.baseVariationId === undefined ? s.studio.viewVariationId : opts.baseVariationId;
+    // Viewing a result never makes it the starting image: only an explicit choice does (a stale id is the original).
+    const requested = opts.baseVariationId === undefined ? useStudioUI.getState().baseVariationId : opts.baseVariationId;
     const base = requested ? findVariation(photo, requested) : undefined;
     baseVariationId = base?.id;
     if (opts.feedback !== undefined) {

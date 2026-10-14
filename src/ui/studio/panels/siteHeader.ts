@@ -6,6 +6,7 @@
  */
 import type { ElementDimension, ElementSpec, ElementType, ProjectLocation, SceneMap, SceneZone, SunExposure } from '../../../../shared/types';
 import { dominantSun, parseHardinessZone, type FeasibilityContext } from '../../../assets/design';
+import { groundSunSpot } from './zones';
 
 /** Elements that are planting by nature (their header shows even before a plant option is picked). */
 export const PLANTING_ELEMENT_TYPES: readonly ElementType[] = ['planting-bed', 'trees-shrubs', 'lawn'];
@@ -37,12 +38,21 @@ export function formatHours(h: number): string {
 
 /**
  * The zones that decide the spot's sun: the element's own zones that have a
- * sun rating, else the brief's target zones (same rule as plan feasibility).
+ * sun rating, else the brief's target zones, else the ground nearby with sun
+ * (the lawn first; `from` names it) — the same rule as plan feasibility.
  */
-export function spotZones(el: Pick<ElementSpec, 'zoneIds'>, scene: SceneMap | undefined, fallbackZoneIds: readonly string[] = []): SceneZone[] {
+export function spotOf(el: Pick<ElementSpec, 'zoneIds'>, scene: SceneMap | undefined, fallbackZoneIds: readonly string[] = []): { zones: SceneZone[]; from: string | null } {
   const zones = scene?.zones ?? [];
   const own = zones.filter((z) => el.zoneIds.includes(z.id) && z.sun);
-  return own.length ? own : zones.filter((z) => fallbackZoneIds.includes(z.id) && z.sun);
+  if (own.length) return { zones: own, from: null };
+  const targets = zones.filter((z) => fallbackZoneIds.includes(z.id) && z.sun);
+  if (targets.length) return { zones: targets, from: null };
+  return groundSunSpot(zones) ?? { zones: [], from: null };
+}
+
+/** spotOf's zones. */
+export function spotZones(el: Pick<ElementSpec, 'zoneIds'>, scene: SceneMap | undefined, fallbackZoneIds: readonly string[] = []): SceneZone[] {
+  return spotOf(el, scene, fallbackZoneIds).zones;
 }
 
 export type HeaderGap = 'zip' | 'sun' | 'deer';
@@ -72,13 +82,20 @@ export function deerOf(location: ProjectLocation | undefined, ctx?: Pick<Feasibi
   return fromCtx ?? null;
 }
 
-export function siteHeader(location: ProjectLocation | undefined, spot: readonly Pick<SceneZone, 'sun' | 'sunHours'>[], ctx?: Pick<FeasibilityContext, 'deerPressure'>): SiteHeader {
+/** `from`: where the spot's sun was borrowed from ("the lawn"), shown in the header ("Part sun (4 h, from the lawn)"). */
+export function siteHeader(
+  location: ProjectLocation | undefined,
+  spot: readonly Pick<SceneZone, 'sun' | 'sunHours'>[],
+  ctx?: Pick<FeasibilityContext, 'deerPressure'>,
+  from?: string | null,
+): SiteHeader {
   const zoneLabel = (location?.climate?.hardinessZone ?? location?.hardinessZone)?.trim();
   const zone = zoneLabel && parseHardinessZone(zoneLabel) !== undefined ? `Zone ${zoneLabel.replace(/^zone\s*/i, '')}` : null;
   const exposure = dominantSun(spot) ?? null;
   const withHours = spot.filter((z) => typeof z.sunHours === 'number' && Number.isFinite(z.sunHours) && z.sun === exposure);
   const hours = withHours.length ? withHours.reduce((s, z) => s + (z.sunHours as number), 0) / withHours.length : null;
-  const sun = exposure ? `${SUN_TEXT[exposure]}${hours !== null ? ` (${formatHours(hours)})` : ''}` : null;
+  const detail = [hours !== null ? formatHours(hours) : '', exposure && from ? `from ${from}` : ''].filter(Boolean).join(', ');
+  const sun = exposure ? `${SUN_TEXT[exposure]}${detail ? ` (${detail})` : ''}` : null;
   const deerLevel = deerOf(location, ctx);
   const deer = deerLevel ? `Deer: ${deerLevel}` : null;
   const gaps: HeaderGap[] = [];

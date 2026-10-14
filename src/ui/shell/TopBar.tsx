@@ -164,6 +164,7 @@ export function ProjectName({ className, large }: { className?: string; large?: 
 
 export function SaveStatus({ className }: { className?: string }) {
   const state = useStore((s) => s.saveState);
+  const readOnly = useStore((s) => s.readOnly);
   const [showSaved, setShowSaved] = useState(false);
   // "Saved" fades to a quiet "Saved on this device" after a moment.
   useEffect(() => {
@@ -174,7 +175,13 @@ export function SaveStatus({ className }: { className?: string }) {
   }, [state]);
 
   let content;
-  if (state === 'saving') {
+  if (readOnly) {
+    content = (
+      <span className="inline-flex items-center gap-1 text-warning">
+        <CircleAlert className="size-3.5" aria-hidden /> Not saved here
+      </span>
+    );
+  } else if (state === 'saving') {
     content = (
       <>
         <Loader2 className="size-3.5 animate-spin" aria-hidden /> Saving…
@@ -194,13 +201,27 @@ export function SaveStatus({ className }: { className?: string }) {
       </>
     );
   }
+  const title = readOnly
+    ? readOnly === 'stale'
+      ? 'Another tab saved this project after this copy was opened. Changes made here are not saved.'
+      : 'This project is open for editing in another tab. Changes made here are not saved.'
+    : state === 'error'
+      ? 'The last change could not be saved. Check storage space in Settings, then retry.'
+      : 'Changes are saved automatically in this browser';
   return (
-    <span
-      role="status"
-      title={state === 'error' ? 'The last change could not be saved. Check storage space in Settings.' : 'Changes are saved automatically in this browser'}
-      className={cn('inline-flex shrink-0 items-center gap-1 whitespace-nowrap text-xs text-subtle', className)}
-    >
-      {content}
+    <span className={cn('inline-flex shrink-0 items-center gap-2 whitespace-nowrap text-xs text-subtle', className)}>
+      <span role="status" title={title} className="inline-flex items-center gap-1">
+        {content}
+      </span>
+      {state === 'error' && !readOnly && (
+        <button
+          type="button"
+          onClick={() => void useStore.getState().retrySave()}
+          className="rounded font-medium text-accent underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-accent"
+        >
+          Retry
+        </button>
+      )}
     </span>
   );
 }
@@ -210,6 +231,7 @@ function ModeSwitch({ compact }: { compact?: boolean }) {
   return (
     <Segmented<WorkspaceMode>
       value={mode}
+      label="Workspace mode"
       size={compact ? 'sm' : 'md'}
       onChange={(m) => m !== mode && useStore.getState().setMode(m)}
       options={[

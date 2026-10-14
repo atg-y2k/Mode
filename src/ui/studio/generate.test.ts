@@ -10,6 +10,7 @@ import { findPhoto, newDesign, useStore } from '../../state/store';
 import { INTERRUPTED, buildTargetMask, cancelRun, generationBlocker, recoverInterruptedRuns, retryVariation, startRun, withStrictness } from './generate';
 import { declineReview, registerReviewHost, submitReview, useReview } from './handoff/review';
 import { handoffSession, setHandoffSession } from './handoff/session';
+import { installBaseReset, setStudioUI, useStudioUI } from './ui';
 
 // Node has no image decoding: stand-ins for the browser codecs used by runs.
 vi.mock('../../lib/imageImport', async (importOriginal) => {
@@ -237,6 +238,46 @@ describe('startRun', () => {
     await vi.waitFor(() => expect(currentPhoto().generations).toHaveLength(0));
     expect(useStore.getState().runs[id]).toBeUndefined();
     expect(useStore.getState().studio.gridGenerationId).toBeNull();
+  });
+
+  it('starts from the original unless the owner chose a starting image (viewing a result is not choosing it)', async () => {
+    setup({ ...emptyBrief(), prompt: 'Lavender in the bed', targetZoneIds: ['bed'] }, [gen('g0', 'done', 2)]);
+    const run = async (opts: Partial<Parameters<typeof startRun>[0]> = {}) => {
+      const id = await startRun({ photoId: 'pho', mode: 'variations', count: 1, showGrid: false, ...opts });
+      const g = currentPhoto().generations.find((x) => x.id === id)!;
+      cancelRun(id);
+      return g;
+    };
+    try {
+      // Viewing a result (tile click, arrows, Accept) leaves the next run on the original photo.
+      useStore.getState().setStudio({ viewVariationId: 'g0-v0' });
+      expect(useStudioUI.getState().baseVariationId).toBeNull();
+      expect((await run()).baseVariationId).toBeUndefined();
+      // "Use as base" / Branch: the chosen variation is the starting image.
+      setStudioUI({ baseVariationId: 'g0-v1' });
+      expect((await run()).baseVariationId).toBe('g0-v1');
+      // Refine names its own starting image.
+      const refined = await run({ baseVariationId: 'g0-v0', feedback: 'wider' });
+      expect(refined.baseVariationId).toBe('g0-v0');
+      // A deleted / other-photo id falls back to the original.
+      setStudioUI({ baseVariationId: 'gone' });
+      expect((await run()).baseVariationId).toBeUndefined();
+    } finally {
+      setStudioUI({ baseVariationId: null });
+    }
+  });
+
+  it('forgets the chosen starting image when another photo or project is opened', () => {
+    setup({ ...emptyBrief(), prompt: 'x' }, [gen('g0', 'done', 1)]);
+    installBaseReset();
+    setStudioUI({ baseVariationId: 'g0-v0' });
+    useStore.setState({ studio: { ...useStore.getState().studio, showZones: false } });
+    expect(useStudioUI.getState().baseVariationId).toBe('g0-v0');
+    useStore.setState({ selection: { ...useStore.getState().selection, photoId: 'other' } });
+    expect(useStudioUI.getState().baseVariationId).toBeNull();
+    setStudioUI({ baseVariationId: 'g0-v0' });
+    useStore.setState({ project: null });
+    expect(useStudioUI.getState().baseVariationId).toBeNull();
   });
 
   it('records a failure on the run when it cannot proceed', async () => {

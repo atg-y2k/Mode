@@ -5,11 +5,11 @@
  * for hand-offs how many pastes this costs. Send continues the run; Edit
  * brief or closing cancels it. Mounted once by the Workspace (every pane).
  */
-import { Info, Loader2, Pencil, Send, ShieldCheck, Sparkles, TriangleAlert, Undo2, X } from 'lucide-react';
+import { ImagePlus, Info, Loader2, Pencil, Send, ShieldCheck, Sparkles, TriangleAlert, Undo2, X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { CONTEXT_ZONE_KINDS, type Generation, type HandoffApp, type Photo } from '../../../../shared/types';
 import type { PreparedHandoff } from '../../../handoff';
-import { findPhoto, useStore } from '../../../state/store';
+import { findPhoto, findVariation, useStore } from '../../../state/store';
 import { Button, Modal, cn } from '../../common';
 import { PlantNoteChips } from '../Feasibility';
 import { cancelRun } from '../generate';
@@ -19,7 +19,19 @@ import { countToday, useHandoffLog, usageHint } from './log';
 import { currentReferences, packPrompt, preparedExport } from './pack';
 import { pasteImage } from './prefs';
 import { appLabel } from './planned';
-import { declineReview, handoffFooter, registerReviewHost, submitReview, TEMPLATE_PLAN_NOTE, useReview, type ReviewItem, type ReviewRequest } from './review';
+import { Callout } from '../panels/ui';
+import {
+  declineReview,
+  handoffFooter,
+  identicalInstructions,
+  registerReviewHost,
+  startingFromText,
+  submitReview,
+  TEMPLATE_PLAN_NOTE,
+  useReview,
+  type ReviewItem,
+  type ReviewRequest,
+} from './review';
 
 function useObjectUrl(blob: Blob | null): string | null {
   const [url, setUrl] = useState<string | null>(null);
@@ -110,6 +122,8 @@ function ReviewDialog({ review }: { review: ReviewRequest }) {
   const ready = review.stage === 'ready';
   const kept = items.filter((i) => !left.has(i.key));
   const id = review.generationId;
+  // A compare whose instructions came out the same would give look-alike options: say so, and don't send them.
+  const sameText = review.runMode === 'compare' && identicalInstructions(kept);
 
   const cancel = () => {
     declineReview(id);
@@ -120,7 +134,7 @@ function ReviewDialog({ review }: { review: ReviewRequest }) {
     requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Describe the change"]')?.focus());
   };
   const send = () => {
-    if (!ready || kept.length === 0) return;
+    if (!ready || kept.length === 0 || sameText) return;
     submitReview(id, kept);
   };
 
@@ -155,7 +169,7 @@ function ReviewDialog({ review }: { review: ReviewRequest }) {
             className="max-sm:w-full"
             icon={hand ? <Send className="size-4" /> : <Sparkles className="size-4" />}
             onClick={send}
-            disabled={!ready || kept.length === 0}
+            disabled={!ready || kept.length === 0 || sameText}
           >
             {sendLabel}
           </Button>
@@ -191,7 +205,7 @@ function ReviewDialog({ review }: { review: ReviewRequest }) {
               <img src={markedUrl} alt={`The marked photo you'll paste into ${appLabel(app)}`} className="max-h-[22rem] w-full object-contain" />
               {marked.prepared && (
                 <span className="absolute top-2 left-2 rounded-full bg-black/60 px-2 py-0.5 text-[10px] font-medium text-white">
-                  {marked.prepared.mode === 'crop' ? 'Close-up of the area' : 'Whole photo'} · {marked.prepared.ratio} · EXIF & location removed
+                  {marked.prepared.mode === 'crop' ? 'Close-up of the area' : 'Whole photo'} · {marked.prepared.ratio} · camera data & location removed
                 </span>
               )}
             </div>
@@ -275,6 +289,10 @@ function ReviewDialog({ review }: { review: ReviewRequest }) {
                   <p className="text-sm leading-relaxed text-text">{review.plan}</p>
                 </div>
               )}
+              <p className="flex items-center gap-1.5 text-xs text-muted">
+                <ImagePlus className="size-3.5 shrink-0" aria-hidden />
+                <span className="min-w-0">{startingFromText(g.baseVariationId ? findVariation(photo, g.baseVariationId) : undefined)}</span>
+              </p>
               {review.planSource === 'template' && (
                 // Claude is optional: plain information, not a warning.
                 <p className="flex items-start gap-1.5 rounded-lg bg-surface-2 px-3 py-2 text-xs leading-relaxed text-muted">
@@ -293,6 +311,11 @@ function ReviewDialog({ review }: { review: ReviewRequest }) {
                   </span>
                 )}
               </div>
+              {sameText && (
+                <Callout tone="warning" icon={<TriangleAlert className="size-4" aria-hidden />}>
+                  These instructions are identical — the options would not differ.
+                </Callout>
+              )}
               <ol className="flex flex-col gap-2">
                 {items.map((item, i) => {
                   const out = left.has(item.key);
@@ -305,7 +328,7 @@ function ReviewDialog({ review }: { review: ReviewRequest }) {
                           disabled={out}
                           aria-label={`Title of variation ${i + 1}`}
                           onChange={(e) => setItems((list) => list.map((x) => (x.key === item.key ? { ...x, title: e.target.value } : x)))}
-                          className="min-w-0 flex-1 rounded-md bg-transparent px-1 py-0.5 text-sm font-semibold text-text focus:bg-surface-2 focus:outline-none disabled:text-subtle disabled:line-through"
+                          className="min-w-0 flex-1 rounded-md bg-transparent px-1 py-0.5 text-sm font-semibold text-text focus:bg-surface-2 focus-visible:outline-2 focus-visible:outline-accent disabled:text-subtle disabled:line-through"
                         />
                         {item.optionLabel && item.optionLabel !== item.title && (
                           <span className="shrink-0 rounded-full bg-accent-soft px-2 py-0.5 text-[10px] font-semibold text-accent">{item.optionLabel}</span>

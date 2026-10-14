@@ -223,12 +223,13 @@ function DeerPressureField({ value, onChange }: { value: ProjectLocation['deerPr
     DEER_PRESSURE_OPTIONS.find((o) => o.value === value)?.hint ?? 'Not set — deer favorites get a note, not a warning. Ask a neighbour if unsure.';
   return (
     <div className="flex flex-col gap-1.5">
-      <span id="mode-deer-label" className="text-xs font-medium text-muted">
+      <span className="text-xs font-medium text-muted" aria-hidden>
         Deer pressure
       </span>
-      <div role="group" aria-labelledby="mode-deer-label">
+      <div>
         <Segmented<DeerChoice>
           value={choice}
+          label="Deer pressure"
           onChange={(v) => onChange(v === 'unset' ? undefined : v)}
           options={[
             { value: 'unset', label: <span className="whitespace-nowrap">Not sure</span> },

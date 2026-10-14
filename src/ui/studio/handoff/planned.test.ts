@@ -14,7 +14,7 @@ import {
   type PendingItem,
 } from './planned';
 import { runTiles } from '../tiles';
-import { handoffFooter, TEMPLATE_PLAN_NOTE } from './review';
+import { handoffFooter, identicalInstructions, startingFromText, TEMPLATE_PLAN_NOTE } from './review';
 
 const item = (id: string, status: PlannedVariation['status'], extra: Partial<PlannedVariation> = {}): PlannedVariation => ({
   id,
@@ -267,7 +267,21 @@ describe('review copy', () => {
 
   it('notes a plan made without Claude calmly, with no setup details', () => {
     expect(TEMPLATE_PLAN_NOTE).toMatch(/^Planned from your choices/);
-    expect(TEMPLATE_PLAN_NOTE).toContain('(optional)');
-    expect(TEMPLATE_PLAN_NOTE).not.toMatch(/ANTHROPIC|\.env|isn’t connected|restart/);
+    // The keyless state is said once (Settings), not on every screen of the keyless path.
+    expect(TEMPLATE_PLAN_NOTE).not.toMatch(/Claude|ANTHROPIC|\.env|isn’t connected|restart/);
+  });
+
+  it('says which image the run starts from', () => {
+    expect(startingFromText(undefined)).toBe('Starting from: your original photo');
+    expect(startingFromText({ title: 'Curved bluestone', source: { kind: 'handoff', app: 'chatgpt' } })).toBe('Starting from: “Curved bluestone” (a ChatGPT result)');
+    expect(startingFromText({ title: 'Lanterns', source: { kind: 'handoff', app: 'gemini' } })).toBe('Starting from: “Lanterns” (a Gemini result)');
+    expect(startingFromText({ title: 'Wide', source: { kind: 'api', model: 'gpt-image-1' } })).toBe('Starting from: “Wide” (an image API result)');
+    expect(startingFromText({ title: 'Old' })).toBe('Starting from: “Old”');
+  });
+
+  it('spots compare instructions that would not differ', () => {
+    expect(identicalInstructions([{ brief: 'Lay a flagstone walk.' }, { brief: ' lay a  flagstone walk. ' }])).toBe(true);
+    expect(identicalInstructions([{ brief: 'Small cobbles.' }, { brief: 'Large flagstone slabs.' }])).toBe(false);
+    expect(identicalInstructions([{ brief: 'Only one.' }])).toBe(false);
   });
 });

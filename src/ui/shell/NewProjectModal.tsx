@@ -15,6 +15,7 @@ import { useZipLookup } from '../../site/hooks';
 import { fetchSiteProfile } from '../../site/profile';
 import { lookupZip, normalizeZip, ZONE_SOURCE_NOTE, type ZipInfo } from '../../site/zip';
 import { useStore } from '../../state/store';
+import { visionUnsupportedReason } from '../../vision';
 import { Badge, Button, Field, Modal, TextInput, cn } from '../common';
 import { errorText, isValidZip } from './format';
 import { closeNewProject, useShellUI } from './shellUI';
@@ -37,6 +38,7 @@ export function NewProjectModal() {
 
 function NewProjectForm() {
   const aiEnabled = useStore((s) => !!s.health?.ai.enabled);
+  const onDeviceVision = useMemo(() => visionUnsupportedReason() === null, []);
   const [name, setName] = useState('');
   const [zip, setZip] = useState('');
   const [style, setStyle] = useState('');
@@ -190,8 +192,8 @@ function NewProjectForm() {
         {!aiEnabled && (
           <p className="flex items-start gap-2 rounded-lg bg-surface-2 px-3 py-2 text-xs text-muted">
             <Sparkles className="mt-0.5 size-3.5 shrink-0 text-accent" aria-hidden />
-            Claude is off on this server. You can still map scenes on this device, get photoreal variations by hand-off to your ChatGPT or
-            Gemini app, and use the Fine-tune hand tools. Plans follow a simple template.
+            No AI key needed: {onDeviceVision ? 'map scenes on this device, ' : 'outline areas with the lasso, '}get photoreal images by
+            hand-off to your ChatGPT or Gemini app, and use the Fine-tune hand tools. A Claude key (optional) adds tailored plans.
           </p>
         )}
       </form>

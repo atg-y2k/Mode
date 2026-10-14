@@ -31,7 +31,7 @@ import {
   Upload,
   X,
 } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState, type DragEvent, type MouseEvent, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type MouseEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import type { HandoffPack } from '../../../../shared/types';
 import { CHATGPT_URL, chatgptDeepLink, GEMINI_APP_URL, handoffDownloadName, warmUpAlignment } from '../../../handoff';
@@ -717,15 +717,33 @@ export function CompanionPanel({ variant, onCollapse }: { variant: 'inline' | 'p
   );
 }
 
-/** Below this size of the photo pane the open card floats over the window (bottom right / bottom sheet). */
-const FLOAT_BELOW = { width: 640, height: 560 };
+/**
+ * Below this size of the photo pane the open card floats (phones: a bottom
+ * sheet; larger screens: lined up with the photo pane's right edge, never
+ * over the right panel or its tab rail, tall enough for all three steps and
+ * the drop zone). Above it the card sits inside the photo pane and scrolls
+ * within it. 1440×900 leaves a 759×528 pane (inline); 1366×768 a 677×403 one,
+ * where an inline card would show only step 1 (floats).
+ */
+export const FLOAT_BELOW = { width: 480, height: 500 };
 
-/** Inline host: card / collapsed pill over the Studio (floating over the window when the pane is small), plus the PiP portal. */
+/** Phones (below Tailwind's sm): the floating card is a bottom sheet over the bottom nav. */
+const PHONE_QUERY = '(max-width: 639px)';
+
+function isTypingTarget(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null;
+  if (!el || !el.tagName) return false;
+  return el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName);
+}
+
+/** Inline host: card / collapsed pill over the Studio (floating when the pane is too small), plus the PiP portal. */
 export function CompanionDock() {
   const items = usePendingHandoffs();
   const companion = useHandoffSession((s) => s.companion);
   const pip = useHandoffSession((s) => s.pip);
   const staging = useHandoffSession((s) => s.staging);
+  const activeRef = useHandoffSession((s) => s.active);
+  const photoId = useStore((s) => s.selection.photoId);
   const waiting = items.filter((i) => i.planned.status === 'awaiting-handoff').length;
   const back = items.length - waiting;
 
@@ -762,16 +780,67 @@ export function CompanionDock() {
     if (gridId && handoffSession().companion === 'open') setHandoffSession({ companion: 'collapsed' });
   }, [gridId]);
 
-  // A short or narrow photo pane (phones, small laptop screens) can't hold the steps: the card floats over the window instead.
+  // A short or narrow photo pane (phones, 768 px-tall laptops, small windows) can't hold the steps: the card floats instead.
   const paneRef = useRef<HTMLDivElement>(null);
   const pane = useElementSize(paneRef);
   const floating = pane.width > 0 && (pane.width < FLOAT_BELOW.width || pane.height < FLOAT_BELOW.height);
 
-  const portal = pip && !pip.closed ? createPortal(<PipFrame />, pip.document.body) : null;
   const open = items.length > 0 && companion === 'open' && !pip && !staging;
-  const card = (className: string) => (
+
+  // Floating on a larger screen: lined up with the photo pane's right edge (the right panel and its tab rail stay clickable).
+  const [anchor, setAnchor] = useState<CSSProperties | null>(null);
+  useLayoutEffect(() => {
+    if (!open || !floating) return;
+    const place = () => {
+      const el = paneRef.current;
+      if (!el || window.matchMedia?.(PHONE_QUERY).matches) {
+        setAnchor(null);
+        return;
+      }
+      const r = el.getBoundingClientRect();
+      const right = Math.max(8, Math.round(window.innerWidth - r.right + 12));
+      setAnchor({ right, maxWidth: Math.max(240, Math.round(r.width - 24)) });
+    };
+    place();
+    window.addEventListener('resize', place);
+    return () => window.removeEventListener('resize', place);
+  }, [open, floating, pane.width, pane.height]);
+
+  // Esc folds the open card to its pill (before the Studio's own Esc, which goes back to the original).
+  // Listens on the document: Popover / sketch handlers that claim Esc stop it earlier; dialogs, staging and typing are left alone.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.defaultPrevented || e.isComposing) return;
+      if (isTypingTarget(e.target) || isTypingTarget(document.activeElement)) return;
+      if (document.querySelector('[aria-modal="true"]') || handoffSession().staging) return;
+      e.preventDefault();
+      setHandoffSession({ companion: 'collapsed' });
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [open]);
+
+  // The pill: the card's own item when it belongs to the photo on screen, else the first item here, else the first anywhere (switching photo on this click is fine).
+  const openFromPill = () => {
+    if (pip) {
+      pip.focus();
+      return;
+    }
+    const isWaiting = (i: PendingItem) => i.planned.status === 'awaiting-handoff';
+    const current = items.find((i) => sameRef(i, activeRef));
+    const here = items.filter((i) => i.photoId === photoId);
+    const target = (current && current.photoId === photoId ? current : undefined) ?? here.find(isWaiting) ?? here[0] ?? current ?? items.find(isWaiting) ?? items[0];
+    if (target && target === current && target.planned.status === 'awaiting-handoff') setHandoffSession({ companion: 'open' });
+    else if (target) openHandoff(target);
+    else setHandoffSession({ companion: 'open' });
+  };
+
+  const portal = pip && !pip.closed ? createPortal(<PipFrame />, pip.document.body) : null;
+  const card = (className: string, style?: CSSProperties) => (
     <div
       className={cn('flex flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-panel', className)}
+      style={style}
       role="dialog"
       aria-label="Hand-off companion"
       onPointerDown={(e) => e.stopPropagation()}
@@ -789,21 +858,24 @@ export function CompanionDock() {
           createPortal(
             // Capped below the 3.5rem top bar (+0.5rem gap) so Settings, undo and Fine-tune stay clickable:
             // sm+ 1rem bottom + 3.5rem + 0.5rem; phones 4.5rem bottom-nav offset + 3.5rem + 0.5rem.
+            // sm+: `anchor` lines its right edge up with the photo pane's (inline style overrides right-4).
             card(
               'fixed z-40 right-4 bottom-4 w-[22rem] max-h-[min(42rem,calc(100dvh-5rem))] max-sm:inset-x-2 max-sm:w-auto max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom))] max-sm:max-h-[calc(100dvh-8.5rem-env(safe-area-inset-bottom))]',
+              anchor ?? undefined,
             ),
             document.body,
           )
         ) : (
-          card('absolute z-30 top-[3.75rem] right-3 w-[22rem] max-h-[calc(100%-4.5rem)]')
+          card('absolute z-30 top-[3.75rem] right-3 w-[22rem] max-w-[calc(100%-1.5rem)] max-h-[calc(100%-4.5rem)]')
         )
       ) : (
         !staging && (
           <button
             type="button"
-            onClick={() => (pip ? pip.focus() : setHandoffSession({ companion: 'open' }))}
+            onClick={openFromPill}
             onPointerDown={(e) => e.stopPropagation()}
-            className="absolute z-30 inline-flex h-9 items-center gap-2 rounded-full bg-accent pr-3 pl-2.5 text-xs font-semibold text-accent-fg shadow-lg transition-colors hover:bg-accent-hover max-sm:right-3 max-sm:bottom-3 sm:top-[3.75rem] sm:right-3"
+            // Bottom right of the photo, just above the zoom controls (clear of the side-by-side header).
+            className="absolute z-30 inline-flex h-9 items-center gap-2 rounded-full bg-accent pr-3 pl-2.5 text-xs font-semibold text-accent-fg shadow-lg transition-colors hover:bg-accent-hover max-sm:right-3 max-sm:bottom-3 sm:right-3 sm:bottom-[3.75rem]"
             title={pip ? 'The hand-off card is floating in its own window' : 'Open the hand-off card'}
             aria-label={`${waiting > 0 ? `${waiting} hand-off${waiting === 1 ? '' : 's'} waiting` : ''}${waiting > 0 && back > 0 ? ', ' : ''}${back > 0 ? `${back} back for review` : ''} — open the hand-off card`}
           >

@@ -31,6 +31,7 @@ import {
 import type { FeasibilityContext } from '../../assets/design';
 import { climateSummaryText, locationForApi } from '../../lib/studio';
 import { compassName } from '../../site/sun';
+import { groundSunSpot } from './panels/zones';
 
 const LIMITS = { sceneSummary: 8000, prompt: 4000, climate: 4000, idea: 600, note: 600 } as const;
 
@@ -235,7 +236,11 @@ export function rateOptions(
   return out;
 }
 
-/** Context for rating an element's plants: the property's climate plus the sun of the zones it targets. */
+/**
+ * Context for rating an element's plants: the property's climate plus the
+ * sun of the zones it targets (else the brief's targets, else the ground
+ * nearby — the lawn first — as the element card's header shows).
+ */
 export function elementFeasibilityContext(
   el: ElementSpec,
   scene: SceneMap | undefined,
@@ -247,6 +252,7 @@ export function elementFeasibilityContext(
   const zones = scene?.zones ?? [];
   let spot = zones.filter((z) => el.zoneIds.includes(z.id) && z.sun);
   if (spot.length === 0) spot = zones.filter((z) => fallbackZoneIds.includes(z.id) && z.sun);
+  if (spot.length === 0 && setting === 'exterior') spot = groundSunSpot(zones)?.zones ?? [];
   return knowledge.feasibilityContext(location, spot, setting);
 }
 

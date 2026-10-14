@@ -136,17 +136,18 @@ const BOILERPLATE: RegExp[] = [
 ];
 
 /**
- * The CHANGE part of a plan instruction: drops the opening "Edit this photo
- * of …" sentence (keeping anything after a colon), keep/camera/realism and
- * plant-size boilerplate — the template restates those in the app's own
+ * The CHANGE part of a plan instruction: drops the "Edit this photo of …"
+ * sentence (keeping anything after a colon; a refinement quotes the earlier
+ * instruction after its feedback, so it may come later), keep/camera/realism
+ * and plant-size boilerplate — the template restates those in the app's own
  * phrasing. Falls back to the whole instruction when nothing is left.
  */
 export function changeFromInstruction(instruction: string): string {
   const sentences = splitSentences(instruction);
   const out: string[] = [];
-  sentences.forEach((s, i) => {
+  sentences.forEach((s) => {
     let t = s;
-    if (i === 0 && /^(please\s+)?edit (this|the) (photo|image|picture)\b/i.test(t)) {
+    if (/^(please\s+)?edit (this|the) (photo|image|picture)\b/i.test(t)) {
       const colon = t.indexOf(':');
       if (colon < 0) return;
       t = t.slice(colon + 1).trim();
@@ -265,6 +266,30 @@ const OPENING_CHANGE = /\b(replace|paint|repaint|swap|change|add|install|remove|
 const OPENING_KINDS = new Set<ZoneKind>(['front-door', 'garage-door', 'windows', 'door', 'window']);
 
 const EDGING_WORDS = /\b(edg(e|es|ing)|border(s|ed)?|curb(s|ing)?|kerb|trim|outline)\b/i;
+
+/** Mentions that ask for no edging / trim ("no border", "without new edging", "keeping the existing trim"). */
+const NOT_ASKED_EDGING: RegExp[] = [
+  /\b(no|without|not|never)\s+(added\s+|new\s+|any\s+)?(\w+\s+){0,2}(edg(e|es|ing)|border(s)?|curb(s|ing)?|kerb|trim|outline)\b[^;.]*/gi,
+  /\bkeep(s|ing)?\s+(the\s+|its\s+|their\s+)?(existing\s+|current\s+|original\s+)?(\w+\s+){0,2}(edg(e|es|ing)|border(s)?|curb(s|ing)?|kerb|trim|outline)\b[^;.]*/gi,
+  /\bclean edge\b/gi,
+  // Template keys ("edging: …", "trim: …") name a question, not an answer.
+  /\b[a-z][a-z &/-]{0,28}:(?=\s)/g,
+];
+
+/** The keyless plan's idea-board sentence: the homeowner's notes as context, not part of the change. */
+const IDEAS_SENTENCE = /^Homeowner['’]s notes and inspiration:/;
+
+/** The change text without the idea-board sentence (notes like "no thorny plants" ask for no plants). */
+function ownChange(change: string): string {
+  return splitSentences(change)
+    .filter((s) => !IDEAS_SENTENCE.test(s))
+    .join(' ');
+}
+
+/** The change text minus what does not ask for edging or trim — what EDGING_WORDS / trim checks should read. */
+function askedFor(change: string): string {
+  return NOT_ASKED_EDGING.reduce((t, re) => t.replace(re, ' '), ownChange(change));
+}
 
 // ---------------------------------------------------------------------------
 // Templates
@@ -390,7 +415,8 @@ export function buildHandoffPrompt(ctx: PromptContext): string {
   const change = changeFromInstruction(ctx.instruction || 'Apply the requested design change');
   const extrasParts: string[] = [];
   for (const c of ctx.constraints ?? []) if (clean(c)) extrasParts.push(sentence(c));
-  if (mentionsPlants(change) && (!ctx.interior || /\b(houseplants?|potted)\b/i.test(change))) extrasParts.push(MATURITY[ctx.plantMaturity]);
+  const own = ownChange(change);
+  if (mentionsPlants(own) && (!ctx.interior || /\b(houseplants?|potted)\b/i.test(own))) extrasParts.push(MATURITY[ctx.plantMaturity]);
   const strict = whole ? STRICTNESS_WHOLE[ctx.app][ctx.strictness] : STRICTNESS[ctx.app][ctx.strictness];
   if (strict) {
     const text = strict(ctx.interior);
@@ -408,8 +434,8 @@ export function buildHandoffPrompt(ctx: PromptContext): string {
     areaOnly: !whole && !color,
     refs,
     interior: ctx.interior,
-    edgingInChange: EDGING_WORDS.test(change),
-    openingsTargeted: ctx.openingsInTarget ?? OPENING_CHANGE.test(change),
+    edgingInChange: EDGING_WORDS.test(askedFor(change)),
+    openingsTargeted: ctx.openingsInTarget ?? OPENING_CHANGE.test(own),
   };
   const render = ctx.app === 'gemini' ? geminiTemplate : chatgptTemplate;
   let keep = ctx.keep.map((k) => stripTrailingPunct(k)).filter(Boolean);
@@ -656,6 +682,15 @@ const STOP_WORDS = new Set([
   ...['black', 'white', 'gray', 'grey', 'brown', 'green', 'blue', 'cream', 'beige', 'navy', 'dark', 'light', 'pale', 'yellow', 'orange', 'purple', 'pink', 'silver', 'golden'],
 ]);
 
+/** A keep item minus its trim ("the windows and their trim" → "the windows"); '' when trim is all it names. */
+function withoutTrim(item: string): string {
+  const t = item
+    .replace(/\s*(,|\band)\s+(their|its|the)\s+trim\b/gi, '')
+    .replace(/^the trim and /i, 'the ')
+    .trim();
+  return /\btrim\b/i.test(t) ? '' : t;
+}
+
 /** Ground zones a route (driveway → door) can run through. */
 const ROUTE_KINDS = new Set<ZoneKind>(['walkway', 'driveway', 'steps', 'patio', 'sidewalk']);
 
@@ -709,6 +744,14 @@ export interface SceneContextOptions {
    * area words and never listed as things to keep.
    */
   roomZoneIds?: readonly string[];
+}
+
+/** A route that changes the line of the walk / drive (a curve, a straight run, stepping stones…), unless it is kept. */
+const NEW_ROUTE =
+  /\b(?:curv\w*|meander\w*|wind(?:s|ing)\b|straight (?:line|run|segments?)|right-angle turns?|offset|angled|stepping stones?|re-?rout\w*)/i;
+
+function rerouted(change: string): boolean {
+  return !/\bkeeping its current route\b/i.test(change) && NEW_ROUTE.test(change);
 }
 
 /**
@@ -789,7 +832,11 @@ export function promptContextFromScene(
       const lawn = room.some((z) => z.kind === 'lawn');
       const names = [...new Set(room.map((z) => (z.kind === 'lawn' ? 'the lawn' : withArticle(z.label || KIND_PHRASE[z.kind] || z.kind))))];
       const old = targetPaths.length || targetKinds.has('walkway') ? 'walk' : targetKinds.has('driveway') ? 'drive' : targetKinds.has('patio') ? 'patio' : 'surface';
-      areaText = `${areaText}, and ${joinList(names.slice(0, 2))} right beside it (${lawn ? 're-lawn' : 'replant'} where the old ${old} no longer runs)`;
+      // Only a new route leaves ground where the old surface used to run; a kept route only widens.
+      const why = rerouted(changeFromInstruction(extras.instruction || ''))
+        ? `${lawn ? 're-lawn' : 'replant'} where the old ${old} no longer runs`
+        : `where the ${old} ${old === 'patio' || old === 'surface' ? 'grows' : 'widens'}`;
+      areaText = `${areaText}, and ${joinList(names.slice(0, 2))} right beside it (${why})`;
     }
   }
 
@@ -809,7 +856,8 @@ export function promptContextFromScene(
   const targetPathBoxes = targetPaths.map(pathBox).filter((b): b is Box => !!b);
   // Kinds the change is about: the targets, or for whole-image edits the kinds the instruction names.
   const change = changeFromInstruction(extras.instruction || '');
-  const conflictKinds = whole ? (Object.keys(KIND_CONFLICT) as ZoneKind[]).filter((k) => KIND_CONFLICT[k]?.test(change)) : [...targetKinds];
+  const own = ownChange(change);
+  const conflictKinds = whole ? (Object.keys(KIND_CONFLICT) as ZoneKind[]).filter((k) => KIND_CONFLICT[k]?.test(own)) : [...targetKinds];
   const conflicts = conflictKinds.map((k) => KIND_CONFLICT[k]).filter((r): r is RegExp => !!r);
   const cropped = view.w * view.h < 0.9 * frame.width * frame.height;
   const visibleWords = new Set<string>();
@@ -855,7 +903,11 @@ export function promptContextFromScene(
   const style = scene.architecture?.style || scene.style || '';
   const place = SPACE_TYPE_LABELS[scene.category]?.toLowerCase();
 
-  const keepItems = (whole ? keep.map((k) => k.replace(/ outside the outline$/, '')) : keep).filter((k, i, all) => all.indexOf(k) === i);
+  // A change that asks for trim ("with crisp white trim…") can't also keep it.
+  const trimAsked = /\btrim\b/i.test(askedFor(change));
+  const keepItems = (whole ? keep.map((k) => k.replace(/ outside the outline$/, '')) : keep)
+    .map((k) => (trimAsked ? withoutTrim(k) : k))
+    .filter((k, i, all) => k && all.indexOf(k) === i);
   return {
     ...base,
     markerColorName: whole ? '' : extras.markerColorName,

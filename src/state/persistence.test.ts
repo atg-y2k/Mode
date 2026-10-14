@@ -28,6 +28,7 @@ import {
   referencedIds,
   saveLibrary,
   saveProject,
+  storageErrorText,
   sweepUnreferenced,
   sweepWhenIdle,
 } from './persistence';
@@ -603,7 +604,7 @@ describe('bundles', () => {
       await saveLibrary(prior);
       const restore = failPuts(storeName);
       try {
-        await expect(importProjectBundle(bundle)).rejects.toThrow(/Not enough storage space/);
+        await expect(importProjectBundle(bundle)).rejects.toThrow(/out of storage space for Mode.*Settings → Storage/);
       } finally {
         restore();
       }
@@ -711,5 +712,17 @@ describe('sweepUnreferenced', () => {
       expect(await sweepWhenIdle()).toEqual({ blobs: 1, masks: 0 });
       expect(await keys(raw.blobs)).toEqual([]);
     });
+  });
+});
+
+describe('storageErrorText', () => {
+  it('says what to do when the browser is out of storage', () => {
+    for (const err of [new DOMException('The quota has been exceeded.', 'QuotaExceededError'), new Error('QuotaExceededError: quota reached')]) {
+      expect(storageErrorText(err)).toMatch(/^This browser is out of storage space for Mode\. .*Settings → Storage/);
+    }
+  });
+
+  it('keeps other errors as they are', () => {
+    expect(storageErrorText(new Error('Database closed'))).toBe('Database closed');
   });
 });

@@ -53,6 +53,7 @@ import {
   requestOpenHandoff,
   type RunNode,
 } from './historyTree';
+import { setStudioUI, useStudioUI } from '../ui';
 import { BlobImage, FEASIBILITY_META, FeasibilityBadge } from './ui';
 
 type Filter = 'all' | 'favorites';
@@ -94,8 +95,9 @@ function openRunHandoff(photo: Photo, g: Generation): void {
   if (plannedId) openHandoff({ photoId: photo.id, generationId: g.id, plannedId });
 }
 
-/** "Branch from here": shows a variation (null = the original photo), which makes it the starting image of the next run. */
+/** "Branch from here": makes a variation (null = the original photo) the starting image of the next runs, and shows it. */
 function branchFrom(variation: Variation | null): void {
+  setStudioUI({ baseVariationId: variation?.id ?? null });
   viewVariation(variation?.id ?? null);
   useStore.getState().notify(variation ? `Next run starts from “${variation.title}”.` : 'Next run starts from the original photo.', 'info');
 }
@@ -115,6 +117,7 @@ function RunTree({ photo, scene }: { photo: Photo; scene: SceneMap | undefined }
           <Segmented
             size="sm"
             className="w-full"
+            label="Show runs"
             value={filter}
             onChange={setFilter}
             options={[
@@ -160,12 +163,15 @@ function RunTree({ photo, scene }: { photo: Photo; scene: SceneMap | undefined }
 /** The root of the tree: the photo as uploaded. */
 function OriginalRow({ photo, runs }: { photo: Photo; runs: number }) {
   const viewing = useStore((s) => s.studio.viewVariationId);
+  const baseId = useStudioUI((s) => s.baseVariationId);
+  // The original is the next base unless a variation of this photo was chosen.
+  const isBase = !baseId || !photo.generations.some((g) => g.variations.some((v) => v.id === baseId));
   const active = viewing === null;
   return (
     <div className={cn('flex items-center gap-3 rounded-2xl border bg-surface p-2.5', active ? 'border-accent/50' : 'border-line')}>
       <button
         type="button"
-        onClick={() => branchFrom(null)}
+        onClick={() => viewVariation(null)}
         title="View the original photo"
         className={cn('h-12 w-16 shrink-0 overflow-hidden rounded-lg bg-surface-2 focus-visible:outline-2 focus-visible:outline-accent', active && 'ring-2 ring-accent/40')}
       >
@@ -177,7 +183,7 @@ function OriginalRow({ photo, runs }: { photo: Photo; runs: number }) {
           {runs} run{runs === 1 ? '' : 's'} start{runs === 1 ? 's' : ''} here
         </p>
       </div>
-      {active ? (
+      {isBase ? (
         <Badge tone="accent">Next base</Badge>
       ) : (
         <Button size="sm" variant="ghost" className="max-lg:h-9" icon={<GitBranch className="size-3.5" />} onClick={() => branchFrom(null)}>
@@ -278,6 +284,7 @@ function RunCard({
   const g = node.run;
   const progress = useStore((s) => s.runs[g.id]);
   const viewing = useStore((s) => s.studio.viewVariationId);
+  const baseId = useStudioUI((s) => s.baseVariationId);
   const health = useStore((s) => s.health);
   const blocker = generationBlocker({ health });
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -290,6 +297,7 @@ function RunCard({
   const handText = handoffText(hand);
   const waitingTiles = favoritesOnly ? [] : (g.planned ?? []).filter((p) => p.status === 'awaiting-handoff' || p.status === 'staged');
   const viewed = variations.find((v) => v.id === viewing);
+  const base = g.variations.find((v) => v.id === baseId);
   const notes = g.plantNotes ?? [];
   const flagged = notes.filter((n) => n.rating !== 'good').length;
   const isHandoff = g.renderMode === 'handoff';
@@ -354,6 +362,7 @@ function RunCard({
               v={v}
               photo={photo}
               active={viewing === v.id}
+              isBase={baseId === v.id}
               branches={branches.get(v.id) ?? 0}
               caption={g.mode === 'compare' ? v.optionLabel : undefined}
             />
@@ -378,16 +387,25 @@ function RunCard({
         </div>
       )}
 
-      {viewed && (
+      {base ? (
         <p className="flex items-center gap-1.5 text-[11px] text-muted">
           <GitBranch className="size-3 shrink-0 text-accent" aria-hidden />
-          <span className="min-w-0 flex-1 truncate">
-            Viewing “{viewed.title}” — the next run branches from it.
-          </span>
+          <span className="min-w-0 flex-1 truncate">Branching from “{base.title}”</span>
           <button type="button" onClick={() => branchFrom(null)} className="shrink-0 font-medium text-accent hover:underline focus-visible:outline-2 focus-visible:outline-accent">
             Use original
           </button>
         </p>
+      ) : (
+        viewed &&
+        !baseId && (
+          <p className="flex items-center gap-1.5 text-[11px] text-muted">
+            <GitBranch className="size-3 shrink-0 text-subtle" aria-hidden />
+            <span className="min-w-0 flex-1 truncate">The next run starts from the original photo.</span>
+            <button type="button" onClick={() => branchFrom(viewed)} className="shrink-0 font-medium text-accent hover:underline focus-visible:outline-2 focus-visible:outline-accent">
+              Branch from this
+            </button>
+          </p>
+        )
       )}
 
       <div className="flex flex-wrap gap-x-3 gap-y-1">
@@ -458,7 +476,7 @@ function RunCard({
 }
 
 /** A variation: view it, star it, branch from it; where it was made and how it lined up. */
-function Thumb({ v, photo, active, caption, branches }: { v: Variation; photo: Photo; active: boolean; caption?: string; branches: number }) {
+function Thumb({ v, photo, active, isBase, caption, branches }: { v: Variation; photo: Photo; active: boolean; isBase: boolean; caption?: string; branches: number }) {
   const prov = provenanceOf(v.source);
   return (
     <div className={cn('group relative min-w-0 overflow-hidden rounded-lg border bg-surface-2', active ? 'border-accent ring-2 ring-accent/40' : 'border-line')}>
@@ -484,11 +502,13 @@ function Thumb({ v, photo, active, caption, branches }: { v: Variation; photo: P
       <button
         type="button"
         aria-label={`Branch from ${v.title}${branches ? ` (${branches} run${branches === 1 ? '' : 's'} already started from it)` : ''}`}
-        title={`Branch from here — the next run starts from this variation${branches ? `\n${branches} run${branches === 1 ? '' : 's'} already started from it` : ''}`}
+        aria-pressed={isBase}
+        title={`${isBase ? 'The next run starts from this variation' : 'Branch from here — the next run starts from this variation'}${branches ? `\n${branches} run${branches === 1 ? '' : 's'} already started from it` : ''}`}
         onClick={() => branchFrom(v)}
         className={cn(
-          'absolute left-1 top-1 flex h-7 min-w-7 items-center justify-center gap-0.5 rounded-full bg-black/40 px-1.5 text-[10px] font-semibold text-white transition-opacity focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-white',
-          active || branches > 0 ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 max-lg:opacity-100',
+          'absolute left-1 top-1 flex h-7 min-w-7 items-center justify-center gap-0.5 rounded-full px-1.5 text-[10px] font-semibold text-white transition-opacity focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-white',
+          isBase ? 'bg-accent' : 'bg-black/40',
+          active || isBase || branches > 0 ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 max-lg:opacity-100',
         )}
       >
         <GitBranch className="size-3.5" aria-hidden />

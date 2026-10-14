@@ -9,7 +9,7 @@
  * the review.
  */
 import { create } from 'zustand';
-import type { HandoffApp, PlantNote } from '../../../../shared/types';
+import type { HandoffApp, PlantNote, Variation } from '../../../../shared/types';
 
 export interface ReviewItem {
   /** Slot key = planned variation id. */
@@ -39,9 +39,28 @@ export interface ReviewRequest {
 
 export const useReview = create<{ current: ReviewRequest | null }>(() => ({ current: null }));
 
-/** Shown when the server planned without Claude (its template of the brief): plain information, Claude is optional. */
-export const TEMPLATE_PLAN_NOTE =
-  'Planned from your choices — edit any instruction before sending. Adding a Claude key (optional) makes tailored plans and plant checks.';
+/** Shown when the server planned without Claude (its template of the brief): plain information (the keyless state is said once, in Settings). */
+export const TEMPLATE_PLAN_NOTE = 'Planned from your choices — edit any instruction before sending.';
+
+/**
+ * Which image the run sends: "Starting from: your original photo", or
+ * "Starting from: “Curved bluestone” (a ChatGPT result)". `base` is the
+ * run's starting variation (undefined: the original photo).
+ */
+export function startingFromText(base: Pick<Variation, 'title' | 'source'> | undefined): string {
+  if (!base) return 'Starting from: your original photo';
+  const src = base.source;
+  const made = !src ? '' : src.kind === 'api' ? ' (an image API result)' : ` (a ${src.app === 'gemini' ? 'Gemini' : 'ChatGPT'} result)`;
+  return `Starting from: “${base.title}”${made}`;
+}
+
+/** Compare runs whose (kept) instructions are all the same text: the options would not differ. */
+export function identicalInstructions(items: readonly Pick<ReviewItem, 'brief'>[]): boolean {
+  if (items.length < 2) return false;
+  const norm = (t: string) => t.trim().replace(/\s+/g, ' ').toLowerCase();
+  const first = norm(items[0].brief);
+  return items.every((i) => norm(i.brief) === first);
+}
 
 /** The review footer for `n` hand-offs: each is its own chat. */
 export function handoffFooter(n: number): string {

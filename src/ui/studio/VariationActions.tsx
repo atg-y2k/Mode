@@ -21,9 +21,11 @@ export function moreLikeThis(photoId: string, v: Variation): void {
   void runOrNotify({ photoId, mode: 'variations', moreLikeThis: v.id });
 }
 
+/** "Use as base": the next runs start from this variation (until the From chip is removed) — and it is shown. */
 export function startFromVariation(v: Variation): void {
+  setStudioUI({ baseVariationId: v.id });
   viewVariation(v.id);
-  useStore.getState().notify(`Next runs start from “${v.title}”. Press Esc to go back to the original.`, 'info');
+  useStore.getState().notify(`Next runs start from “${v.title}”. Remove the From chip to go back to the original.`, 'info');
 }
 
 export function compareWithOriginal(v: Variation): void {

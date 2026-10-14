@@ -170,6 +170,45 @@ describe('ELEMENT_DEFS', () => {
     expect(span).toBeGreaterThan(byId['large-flagstone'].unitWidthIn);
   });
 
+  it('defaults keep what is photographed: no new route, width, railing or trim, and lighting shown by day', () => {
+    const dim = (type: Parameters<typeof getElementDef>[0], id: string) => getElementDef(type).dimensions.find((d) => d.id === id) as ElementDimension;
+    const shape = dim('pathway', 'shape');
+    expect(shape.defaultOptionId).toBe('keep-route');
+    const keepRoute = shape.options.find((o) => o.id === 'keep-route');
+    expect(keepRoute).toMatchObject({ label: 'Keep current route', promptText: 'keeping its current route and line' });
+    expect(keepRoute?.footprint).toBeUndefined();
+    expect(dim('pathway', 'width').defaultOptionId).toBe('keep-width');
+    // Defaults never grow the footprint (the lawn beside the walk stays out of the outline until asked).
+    for (const d of getElementDef('pathway').dimensions) expect(d.options.find((o) => o.id === d.defaultOptionId)?.footprint, d.id).toBeUndefined();
+    // e2e picks these by label.
+    expect(dim('pathway', 'material').options.some((o) => o.label === 'Gray granite')).toBe(true);
+    expect(dim('pathway', 'stone-size').options.some((o) => o.label === 'Large flagstone slabs')).toBe(true);
+
+    // No railing appears on steps or a porch unless the owner picks one.
+    for (const type of ['steps', 'porch'] as const) {
+      const railing = dim(type, 'railing');
+      expect(railing.defaultOptionId, type).toBe('rail-keep');
+      expect(railing.options.find((o) => o.id === 'rail-keep')?.promptText, type).toMatch(/^keeping any existing railing/);
+    }
+
+    const trim = dim('wall-paint', 'trim');
+    expect(trim.defaultOptionId).toBe('trim-keep');
+    expect(trim.options.find((o) => o.id === 'trim-keep')?.promptText).toMatch(/^keeping the existing trim/);
+
+    for (const [type, dark] of [
+      ['outdoor-lighting', ['dusk', 'night']],
+      ['interior-lighting', ['evening', 'night']],
+    ] as const) {
+      const time = dim(type, 'time');
+      expect(time.defaultOptionId, type).toBe('daytime');
+      for (const id of dark) expect(time.options.find((o) => o.id === id)?.rationale, `${type}/${id}`).toMatch(/Switch the run to Whole image before generating\.$/);
+    }
+  });
+
+  it('every built-in prompt text names one concrete choice (no "x or y" for the image model to pick)', () => {
+    for (const { def, dim, o } of allOptions()) expect(o.promptText, `${def.type}/${dim.id}/${o.id}`).not.toMatch(/ or /);
+  });
+
   it('maps every plant option to existing dimensions, options and plant profiles', () => {
     const keys = plantOptionKeys();
     expect(keys.length).toBeGreaterThan(10);

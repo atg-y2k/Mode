@@ -18,7 +18,7 @@ import { findPhoto, isSketchZone, useStore } from '../../state/store';
 import { isDesktopViewport } from '../../ui/shell/hooks';
 import { offlineSceneMap, refineZonesDetailed, VisionError, visionUnsupportedReason, type RefineDetail } from '../index';
 import { segformerAllowed, segformerChoice, setSegformerChoice, type SegformerChoice } from '../license';
-import { offlineSceneCategory } from '../sceneFromClasses';
+import { offlineSceneCategory, offlineSummary } from '../sceneFromClasses';
 
 export interface ZoneOutcome {
   zoneId: string;
@@ -226,11 +226,19 @@ export function canMapOnDevice(): boolean {
   return visionUnsupportedReason() === null;
 }
 
+/** Ends `text` with a full stop, so it can sit between two sentences of a message. */
+function sentence(text: string): string {
+  const t = text.trim();
+  return /[.!?]$/.test(t) ? t : `${t}.`;
+}
+
 /**
  * Maps the photo without Claude (semantic segmentation + CLIPSeg outdoors),
  * keeps any sketched areas, then sharpens the new outlines. `replace`
  * (an explicit re-map) replaces an existing map; otherwise a map that is
- * already there (or arrives meanwhile) is kept.
+ * already there (or arrives meanwhile) is kept. The map is saved before the
+ * sharpening starts: when only the sharpening fails (e.g. the network drops
+ * while its model downloads), the map stays and the message says so.
  */
 export async function mapSceneOffline(photoId: string, opts: { replace?: boolean } = {}): Promise<void> {
   if (useVisionJobs.getState().job) return;
@@ -248,7 +256,9 @@ export async function mapSceneOffline(photoId: string, opts: { replace?: boolean
     const current = now?.photo;
     if (!now || !current) return;
     // The user's space type (as it is now) stays the category; the class-mix guess only fills in a generic one.
-    const scene: SceneMap = { ...mappedScene, category: offlineSceneCategory(mappedScene.category, now.space.type) };
+    // The summary's "Not found: …" follows that category (a backyard has no front door to miss).
+    const category = offlineSceneCategory(mappedScene.category, now.space.type);
+    const scene: SceneMap = { ...mappedScene, category, summary: offlineSummary(mappedScene.zones, category) };
     if (!opts.replace && current.scene && current.scene.zones.some((z) => !isSketchZone(z))) {
       useStore.getState().notify('This photo was mapped meanwhile — kept that map.', 'info');
       return;
@@ -261,13 +271,25 @@ export async function mapSceneOffline(photoId: string, opts: { replace?: boolean
     const mapped = findPhoto(useStore.getState().project, photoId)?.photo;
     if (!mapped) return;
     const ids = new Set(scene.zones.map((z) => z.id));
-    const { items } = await runSharpen(mapped, sharpenableZones(mapped).filter((z) => ids.has(z.id)), 'map');
     // The areas the Scene panel lists (not the sky or the street around them), and how many of those were sharpened.
     const listed = new Set(scene.zones.filter((z) => z.editable && !CONTEXT_ZONE_KINDS.includes(z.kind)).map((z) => z.id));
+    const areas = `${listed.size} area${listed.size === 1 ? '' : 's'}`;
+    let items: ZoneOutcome[];
+    try {
+      ({ items } = await runSharpen(mapped, sharpenableZones(mapped).filter((z) => ids.has(z.id)), 'map'));
+    } catch (err) {
+      if (isCancel(err)) throw err;
+      // The map is saved: say so, and how to finish the outlines — not "Couldn't map the scene".
+      useStore
+        .getState()
+        .notify(
+          `Mapped ${areas} on this device, but the outlines couldn't be sharpened. ${sentence(errorText(err))} Use “Sharpen outlines” in the Scene panel later.`,
+          'info',
+        );
+      return;
+    }
     const sharpened = items.filter((i) => i.refined && listed.has(i.zoneId)).length;
-    useStore
-      .getState()
-      .notify(`Mapped ${listed.size} area${listed.size === 1 ? '' : 's'} on this device${sharpened ? ` and sharpened ${sharpened}` : ''} — no AI used.`, 'success');
+    useStore.getState().notify(`Mapped ${areas} on this device${sharpened ? ` and sharpened ${sharpened}` : ''} — no AI used.`, 'success');
   } catch (err) {
     if (!isCancel(err)) {
       setError(photoId, errorText(err));

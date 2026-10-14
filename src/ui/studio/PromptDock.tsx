@@ -7,11 +7,11 @@
  * sit next to Generate.
  */
 import { Blocks, Check, ImagePlus, Inbox, Lightbulb, MessageCircle, MousePointerClick, Plus, Sparkle, Sparkles, Target, X } from 'lucide-react';
-import { useMemo, useRef, type ReactNode } from 'react';
+import { useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { emptyBrief, type DesignBrief, type Photo, type Space } from '../../../shared/types';
 import { findVariation, useStore } from '../../state/store';
 import { cn } from '../common';
-import { openElement, runOrNotify, viewVariation } from './actions';
+import { openElement, runOrNotify } from './actions';
 import { generationBlocker } from './generate';
 import { setDefaultHandoffApp } from './handoff/actions';
 import { usePendingHandoffs } from './handoff/hooks';
@@ -21,6 +21,8 @@ import { setHandoffSession } from './handoff/session';
 import { briefTargetIds } from './maskFromZones';
 import { NO_IDEAS } from './panels/briefOps';
 import { ideasForBrief } from './planRequest';
+import { promptNote } from './promptNudges';
+import { setStudioUI, useStudioUI } from './ui';
 
 type Strictness = NonNullable<DesignBrief['strictness']>;
 
@@ -30,7 +32,24 @@ const STRICTNESS: [Strictness, string, string][] = [
   ['creative', 'Creative', 'May refine and embellish details within the picked areas'],
 ];
 
-/** Small segmented control in the dock's settings row. */
+/**
+ * Arrow keys / Home / End in a radio group: move to (and choose) the
+ * neighbouring option, like a native radio group. Returns the index to
+ * focus, or null for other keys.
+ */
+export function radioKeyTarget(key: string, index: number, count: number): number | null {
+  if (count === 0) return null;
+  if (key === 'ArrowRight' || key === 'ArrowDown') return (index + 1) % count;
+  if (key === 'ArrowLeft' || key === 'ArrowUp') return (index - 1 + count) % count;
+  if (key === 'Home') return 0;
+  if (key === 'End') return count - 1;
+  return null;
+}
+
+/**
+ * Small segmented control in the dock's settings row: a radio group with a
+ * roving tab stop (Tab enters and leaves the group in one stop; arrows choose).
+ */
 function DockSegmented<T extends string>({
   label,
   value,
@@ -42,14 +61,25 @@ function DockSegmented<T extends string>({
   options: { value: T; label: ReactNode; title: string }[];
   onChange: (value: T) => void;
 }) {
+  const checked = Math.max(0, options.findIndex((o) => o.value === value));
+  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    const next = radioKeyTarget(e.key, checked, options.length);
+    if (next === null) return;
+    e.preventDefault();
+    // Keeps the Studio's ←/→ (previous / next variation) out of it.
+    e.stopPropagation();
+    onChange(options[next].value);
+    e.currentTarget.querySelectorAll<HTMLElement>('[role="radio"]')[next]?.focus();
+  };
   return (
-    <div role="radiogroup" aria-label={label} className="inline-flex h-8 rounded-lg bg-surface-2 p-0.5 text-xs">
-      {options.map((o) => (
+    <div role="radiogroup" aria-label={label} className="inline-flex h-8 rounded-lg bg-surface-2 p-0.5 text-xs" onKeyDown={onKeyDown}>
+      {options.map((o, i) => (
         <button
           key={o.value}
           type="button"
           role="radio"
           aria-checked={value === o.value}
+          tabIndex={i === checked ? 0 : -1}
           title={o.title}
           onClick={() => onChange(o.value)}
           className={cn(
@@ -134,7 +164,8 @@ export function PromptDock({ photo, space }: { photo: Photo; space: Space | unde
   const location = useStore((s) => s.project?.location);
   const brief = photo.draft ?? emptyBrief();
   const scene = photo.scene;
-  const base = findVariation(photo, studio.viewVariationId);
+  // The starting image the owner chose ("Use as base" / Branch) — never just the variation on screen.
+  const base = findVariation(photo, useStudioUI((s) => s.baseVariationId));
   const renderMode = effectiveRenderMode(studio, health);
   const hand = renderMode === 'handoff';
   const count = variationCountOf(studio, health, renderMode);
@@ -144,6 +175,10 @@ export function PromptDock({ photo, space }: { photo: Photo; space: Space | unde
   const pending = usePendingHandoffs();
   const waitingHere = pending.filter((p) => p.photoId === photo.id && p.planned.status === 'awaiting-handoff').length;
   const backHere = pending.filter((p) => p.photoId === photo.id && p.planned.status === 'staged').length;
+
+  // Pathway questions the typed idea asks for while they still say "Keep current" / "No …".
+  const [dismissedNotes, setDismissedNotes] = useState<ReadonlySet<string>>(() => new Set());
+  const note = useMemo(() => promptNote(brief, dismissedNotes), [brief, dismissedNotes]);
 
   const zoneById = useMemo(() => new Map((scene?.zones ?? []).map((z) => [z.id, z])), [scene?.zones]);
   const ideas = useMemo(() => ideasForBrief(board ?? [], brief, space?.id ?? null), [board, brief, space?.id]);
@@ -192,13 +227,18 @@ export function PromptDock({ photo, space }: { photo: Photo; space: Space | unde
 
   const canGenerate = !blocker && described;
   let hint: { tone: 'muted' | 'warning' | 'danger'; text: string } | null = null;
+  // The typed idea vs a Pathway default: shown in the hint line (the dock keeps its height), after problems.
+  let showNote = false;
   if (blocker) hint = { tone: 'danger', text: blocker };
   else if (described && brief.scope === 'zones' && !hasTargets)
-    hint = { tone: 'warning', text: 'No areas picked yet, so the whole image may change. Click areas on the photo, or choose Whole image.' };
+    // Not mapped yet is a normal first step, not a problem: amber only once there is a map to pick from.
+    hint = scene
+      ? { tone: 'warning', text: 'No areas picked yet, so the whole image may change. Click areas on the photo, or choose Whole image.' }
+      : { tone: 'muted', text: 'Whole photo may change — map the scene to pick areas.' };
+  // While a hand-off for this photo is out, the dock shows that instead (and keeps its height for the card and staging).
+  else if (note && waitingHere + backHere === 0) showNote = true;
   else if (exterior && plantElements && !climateKnown)
     hint = { tone: 'muted', text: 'Add your ZIP code in Settings so plant choices are checked against your hardiness zone and climate.' };
-  else if (health && !health.ai.enabled)
-    hint = { tone: 'muted', text: 'AI planning is off on this server — each variation follows a simple template of your brief.' };
   else if (hand && described && pending.length === 0)
     hint = {
       tone: 'muted',
@@ -237,8 +277,8 @@ export function PromptDock({ photo, space }: { photo: Photo; space: Space | unde
               <Chip
                 icon={<ImagePlus className="size-3.5" />}
                 tone="base"
-                onRemove={() => viewVariation(null)}
-                title="New runs start from the variation you're viewing — remove to start from the original"
+                onRemove={() => setStudioUI({ baseVariationId: null })}
+                title="New runs start from this variation — remove to start from the original photo"
               >
                 From: {base.title}
               </Chip>
@@ -300,6 +340,8 @@ export function PromptDock({ photo, space }: { photo: Photo; space: Space | unde
                 type="button"
                 onClick={() => {
                   useStore.getState().setStudio({ showZones: true, sketch: 'none' });
+                  // Also over a shown result (results are shown clean otherwise).
+                  setStudioUI({ zonesOnResult: true });
                   useStore.getState().notify('Click the areas on the photo that may change.', 'info');
                 }}
                 className="inline-flex h-7 items-center gap-1 rounded-full px-2 text-xs font-medium text-muted hover:bg-surface-2 hover:text-text"
@@ -333,7 +375,7 @@ export function PromptDock({ photo, space }: { photo: Photo; space: Space | unde
             aria-label="Describe the change"
             placeholder={
               exterior
-                ? 'Describe the change — e.g. “a 5 ft curved flagstone path to the door, lavender along the edge, warm path lights”'
+                ? 'Describe the change — e.g. “a bluestone walk to the door, a little wider than today”'
                 : 'Describe the change — e.g. “warm white walls, oak floors and a linen sofa, soft evening light”'
             }
             className="field-sizing-content max-h-36 min-h-11 min-w-0 flex-1 resize-none rounded-xl border border-line bg-surface-2 px-3.5 py-2.5 text-sm leading-relaxed text-text placeholder:text-subtle focus:border-accent focus:bg-surface focus:outline-none focus:ring-2 focus:ring-accent/25"
@@ -391,29 +433,15 @@ export function PromptDock({ photo, space }: { photo: Photo; space: Space | unde
             }
             options={STRICTNESS.map(([value, label, title]) => ({ value, label, title }))}
           />
-          <div role="radiogroup" aria-label="What may change" className="inline-flex h-8 rounded-lg bg-surface-2 p-0.5 text-xs">
-            {(
-              [
-                ['zones', 'Only selected areas', 'Only the areas and paths in the brief change; everything else stays exactly as photographed'],
-                ['whole', 'Whole image', 'Anything in the photo may change'],
-              ] as const
-            ).map(([value, label, title]) => (
-              <button
-                key={value}
-                type="button"
-                role="radio"
-                aria-checked={brief.scope === value}
-                title={title}
-                onClick={() => useStore.getState().updateDraft(photo.id, (d) => void (d.scope = value), {})}
-                className={cn(
-                  'rounded-md px-2.5 font-medium whitespace-nowrap transition-colors',
-                  brief.scope === value ? 'bg-surface text-text shadow-sm' : 'text-muted hover:text-text',
-                )}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
+          <DockSegmented
+            label="What may change"
+            value={brief.scope}
+            onChange={(scope) => useStore.getState().updateDraft(photo.id, (d) => void (d.scope = scope), {})}
+            options={[
+              { value: 'zones' as const, label: 'Only selected areas', title: 'Only the areas and paths in the brief change; everything else stays exactly as photographed' },
+              { value: 'whole' as const, label: 'Whole image', title: 'Anything in the photo may change' },
+            ]}
+          />
           <label className="inline-flex h-8 items-center rounded-lg bg-surface-2 px-1.5 text-xs" title="Variations per run">
             <span className="sr-only">Variations per run</span>
             <select
@@ -469,15 +497,40 @@ export function PromptDock({ photo, space }: { photo: Photo; space: Space | unde
               {backHere > 0 && `${backHere} back`}
             </button>
           )}
-          {hint && (
-            <p
-              className={cn(
-                'min-w-48 flex-1 text-xs leading-snug',
-                hint.tone === 'danger' ? 'text-danger' : hint.tone === 'warning' ? 'text-warning' : 'text-muted',
-              )}
-            >
-              {hint.text}
-            </p>
+          {showNote && note ? (
+            <div role="note" aria-label="Note on your idea" className="flex min-w-48 flex-1 items-start gap-1.5 text-xs leading-snug text-muted">
+              <Lightbulb className="mt-px size-3.5 shrink-0" aria-hidden />
+              <p className="min-w-0 flex-1">
+                {note.text}{' '}
+                <button
+                  type="button"
+                  onClick={() => openElement(note.elementId)}
+                  className="font-medium text-accent hover:underline focus-visible:underline focus-visible:outline-none"
+                >
+                  Open {note.elementLabel}
+                </button>
+              </p>
+              <button
+                type="button"
+                onClick={() => setDismissedNotes((d) => new Set([...d, ...note.keys]))}
+                aria-label="Dismiss this note"
+                title="Dismiss"
+                className="-my-1 grid size-6 shrink-0 place-items-center rounded-full opacity-70 hover:bg-surface-2 hover:opacity-100 focus-visible:outline-2 focus-visible:outline-accent"
+              >
+                <X className="size-3" />
+              </button>
+            </div>
+          ) : (
+            hint && (
+              <p
+                className={cn(
+                  'min-w-48 flex-1 text-xs leading-snug',
+                  hint.tone === 'danger' ? 'text-danger' : hint.tone === 'warning' ? 'text-warning' : 'text-muted',
+                )}
+              >
+                {hint.text}
+              </p>
+            )
           )}
         </div>
       </div>

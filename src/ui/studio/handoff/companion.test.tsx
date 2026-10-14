@@ -71,7 +71,7 @@ vi.mock('../hooks', () => ({ useBlobUrl: () => ({ url: null }), useElementSize: 
 vi.mock('../panels/historyTree', () => ({ OPEN_HANDOFF_EVENT: 'mode:open-handoff' }));
 vi.mock('../../../lib/imageImport', () => ({ downloadBlob: vi.fn() }));
 vi.mock('../../../handoff', () => ({ CHATGPT_URL: 'x', chatgptDeepLink: () => 'x', GEMINI_APP_URL: 'y', handoffDownloadName: () => 'n', warmUpAlignment: vi.fn() }));
-const state = { studio: { handoffApp: 'chatgpt', gridGenerationId: null }, project: { ideaBoard: [] }, notify: vi.fn() };
+const state = { studio: { handoffApp: 'chatgpt', gridGenerationId: null }, selection: { photoId: 'p1' }, project: { ideaBoard: [] }, notify: vi.fn() };
 vi.mock('../../../state/store', () => {
   const useStore = (sel: (s: unknown) => unknown) => sel(state);
   (useStore as unknown as { getState: () => unknown }).getState = () => state;
@@ -79,7 +79,7 @@ vi.mock('../../../state/store', () => {
 });
 
 import { CompanionDock } from './Companion';
-import { setHandoffSession } from './session';
+import { handoffSession, setHandoffSession } from './session';
 
 function fireDrop(target: Element) {
   const ev = new Event('drop', { bubbles: true, cancelable: true });
@@ -139,5 +139,56 @@ describe('floating companion card', () => {
     const cls = card!.className;
     expect(cls).toContain('max-h-[min(42rem,calc(100dvh-5rem))]');
     expect(cls).toContain('max-sm:max-h-[calc(100dvh-8.5rem-env(safe-area-inset-bottom))]');
+  });
+
+  it('stays inside the photo pane on a laptop screen (1440×900 leaves a 759×528 pane)', async () => {
+    paneSize = { width: 759, height: 528 };
+    setHandoffSession({ pip: null, companion: 'open', staging: null, active: { photoId: 'p1', generationId: 'g1', plannedId: 'pl1' } });
+    await mount();
+    const card = document.querySelector('[role="dialog"][aria-label="Hand-off companion"]')!;
+    expect(card.className).toContain('absolute');
+    expect(card.className).not.toContain('fixed');
+    // Rendered in the pane, not portalled over the window.
+    expect(card.parentElement).not.toBe(document.body);
+  });
+
+  it('floats beside the right panel on a 1366×768 laptop (677×403 pane), tall enough for every step', async () => {
+    paneSize = { width: 677, height: 403 };
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ x: 256, y: 56, left: 256, top: 56, right: 933, bottom: 459, width: 677, height: 403, toJSON: () => ({}) } as DOMRect);
+    const width = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1366 });
+    try {
+      setHandoffSession({ pip: null, companion: 'open', staging: null, active: { photoId: 'p1', generationId: 'g1', plannedId: 'pl1' } });
+      await mount();
+      const card = document.querySelector<HTMLElement>('[role="dialog"][aria-label="Hand-off companion"]')!;
+      expect(card.className).toContain('fixed');
+      expect(card.className).toContain('max-h-[min(42rem,calc(100dvh-5rem))]');
+      expect(card.parentElement).toBe(document.body);
+      // Right edge lined up with the photo pane's (12 px in), so the right panel (x ≥ 934) and the rail stay clear.
+      expect(card.style.right).toBe(`${1366 - 933 + 12}px`);
+    } finally {
+      rect.mockRestore();
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
+    }
+  });
+});
+
+describe('Esc', () => {
+  it('folds the open card to its pill, but not while typing', async () => {
+    paneSize = { width: 759, height: 528 };
+    setHandoffSession({ pip: null, companion: 'open', staging: null, active: { photoId: 'p1', generationId: 'g1', plannedId: 'pl1' } });
+    await mount();
+    const input = document.createElement('input');
+    document.body.appendChild(input);
+    input.focus();
+    await act(async () => void input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })));
+    expect(handoffSession().companion).toBe('open');
+    input.blur();
+    const esc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    await act(async () => void document.body.dispatchEvent(esc));
+    expect(handoffSession().companion).toBe('collapsed');
+    // Handled: the Studio's own Esc (back to the original) leaves it alone.
+    expect(esc.defaultPrevented).toBe(true);
+    expect(document.querySelector('[role="dialog"][aria-label="Hand-off companion"]')).toBeNull();
   });
 });

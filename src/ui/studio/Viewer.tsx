@@ -60,6 +60,7 @@ import { clamp, clampPan, fitView, hitTestScene, simplifyPolyline, toPhoto, zoom
 import { useBlobUrl, useDecodedUrl, useElementSize, useLatest } from './hooks';
 import { Popover } from './Popover';
 import { decodeHandle, PathHandles, SketchPreview, TapSelectionLayer, widthFromHandle, type SketchHandle } from './SketchLayer';
+import { handleSketchKey } from './sketchKeys';
 import { cancelVision, formatMB, visionUnsupportedReason } from '../../vision';
 import { useVisionStatus } from '../../vision/ui/hooks';
 import { mapSceneOffline, useVisionJobs, type VisionJob } from '../../vision/ui/jobs';
@@ -80,7 +81,7 @@ import {
 } from '../../vision/ui/tapSelect';
 import { runVariations } from './tiles';
 import { getRunInfo, useRunInfo } from './runs';
-import { setStudioUI, useStudioUI } from './ui';
+import { setStudioUI, toggleAreasOverlay, useStudioUI } from './ui';
 import { askDelete, compareWithOriginal, moreLikeThis, RefineForm } from './VariationActions';
 import { SceneHoverCard, ZoneOverlay } from './ZoneOverlay';
 
@@ -164,6 +165,8 @@ export function Viewer({ photo, space }: { photo: Photo; space: Space | undefine
   const variationShown = useDecodedUrl(variation ? variationBlob.url : null);
   const [peek, setPeek] = useState(false);
   const showSlider = ui.slider && !!variation;
+  // A result is shown clean: its areas overlay only when asked for (Layers / [ ]); the original keeps the usual toggle.
+  const zonesShown = studio.showZones && (!variation || ui.zonesOnResult);
 
   // ---------------------------------------------------------------- view
   const padding = stage.width < 640 ? 8 : 28;
@@ -308,7 +311,8 @@ export function Viewer({ photo, space }: { photo: Photo; space: Space | undefine
         return;
       }
       if (sketch === 'area' && pts.length >= 3) {
-        addSketchedArea(photo, space, pts);
+        // Drawn for the open element when it has no areas yet ("Outline the planting bed on the photo").
+        addSketchedArea(photo, space, pts, { elementId: useStore.getState().studio.activeElementId });
         useStore.getState().setStudio({ sketch: 'none' });
         return;
       }
@@ -338,28 +342,23 @@ export function Viewer({ photo, space }: { photo: Photo; space: Space | undefine
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const k = keyState.current;
-      if (k.sketch === 'none' && !k.editing && !k.tapActive) return;
-      const t = e.target as HTMLElement | null;
-      if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
-      if (k.tapActive) {
-        const hasSelection = useTapSelect.getState().parts.length > 0;
-        if (e.key === 'Enter' && hasSelection) void keepSelection(k.space);
-        else if (e.key === 'Escape') {
-          if (hasSelection) clearSelection();
-          else stopTapSelect();
-        } else if ((e.key === 'Backspace' || e.key === 'Delete') && hasSelection) undoTap();
-        else return;
-      } else if (k.sketch !== 'none') {
-        if (e.key === 'Enter') k.finishSketch();
-        else if (e.key === 'Escape') {
-          setSketchPts([]);
-          useStore.getState().setStudio({ sketch: 'none' });
-        } else if (e.key === 'Backspace' || e.key === 'Delete') setSketchPts((pts) => pts.slice(0, -1));
-        else return;
-      } else if (e.key === 'Enter' || e.key === 'Escape') setStudioUI({ editingPathId: null });
-      else return;
-      e.preventDefault();
-      e.stopPropagation();
+      handleSketchKey(
+        e,
+        { sketch: k.sketch, editing: k.editing, tapActive: k.tapActive, hasTapSelection: useTapSelect.getState().parts.length > 0 },
+        {
+          finishSketch: () => k.finishSketch(),
+          cancelSketch: () => {
+            setSketchPts([]);
+            useStore.getState().setStudio({ sketch: 'none' });
+          },
+          undoPoint: () => setSketchPts((pts) => pts.slice(0, -1)),
+          stopEditingPath: () => setStudioUI({ editingPathId: null }),
+          keepTapSelection: () => void keepSelection(k.space),
+          clearTapSelection: clearSelection,
+          stopTapSelect,
+          undoTap,
+        },
+      );
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
@@ -487,7 +486,7 @@ export function Viewer({ photo, space }: { photo: Photo; space: Space | undefine
         setCursor(toPhoto(cur, p.x, p.y));
         return;
       }
-      if (e.target !== stageRef.current || !studio.showZones || e.pointerType === 'touch') {
+      if (e.target !== stageRef.current || !zonesShown || e.pointerType === 'touch') {
         if (hover) setHover(null);
         return;
       }
@@ -537,7 +536,7 @@ export function Viewer({ photo, space }: { photo: Photo; space: Space | undefine
       setStudioUI({ editingPathId: null });
       return;
     }
-    if (!studio.showZones || e.target !== stageRef.current) return;
+    if (!zonesShown || e.target !== stageRef.current) return;
     const hit = hitAt(p.x, p.y);
     if (hit?.kind === 'zone') toggleZoneTarget(photo, hit.id);
     else if (hit?.kind === 'path') activatePath(photo, space, hit.id);
@@ -561,7 +560,7 @@ export function Viewer({ photo, space }: { photo: Photo; space: Space | undefine
       : undefined
     : sketch !== 'none' || tapActive
       ? 'crosshair'
-      : hover && studio.showZones
+      : hover && zonesShown
         ? 'pointer'
         : v && fit && v.scale > fit.scale * 1.02
           ? 'grab'
@@ -629,8 +628,8 @@ export function Viewer({ photo, space }: { photo: Photo; space: Space | undefine
           photo={photo}
           view={v}
           stage={stage}
-          showZones={studio.showZones && !peek && sketch === 'none'}
-          hover={studio.showZones && !dragging && !tapActive ? hover : null}
+          showZones={zonesShown && !peek && sketch === 'none'}
+          hover={zonesShown && !dragging && !tapActive ? hover : null}
           targetZones={targetZones}
           targetPaths={targetPaths}
           focusZoneId={studio.focusZoneId}
@@ -655,7 +654,7 @@ export function Viewer({ photo, space }: { photo: Photo; space: Space | undefine
           closeHint={sketch === 'area' && sketchPts.length >= 3 && !!cursor && Math.hypot(cursor.x - sketchPts[0].x, cursor.y - sketchPts[0].y) * v.scale < 10}
         />
       )}
-      {v && hover && studio.showZones && !dragging && sketch === 'none' && !tapActive && !peek && (
+      {v && hover && zonesShown && !dragging && sketch === 'none' && !tapActive && !peek && (
         <SceneHoverCard
           photo={photo}
           space={space}
@@ -731,9 +730,9 @@ export function Viewer({ photo, space }: { photo: Photo; space: Space | undefine
       {/* Tools */}
       <Chrome className="top-3 right-3 flex flex-col gap-0.5 p-1 sm:flex-row">
         <ToolButton
-          label={studio.showZones ? 'Hide areas ( [ or ] )' : 'Show areas ( [ or ] )'}
-          active={studio.showZones}
-          onClick={() => useStore.getState().setStudio({ showZones: !studio.showZones })}
+          label={zonesShown ? 'Hide areas ( [ or ] )' : variation ? 'Show areas on this result ( [ or ] )' : 'Show areas ( [ or ] )'}
+          active={zonesShown}
+          onClick={() => toggleAreasOverlay(!!variation)}
         >
           <Layers className="size-4" />
         </ToolButton>
@@ -802,7 +801,9 @@ export function Viewer({ photo, space }: { photo: Photo; space: Space | undefine
             onUndo={() => setSketchPts((pts) => pts.slice(0, -1))}
             onFinish={() => finishSketch()}
             onCancel={() => useStore.getState().setStudio({ sketch: 'none' })}
-            target={sketch === 'path' ? (openElement?.label ?? null) : null}
+            target={
+              sketch === 'path' ? (openElement?.label ?? null) : openElement && openElement.zoneIds.length + openElement.pathIds.length === 0 ? openElement.label : null
+            }
           />
         )}
         {sketch === 'none' && editingPath && (
@@ -835,8 +836,8 @@ export function Viewer({ photo, space }: { photo: Photo; space: Space | undefine
             <span className="min-w-0 flex-1 px-1 text-xs text-white/85">
               {aiEnabled === false
                 ? tapSupported
-                  ? 'Claude is off — map the areas on this device (free), or outline them with the lasso.'
-                  : 'Scene mapping needs AI — outline the areas to change with the lasso.'
+                  ? 'Not mapped yet — map the scene on this device (free), or outline areas with the lasso.'
+                  : 'Not mapped yet — outline the areas to change with the lasso.'
                 : 'Not mapped yet — map the scene to pick areas and paths by clicking.'}
             </span>
             {aiEnabled !== false ? (
@@ -845,8 +846,8 @@ export function Viewer({ photo, space }: { photo: Photo; space: Space | undefine
               </PillButton>
             ) : (
               tapSupported && (
-                <PillButton primary onClick={() => void mapSceneOffline(photo.id)}>
-                  Map on this device
+                <PillButton primary title="Map the scene on this device, free" onClick={() => void mapSceneOffline(photo.id)}>
+                  Map the scene
                 </PillButton>
               )
             )}
@@ -884,6 +885,7 @@ function PillButton({
   primary,
   disabled,
   label,
+  title,
   active,
 }: {
   children: ReactNode;
@@ -892,6 +894,8 @@ function PillButton({
   disabled?: boolean;
   /** Accessible name / tooltip for icon-only buttons. */
   label?: string;
+  /** Tooltip only (the visible text stays the accessible name). */
+  title?: string;
   /** Toggle state (aria-pressed). */
   active?: boolean;
 }) {
@@ -901,7 +905,7 @@ function PillButton({
       onClick={onClick}
       disabled={disabled}
       aria-label={label}
-      title={label}
+      title={title ?? label}
       aria-pressed={active}
       className={cn(
         'inline-flex h-8 shrink-0 items-center gap-1 rounded-lg px-2 text-xs font-medium transition-colors focus-visible:outline-2 focus-visible:outline-white disabled:pointer-events-none disabled:opacity-40 sm:px-2.5',

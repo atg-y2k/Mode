@@ -9,13 +9,14 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Blocks, Crosshair, ImagePlus, Lightbulb, Loader2, Minus, Plus, ScanSearch, Sparkles, WandSparkles } from 'lucide-react';
 import type { DesignBrief, ElementType, IdeaItem, Photo, Project, SceneMap, Space } from '../../../../shared/types';
 import { elementsForSetting } from '../../../assets/design';
-import { useStore } from '../../../state/store';
+import { findVariation, useStore } from '../../../state/store';
 import { pickPhotos } from '../../shell/photoImport';
 import { useSceneJob } from '../../shell/sceneJobs';
 import { useDeviceMapping } from '../../../vision/ui/jobs';
 import { Button, EmptyState, IconButton, PanelHeader, Section, Segmented, TextArea, Toggle } from '../../common';
 import { generationBlocker } from '../generate';
 import { variationCountOf } from '../handoff/prefs';
+import { useStudioUI } from '../ui';
 import { addElement, clearZoneFocus, editBrief, generateBrief, mapScene, openRunGrid, typeBrief } from './actions';
 import { hasCustomIdeas, includedIdeaIds, isBriefEmpty, resetIdeas, toggleIdea, toggleTargetZone } from './briefOps';
 import { useStudioContext } from './context';
@@ -160,7 +161,8 @@ function BriefComposer({
 
       <InspirationSection project={project} space={space} photoId={photo.id} brief={brief} />
 
-      <Section title="Describe it">
+      {/* Desktop: the prompt bar under the photo is the one place to describe and run. Phones keep these here (the bar is on another pane). */}
+      <Section title="Describe it" className="lg:hidden">
         <TextArea
           value={brief.prompt}
           maxLength={4000}
@@ -264,21 +266,24 @@ function AreasSection({ photo, scene, brief }: { photo: Photo; scene: SceneMap |
       title="Areas to change"
       action={scene && <Toggle checked={showZones} onChange={(v) => useStore.getState().setStudio({ showZones: v })} label={<span className="text-xs text-muted">Show on photo</span>} />}
     >
+      {/* Desktop: "What may change" lives in the prompt bar under the photo. */}
       <Segmented
         size="sm"
+        className="lg:hidden"
+        label="What may change"
         value={brief.scope}
         onChange={(scope) => editBrief(photo.id, (b) => void (b.scope = scope))}
         options={[
-          { value: 'zones', label: 'Selected areas', title: 'Only the areas you pick (and your elements’ areas) change' },
+          { value: 'zones', label: 'Only selected areas', title: 'Only the areas you pick (and your elements’ areas) change' },
           { value: 'whole', label: 'Whole image', title: 'Anything in the photo may change' },
         ]}
       />
       {brief.scope === 'whole' ? (
-        <p className="text-xs text-muted">Anything in the photo may change. Switch to “Selected areas” to protect everything outside the parts you pick.</p>
+        <p className="text-xs text-muted">Anything in the photo may change. Switch to “Only selected areas” to protect everything outside the parts you pick.</p>
       ) : !scene ? (
         <div className="flex flex-col gap-2">
           <p className="text-xs text-muted">
-            {sceneJob ? 'Mapping the scene… you can pick areas when it finishes.' : 'Map the scene to pick exactly which areas may change. Until then the whole photo may change.'}
+            {sceneJob ? 'Mapping the scene… you can pick areas when it finishes.' : 'Whole photo may change — map the scene to pick areas.'}
           </p>
           {!sceneJob && (
             <Button size="sm" className="self-start max-lg:h-9" icon={<ScanSearch className="size-3.5" />} onClick={() => void mapScene(photo.id)}>
@@ -427,7 +432,8 @@ function InspirationSection({ project, space, photoId, brief }: { project: Proje
 function GenerateFooter({ photo, brief }: { photo: Photo; brief: DesignBrief }) {
   const count = useStore((s) => variationCountOf(s.studio, s.health));
   const health = useStore((s) => s.health);
-  const viewing = useStore((s) => s.studio.viewVariationId);
+  const baseId = useStudioUI((s) => s.baseVariationId);
+  const base = baseId ? findVariation(photo, baseId) : undefined;
   // Primitive / store-owned selections only (a fresh object per call would re-render forever).
   const runningId = useStore((s) => photo.generations.find((g) => !!s.runs[g.id])?.id ?? null);
   const progress = useStore((s) => (runningId ? s.runs[runningId] : undefined));
@@ -447,7 +453,7 @@ function GenerateFooter({ photo, brief }: { photo: Photo; brief: DesignBrief }) 
   };
 
   return (
-    <div className="sticky bottom-0 z-10 mt-auto flex flex-col gap-2 border-t border-line bg-surface/95 px-4 py-3 backdrop-blur supports-[backdrop-filter]:bg-surface/85">
+    <div className="sticky bottom-0 z-10 mt-auto flex flex-col gap-2 border-t border-line bg-surface/95 px-4 py-3 backdrop-blur supports-[backdrop-filter]:bg-surface/85 lg:hidden">
       {running && (
         <div className="flex items-center gap-2 text-xs text-muted" role="status" aria-live="polite">
           <Loader2 className="size-3.5 animate-spin text-accent" aria-hidden />
@@ -465,9 +471,9 @@ function GenerateFooter({ photo, brief }: { photo: Photo; brief: DesignBrief }) 
         <p className="text-xs text-danger">{blocker}</p>
       ) : empty ? (
         <p className="text-xs text-muted">Add a design element or describe the change to generate.</p>
-      ) : viewing ? (
-        <p className="flex items-center gap-1 text-xs text-muted">
-          <WandSparkles className="size-3.5 text-accent" aria-hidden /> Starts from the variation you're viewing.
+      ) : base ? (
+        <p className="flex min-w-0 items-center gap-1 text-xs text-muted">
+          <WandSparkles className="size-3.5 shrink-0 text-accent" aria-hidden /> <span className="truncate">Starts from “{base.title}”.</span>
         </p>
       ) : null}
       <div className="flex items-center gap-2">

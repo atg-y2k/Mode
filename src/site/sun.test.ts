@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  MIN_SUN_ALTITUDE_DEG,
   angularDistance,
   compassName,
   compassPoint,
@@ -79,6 +80,33 @@ describe('sunHours', () => {
   });
 });
 
+describe('the owner\'s ZIP (Montgomery County, MD: 38.99°N, 77.13°W)', () => {
+  const [lat, lon] = [38.99, -77.13];
+
+  it('a north-facing front yard is shade over the growing season (under 3 h), not part sun', () => {
+    const r = seasonalSunHours(lat, lon, 0);
+    expect(r.hours).toBeLessThan(3);
+    expect(r.exposure).toBe('shade');
+    // Even in June (long days, sun rising and setting in the north) it stays under full sun.
+    const june = sunHours(lat, lon, 0, 6);
+    expect(june.hours).toBeLessThan(6);
+    expect(june.exposure).not.toBe('full-sun');
+  });
+
+  it('a south-facing front yard is full sun (≥ 6 h)', () => {
+    const r = seasonalSunHours(lat, lon, 180);
+    expect(r.hours).toBeGreaterThanOrEqual(6);
+    expect(r.exposure).toBe('full-sun');
+    expect(sunHours(lat, lon, 180, 6).exposure).toBe('full-sun');
+  });
+
+  it('counts sun under 15° as blocked by neighbours, fences and the house', () => {
+    expect(MIN_SUN_ALTITUDE_DEG).toBe(15);
+    // Low sun adds hours: with the old 5° cut-off the north face read as part sun.
+    expect(sunHours(lat, lon, 0, 6, { minAltitudeDeg: 5 }).hours).toBeGreaterThan(sunHours(lat, lon, 0, 6).hours);
+  });
+});
+
 describe('seasonalSunHours', () => {
   it('averages the growing season and reports each month', () => {
     const r = seasonalSunHours(LAT, LON, 180);
@@ -106,11 +134,12 @@ describe('helpers', () => {
     expect(isSunInFront(80, 180)).toBe(false);
   });
 
-  it('classifies hours: ≥ 6 full sun, 2–6 part sun, < 2 shade', () => {
+  it('classifies hours like the rest of Mode: ≥ 6 full sun, 3–6 part sun, < 3 shade', () => {
     expect(exposureFromHours(6)).toBe('full-sun');
     expect(exposureFromHours(5.9)).toBe('part-sun');
-    expect(exposureFromHours(2)).toBe('part-sun');
-    expect(exposureFromHours(1.9)).toBe('shade');
+    expect(exposureFromHours(3)).toBe('part-sun');
+    expect(exposureFromHours(2.9)).toBe('shade');
+    expect(exposureFromHours(2)).toBe('shade');
   });
 
   it('names compass points', () => {

@@ -25,6 +25,7 @@ import { hostname as machineHostname } from 'node:os';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { Hono, type Context } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
+import { compress } from 'hono/compress';
 import { HTTPException } from 'hono/http-exception';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import type { z } from 'zod';
@@ -812,6 +813,10 @@ export function createApp(deps: AppDeps) {
         for (const [name, value] of Object.entries(CROSS_ORIGIN_ISOLATION_HEADERS)) c.header(name, value);
       }
     });
+    // gzip the app's files (the main bundle is ~2 MB, ~0.6 MB gzipped: phones on the Wi-Fi
+    // load it much faster). Never /api: its event streams must reach the browser unbuffered.
+    const gzip = compress();
+    app.use('*', (c, next) => (c.req.path.startsWith('/api/') ? next() : gzip(c, next)));
     app.use('*', serveStatic({ root }));
     const indexHtml = serveStatic({ root, path: 'index.html' });
     app.get('*', async (c, next) => {

@@ -9,6 +9,7 @@ import {
   useRef,
   type ButtonHTMLAttributes,
   type InputHTMLAttributes,
+  type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
   type SelectHTMLAttributes,
   type TextareaHTMLAttributes,
@@ -249,31 +250,60 @@ export interface SegmentedOption<T extends string> {
   title?: string;
 }
 
+/** Next option index for a radio-group key (arrows wrap; Home / End), or null for other keys. */
+export function radioKeyIndex(key: string, index: number, count: number): number | null {
+  if (count === 0) return null;
+  if (key === 'ArrowRight' || key === 'ArrowDown') return (index + 1) % count;
+  if (key === 'ArrowLeft' || key === 'ArrowUp') return (index - 1 + count) % count;
+  if (key === 'Home') return 0;
+  if (key === 'End') return count - 1;
+  return null;
+}
+
+/**
+ * A row of mutually exclusive options: an ARIA radio group with one Tab stop
+ * (the checked option, or the first when none is) and arrow keys / Home / End
+ * to choose; focus follows the selection.
+ */
 export function Segmented<T extends string>({
   value,
   options,
   onChange,
   size = 'md',
+  label,
   className,
 }: {
   value: T;
   options: SegmentedOption<T>[];
   onChange: (value: T) => void;
   size?: 'sm' | 'md';
+  /** Accessible name of the group. */
+  label?: string;
   className?: string;
 }) {
+  const checked = Math.max(0, options.findIndex((o) => o.value === value));
+  const onKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    const next = radioKeyIndex(e.key, checked, options.length);
+    if (next === null) return;
+    e.preventDefault();
+    // Keeps page-level arrow shortcuts (e.g. the Studio's previous / next variation) out of it.
+    e.stopPropagation();
+    if (options[next].value !== value) onChange(options[next].value);
+    e.currentTarget.querySelectorAll<HTMLElement>('[role="radio"]')[next]?.focus();
+  };
   return (
-    <div role="radiogroup" className={cn('inline-flex rounded-lg bg-surface-2 p-0.5', className)}>
-      {options.map((o) => (
+    <div role="radiogroup" aria-label={label} onKeyDown={onKeyDown} className={cn('inline-flex rounded-lg bg-surface-2 p-0.5', className)}>
+      {options.map((o, i) => (
         <button
           key={o.value}
           type="button"
           role="radio"
           aria-checked={o.value === value}
+          tabIndex={i === checked ? 0 : -1}
           title={o.title}
           onClick={() => onChange(o.value)}
           className={cn(
-            'flex flex-1 items-center justify-center gap-1.5 rounded-md font-medium transition-colors',
+            'flex flex-1 items-center justify-center gap-1.5 rounded-md font-medium transition-colors focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
             size === 'sm' ? 'h-7 px-2 text-xs' : 'h-8 px-3 text-sm',
             o.value === value ? 'bg-surface text-text shadow-sm' : 'text-muted hover:text-text',
           )}
@@ -391,6 +421,27 @@ export function Swatch({
 // Modal
 // ---------------------------------------------------------------------------
 
+/** Open modals; the app root stays inert while any is open. */
+let openModals = 0;
+
+/**
+ * While a dialog is open the app (#root) is inert: Tab, clicks and screen
+ * readers stay inside the dialog, which portals to document.body. Nested
+ * dialogs share one count. Returns the release function.
+ */
+function holdAppInert(): () => void {
+  const root = document.getElementById('root');
+  if (openModals++ === 0) root?.setAttribute('inert', '');
+  return () => {
+    if (--openModals === 0) root?.removeAttribute('inert');
+  };
+}
+
+/**
+ * A dialog named by its title. Escape and a click on the backdrop close it;
+ * focus moves to its first field (or a `data-autofocus` button, else the
+ * dialog itself) and returns where it was on close.
+ */
 export function Modal({
   open,
   onClose,
@@ -407,6 +458,7 @@ export function Modal({
   size?: 'sm' | 'md' | 'lg' | 'xl';
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
   // Latest onClose without re-running the open effect (which moves focus) on every render.
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
@@ -417,9 +469,13 @@ export function Modal({
     };
     window.addEventListener('keydown', onKey);
     const prev = document.activeElement as HTMLElement | null;
-    panelRef.current?.querySelector<HTMLElement>('input, textarea, select, button[data-autofocus]')?.focus();
+    const release = holdAppInert();
+    const panel = panelRef.current;
+    (panel?.querySelector<HTMLElement>('input, textarea, select, button[data-autofocus]') ?? panel)?.focus();
     return () => {
       window.removeEventListener('keydown', onKey);
+      // Un-inert first: focus can't return into an inert app.
+      release();
       prev?.focus?.();
     };
   }, [open]);
@@ -431,13 +487,17 @@ export function Modal({
         ref={panelRef}
         role="dialog"
         aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
         className={cn(
-          'flex max-h-[92dvh] w-full flex-col overflow-hidden rounded-t-2xl bg-surface shadow-panel sm:rounded-2xl',
+          'flex max-h-[92dvh] w-full flex-col overflow-hidden rounded-t-2xl bg-surface shadow-panel outline-none sm:rounded-2xl',
           widths[size],
         )}
       >
         <div className="flex items-center justify-between gap-3 border-b border-line px-5 py-3.5">
-          <h2 className="font-display text-lg text-text">{title}</h2>
+          <h2 id={titleId} className="font-display text-lg text-text">
+            {title}
+          </h2>
           <IconButton label="Close" onClick={onClose} size="sm">
             <X className="size-4" />
           </IconButton>

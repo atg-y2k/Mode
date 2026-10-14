@@ -50,6 +50,7 @@ import { copyMaskInto, createMask, type MaskMode } from '../engine/mask';
 import { getHealth } from '../lib/api';
 import { HEIC_UNSUPPORTED } from '../lib/heic';
 import { downloadBlob, importImageFile } from '../lib/imageImport';
+import { readPhotoCapture } from '../site/capture';
 import * as db from './persistence';
 import * as runtime from './runtime';
 
@@ -219,6 +220,8 @@ export interface AppState {
   importProject(file: Blob): Promise<void>;
   /** Make this tab the one that saves the open project: takes it over from another tab and reloads the stored copy. */
   takeOver(): Promise<void>;
+  /** Saves the open project again right away (after a failed save). Resolves true once it is written. */
+  retrySave(): Promise<boolean>;
 
   // spaces & photos
   addSpace(type: SpaceType, name?: string): string;
@@ -457,6 +460,31 @@ function lockManager(): LockManager | undefined {
   return typeof navigator !== 'undefined' ? navigator.locks : undefined;
 }
 
+/**
+ * localStorage key of the project to reopen on load: a reload, or the browser
+ * discarding the tab while the owner is in ChatGPT, lands back in it. Set by
+ * openProject, cleared by closeProject ("All projects") and deleteProject.
+ */
+export const LAST_PROJECT_KEY = 'mode.lastProjectId';
+
+function rememberedProjectId(): string | null {
+  try {
+    return typeof localStorage === 'undefined' ? null : localStorage.getItem(LAST_PROJECT_KEY);
+  } catch {
+    return null; // storage blocked: start on the projects home
+  }
+}
+
+function rememberProject(id: string | null) {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    if (id) localStorage.setItem(LAST_PROJECT_KEY, id);
+    else localStorage.removeItem(LAST_PROJECT_KEY);
+  } catch {
+    // storage blocked: a reload starts on the projects home
+  }
+}
+
 type ChannelMessage = { type: 'saved'; id: string; meta: ProjectMeta } | { type: 'deleted'; id: string };
 
 /** Mutate the active design of the active photo. */
@@ -543,7 +571,7 @@ export const useStore = create<AppState>()((set, get) => {
         if (get().project?.id !== p.id) get().notify(`“${p.name}” was not saved: ${(err as Error).message}`, 'error');
       } else {
         set({ saveState: 'error' });
-        get().notify(`Could not save: ${(err as Error).message}`, 'error');
+        get().notify(`Could not save: ${db.storageErrorText(err)}`, 'error');
       }
       return false;
     }
@@ -798,13 +826,19 @@ export const useStore = create<AppState>()((set, get) => {
   });
 
   if (typeof window !== 'undefined') {
-    window.addEventListener('pagehide', () => {
+    const flushPending = () => {
       if (saveTimer) {
         clearTimeout(saveTimer);
         saveTimer = null;
         void saveNow();
       }
       void runtime.flushMasks();
+    };
+    window.addEventListener('pagehide', flushPending);
+    // Hidden (the owner switched to the ChatGPT tab): save now, while the page still runs — a
+    // hidden tab may be discarded later, and writes started while unloading may not finish.
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') flushPending();
     });
   }
 
@@ -861,7 +895,13 @@ export const useStore = create<AppState>()((set, get) => {
       void db.sweepWhenIdle().catch((err) => console.warn('[store] storage sweep skipped', err));
       try {
         const [projects, library] = await Promise.all([db.listProjects(), db.loadLibrary()]);
-        set({ projects, library, ready: true });
+        // Reopen the project open when the page was last left (reload, discarded tab), before
+        // `ready`: the projects home keeps its loading state instead of flashing in between.
+        const last = rememberedProjectId();
+        set({ projects, library });
+        if (last && projects.some((m) => m.id === last)) await get().openProject(last);
+        else if (last) rememberProject(null);
+        set({ ready: true });
       } catch (err) {
         set({ ready: true });
         get().notify(`Storage unavailable: ${(err as Error).message}`, 'error');
@@ -894,7 +934,10 @@ export const useStore = create<AppState>()((set, get) => {
         return null;
       });
       if (!rec) {
-        if (rec === undefined) get().notify('Project not found', 'error');
+        if (rec === undefined) {
+          get().notify('Project not found', 'error');
+          if (rememberedProjectId() === id) rememberProject(null);
+        }
         if (get().project?.id !== id) releaseWriteLock(id);
         if (!get().project) {
           releaseStorageLock?.();
@@ -924,6 +967,7 @@ export const useStore = create<AppState>()((set, get) => {
         studio: { ...get().studio, viewVariationId: null, gridGenerationId: null, focusZoneId: null, sketch: 'none', activeElementId: null },
         view: { ...get().view, mobilePane: 'editor', compare: 'off', showOriginal: false },
       });
+      rememberProject(id);
       if (prev) {
         await left;
         if (prev.id !== id) releaseWriteLock(prev.id);
@@ -938,6 +982,7 @@ export const useStore = create<AppState>()((set, get) => {
       readOnlyOf = null;
       runtime.setMasksReadOnly(false);
       set({ project: null, readOnly: null, selection: EMPTY_SELECTION, past: [], future: [], placement: null });
+      rememberProject(null); // "All projects": the next load starts on the projects home
       if (prev) {
         await left;
         releaseWriteLock(prev.id);
@@ -948,11 +993,19 @@ export const useStore = create<AppState>()((set, get) => {
 
     async deleteProject(id) {
       if (get().project?.id === id) await get().closeProject();
+      if (rememberedProjectId() === id) rememberProject(null);
       cleanupQueue.delete(id);
       await db.deleteProject(id);
       revs.delete(id);
       set((s) => ({ projects: s.projects.filter((m) => m.id !== id) }));
       announce({ type: 'deleted', id });
+    },
+
+    retrySave() {
+      const p = get().project;
+      if (!p || readOnlyOf === p.id) return Promise.resolve(false);
+      set({ saveState: 'saving' });
+      return flushSave();
     },
 
     async takeOver() {
@@ -1097,9 +1150,9 @@ export const useStore = create<AppState>()((set, get) => {
       // iPhone HEIC photos this browser can't open: one message with the how-to for all of them.
       const heic: { names: string[]; message: string } = { names: [], message: '' };
       // GPS / compass heading / capture time come from the ORIGINAL file: importing
-      // re-encodes the photo, which strips EXIF. Loaded on demand; never blocks an import.
-      const readCapture = (file: File) =>
-        import('../site/capture').then((m) => m.readPhotoCapture(file)).catch(() => undefined);
+      // re-encodes the photo, which strips EXIF. Never blocks an import. (A static import:
+      // src/site is in the main bundle anyway, so a dynamic one would not split it out.)
+      const readCapture = (file: File) => readPhotoCapture(file).catch(() => undefined);
       for (const file of files) {
         if (!targetExists()) {
           lost = true;
@@ -1110,7 +1163,10 @@ export const useStore = create<AppState>()((set, get) => {
           const photoId = newId('pho');
           const imageId = newId('img');
           const thumbId = newId('img');
-          await Promise.all([db.putBlob(imageId, imported.blob), db.putBlob(thumbId, imported.thumb)]);
+          await Promise.all([db.putBlob(imageId, imported.blob), db.putBlob(thumbId, imported.thumb)]).catch(async (err: unknown) => {
+            await db.deleteBlobs([imageId, thumbId]).catch(() => undefined); // one of the two may have been written (storage full)
+            throw err;
+          });
           if (!targetExists()) {
             await db.deleteBlobs([imageId, thumbId]);
             lost = true;
@@ -1139,7 +1195,7 @@ export const useStore = create<AppState>()((set, get) => {
           if ((err as Error).name === HEIC_UNSUPPORTED) {
             heic.names.push(file.name);
             heic.message = (err as Error).message;
-          } else get().notify(`${file.name}: ${(err as Error).message}`, 'error');
+          } else get().notify(`${file.name} wasn’t added. ${db.storageErrorText(err)}`, 'error');
         }
       }
       if (heic.names.length) {

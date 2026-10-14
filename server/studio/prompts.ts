@@ -16,6 +16,7 @@ import type {
   RecommendRequest,
   SceneRequest,
 } from '../../shared/api';
+import { withoutOverriddenDefaults, withoutOverriddenText } from '../../shared/promptAsks';
 import { SPACE_TYPE_LABELS, spaceKindOf, type SpaceType } from '../../shared/types';
 import { variationTitles } from './templateTitles';
 
@@ -396,9 +397,11 @@ function cappedElements(brief: PlanRequest['brief']): PlanRequest['brief']['elem
 
 function formatElements(brief: PlanRequest['brief']): string {
   if (!brief.elements.length) return 'none';
+  const prompt = cleanText(brief.prompt, 3000);
   const lines = cappedElements(brief).map((el, i) => {
     const out = [`${i + 1}. ${el.type} — "${cleanText(el.label, 120)}"; where: ${el.where.map((w) => cleanText(w, 160)).join('; ') || 'not specified'}`];
-    for (const c of el.choices) {
+    // Same as template plans: a "keep current" / "no …" default the homeowner's words override is left out.
+    for (const c of withoutOverriddenDefaults(prompt, el.choices)) {
       if (c.options.length) out.push(`   - ${cleanText(c.dimension, 80)}: ${c.options.map((o) => cleanText(o, 400)).join(' + ')}`);
     }
     const note = cleanText(el.note, 600);
@@ -612,7 +615,7 @@ Plan
  * the brief already decided can be left out: `line` (shape / layout),
  * `planting` (planting character) and `finish` (surface details). Finishes are
  * worded so they can't contradict a common choice: no shape, edging type,
- * unit size or material.
+ * unit size, joint, material, tone or color.
  */
 interface TemplateTake {
   title: string;
@@ -621,20 +624,20 @@ interface TemplateTake {
   finish: string;
 }
 
-const TEMPLATE_TAKES: Record<'exterior' | 'interior', TemplateTake[]> = {
+export const TEMPLATE_TAKES: Record<'exterior' | 'interior', readonly TemplateTake[]> = {
   exterior: [
     { title: 'Faithful take', line: 'clean, simple lines', finish: 'a restrained, quiet finish palette' },
     {
       title: 'Softer, naturalistic take',
       line: 'softer, curving lines',
       planting: 'a looser, layered, naturalistic planting character',
-      finish: 'softer, weathered material tones',
+      finish: 'a softer, weathered, lived-in feel',
     },
     {
       title: 'Crisp, formal take',
       line: 'crisp straight lines and symmetry around the entry',
       planting: 'clipped, orderly planting',
-      finish: 'crisp, precise detailing with tight joints',
+      finish: 'crisp, precise detailing',
     },
     { title: 'Warm, textured take', planting: 'richer seasonal color in the planting', finish: 'warmer, more textured surface finishes' },
     { title: 'Minimal, modern take', line: 'clean, minimal lines', planting: 'fewer, sculptural plants', finish: 'crisp, uncluttered modern detailing' },
@@ -646,7 +649,7 @@ const TEMPLATE_TAKES: Record<'exterior' | 'interior', TemplateTake[]> = {
     { title: 'Light, airy take', finish: 'lighter accents, more reflected daylight and an uncluttered feel' },
     { title: 'Classic take', finish: 'classic proportions, traditional details and timeless accents' },
     { title: 'Minimal, modern take', finish: 'a minimal, modern feel: clean lines, fewer accents, hidden storage' },
-    { title: 'Bold, characterful take', finish: 'one confident accent color and a statement light or accessory' },
+    { title: 'Bold, characterful take', finish: 'one confident accent piece and a statement light' },
   ],
 };
 
@@ -689,6 +692,12 @@ function takeHint(take: TemplateTake, brief: PlanRequest['brief']): string {
   return `Interpret what the brief leaves open with ${[...facets, take.finish].join(', ')}.`;
 }
 
+/** A template instruction that already carries a take or creative hint (a "More like this" of a take). */
+const TAKE_HINT_IN_BRIEF = /\b(Interpret what the brief leaves open with|vary only finish details the brief leaves open:|Interpret the brief freely inside)/;
+
+/** The nudge a "More like this" of a take adds (replaced, not stacked, when its result is liked again). */
+const SIBLING_NUDGE = /\s*Keep its overall character and every chosen detail; as a small variation, lean the finish details toward [^.]*\./g;
+
 const TEMPLATE_CREATIVE_HINT: Record<'exterior' | 'interior', (plants: boolean) => string> = {
   exterior: (plants) =>
     `Interpret the brief freely inside the areas being changed: refine textures, ${plants ? 'plant mix, ' : ''}edging and small accents so they suit the house.`,
@@ -701,23 +710,116 @@ const TEMPLATE_STRICTNESS_NOTE: Record<Strictness, string> = {
   creative: ' Creative: details inside the changed areas may be refined.',
 };
 
+/** Ensures terminal punctuation. */
+function asSentence(text: string): string {
+  return /[.!?]$/.test(text) ? text : `${text}.`;
+}
+
+/** A chosen option that asks for the absence of something ("with no added path lighting"). */
+const NEGATED_OPTION = /^(with )?no\b|^without\b/i;
+
+type TemplateElement = PlanRequest['brief']['elements'][number];
+
+/**
+ * The element a compare run varies: the one labelled like the compare, preferring
+ * one without a choice for the compared dimension (the client leaves it out of
+ * the compared element only); the first element when no label matches.
+ */
+function comparedElementIndex(elements: readonly TemplateElement[], compare: PlanRequest['compare'], dimension: string): number {
+  const label = cleanText(compare?.elementLabel, 120).toLowerCase();
+  const matches = elements.flatMap((el, i) => (label && cleanText(el.label, 120).toLowerCase() === label ? [i] : []));
+  return matches.find((i) => !elements[i].choices.some((c) => c.dimension === dimension)) ?? matches[0] ?? 0;
+}
+
+/**
+ * "For the Front walk: Pathway — stone size: …; width: …. No border edging and
+ * no added path lighting." Options that ask for an absence are gathered into one
+ * closing clause instead of `label: value` pairs.
+ */
+function elementSentence(el: TemplateElement, choices: TemplateElement['choices']): string {
+  const positive: string[] = [];
+  const negated: string[] = [];
+  for (const c of choices) {
+    const options = c.options.map((o) => cleanText(o, 400)).filter(Boolean);
+    const pos = options.filter((o) => !NEGATED_OPTION.test(o));
+    if (pos.length) positive.push(`${cleanText(c.dimension, 80).toLowerCase()}: ${pos.join(' and ')}`);
+    for (const o of options) if (NEGATED_OPTION.test(o)) negated.push(o.replace(/^with\s+/i, '').replace(/[.;,\s]+$/, ''));
+  }
+  const where = el.where.map((w) => cleanText(w, 160)).join(' and ');
+  const label = cleanText(el.label, 120);
+  const note = cleanText(el.note, 600);
+  const absent = negated.join(' and ');
+  return [
+    `${where ? `For the ${where}: ` : ''}${asSentence(`${label}${positive.length ? ` — ${positive.join('; ')}` : ''}`)}`,
+    absent ? asSentence(absent.charAt(0).toUpperCase() + absent.slice(1)) : '',
+    note ? asSentence(note) : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+}
+
+/** Idea-board entries in the order they should reach a keyless instruction: the homeowner's notes first. */
+const IDEA_ORDER = [/^Note\b/, /^Design theme\b/, /^Product to use\b/, /^Inspiration image\b/];
+const IDEA_ENTRY_MAX = 200;
+const IDEA_SENTENCE_MAX = 400;
+
+/**
+ * "Homeowner's notes and inspiration: Note "Safety": No thorny plants near the
+ * walk; Design theme "Cottage garden": relaxed, …." — the idea board for
+ * template plans as one sentence (≤ 400 chars, whole entries only; '' without
+ * ideas). The hand-off reads it as context, not as part of the change.
+ */
+export function ideasSentence(ideas: readonly string[]): string {
+  const head = "Homeowner's notes and inspiration: ";
+  const rank = (s: string) => {
+    const i = IDEA_ORDER.findIndex((re) => re.test(s));
+    return i < 0 ? IDEA_ORDER.length : i;
+  };
+  const entries = take(ideas, PROMPT_CAPS.ideas)
+    .map((s) =>
+      cleanText(s, IDEA_ENTRY_MAX)
+        .replace(/\s*\n\s*/g, ' ')
+        // `Note "Title". Text` reads as `Note "Title": Text`.
+        .replace(/^((?:Note|Design theme|Inspiration image) "[^"]*")\.\s+/, '$1: ')
+        // One sentence for the whole block (the hand-off recognizes it by its opening words).
+        .replace(/[.!?]+\s+(\S)(\S?)/g, (_m, a: string, b: string) => `, ${/[a-z]/.test(b) ? a.toLowerCase() : a}${b}`)
+        .replace(/[.;,\s]+$/, ''),
+    )
+    .map((s, i) => ({ s, i, r: rank(s) }))
+    .filter((e) => e.s)
+    .sort((a, b) => a.r - b.r || a.i - b.i);
+  let body = '';
+  for (const { s } of entries) {
+    const next = body ? `${body}; ${s}` : s;
+    if (head.length + next.length + 1 > IDEA_SENTENCE_MAX) break;
+    body = next;
+  }
+  return body ? `${head}${body}.` : '';
+}
+
 function templateBrief(req: PlanRequest, extra: string, overrideChoice?: { dimension: string; promptText: string }): string {
   const { brief } = req;
   const targets = scopeLabels(brief);
   const parts: string[] = ['Edit this photo of the home.'];
-  for (const el of cappedElements(brief)) {
-    const choices = el.choices
-      .map((c) => (overrideChoice && c.dimension === overrideChoice.dimension ? { ...c, options: [overrideChoice.promptText] } : c))
-      .filter((c) => c.options.length)
-      .map((c) => `${cleanText(c.dimension, 80).toLowerCase()}: ${c.options.map((o) => cleanText(o, 400)).join(' and ')}`);
-    const where = el.where.map((w) => cleanText(w, 160)).join(' and ');
-    const label = cleanText(el.label, 120);
-    const note = cleanText(el.note, 600);
-    const sentence = (t: string) => (/[.!?]$/.test(t) ? t : `${t}.`);
-    parts.push(`${where ? `For the ${where}: ` : ''}${sentence(`${label}${choices.length ? ` — ${choices.join('; ')}` : ''}`)}${note ? ` ${sentence(note)}` : ''}`);
-  }
+  // The homeowner's own words first: image models follow the first clear instruction.
   const prompt = cleanText(brief.prompt, 3000);
-  if (prompt) parts.push(prompt.endsWith('.') ? prompt : `${prompt}.`);
+  if (prompt) parts.push(asSentence(prompt));
+  const elements = cappedElements(brief);
+  const compared = overrideChoice ? comparedElementIndex(elements, req.compare, overrideChoice.dimension) : -1;
+  elements.forEach((el, i) => {
+    // A "keep current" / "no …" default the owner's words override ("a wider walk") would contradict them.
+    let choices = withoutOverriddenDefaults(prompt, el.choices);
+    if (overrideChoice && i === compared) {
+      const override = { dimension: overrideChoice.dimension, options: [overrideChoice.promptText] };
+      // The client leaves the compared dimension out of the element's choices: put this option back.
+      choices = choices.some((c) => c.dimension === override.dimension)
+        ? choices.map((c) => (c.dimension === override.dimension ? override : c))
+        : [...choices, override];
+    }
+    parts.push(elementSentence(el, choices));
+  });
+  const ideas = ideasSentence(req.ideas);
+  if (ideas) parts.push(ideas);
   if (extra) parts.push(extra);
   // Plant size only when the brief involves plants (a path-only brief gets no "Show plants…").
   if (planSetting(req) !== 'interior' && briefHasPlants(brief)) parts.push(MATURITY[brief.plantMaturity]);
@@ -767,14 +869,29 @@ export function templatePlan(req: PlanRequest, count: number): PlanResult {
     plants: [],
     variations: Array.from({ length: count }, (_, i) => {
       const take = takes[i % takes.length];
-      if (base) {
-        // Strict siblings repeat the instruction as is: the image model's own variance is the only difference.
-        const sibling = strictness === 'strict' || i === 0 ? '' : takeHint(take, req.brief);
+      if (base && feedback) {
+        // The feedback leads (the hand-off's change text then opens with it); the earlier instruction follows.
         return {
-          title: feedback ? `Refined ${i + 1}` : `Like this ${i + 1}`,
-          brief: feedback ? `${base} Change this: ${feedback}.` : `${base} ${sibling}`.trim(),
+          title: `Refined ${i + 1}`,
+          // A "keep current width" left in the earlier instruction would contradict "make it wider".
+          brief: `Starting from the previous result, change this: ${feedback.replace(/[.!?\s]+$/, '')}. Keep everything else as rendered. ${withoutOverriddenText(base, feedback)}`,
           optionId: null,
         };
+      }
+      if (base) {
+        // Strict siblings repeat the instruction as is: the image model's own variance is the only difference.
+        // Others shift by one take so a single "More like this" is not the same text again (take 0 is the
+        // faithful reading the base already is); a base that already carries a take keeps it and only
+        // nudges the finish, so two takes never pull against each other.
+        const next = takes[(i + 1) % takes.length];
+        const own = strictness === 'strict' ? base : base.replace(SIBLING_NUDGE, '');
+        const sibling =
+          strictness === 'strict'
+            ? ''
+            : TAKE_HINT_IN_BRIEF.test(own)
+              ? `Keep its overall character and every chosen detail; as a small variation, lean the finish details toward ${next.finish}.`
+              : takeHint(next, req.brief);
+        return { title: `Like this ${i + 1}`, brief: `${own} ${sibling}`.trim(), optionId: null };
       }
       if (strictness === 'strict') {
         // No stylistic "takes": every variation is the literal brief.

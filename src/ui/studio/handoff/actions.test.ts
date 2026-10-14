@@ -1,5 +1,5 @@
 import 'fake-indexeddb/auto';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { emptyBrief, type Generation, type HandoffPack, type Photo, type PlannedVariation, type Project } from '../../../../shared/types';
 import * as db from '../../../state/persistence';
 import { findPhoto, newDesign, useStore } from '../../../state/store';
@@ -106,6 +106,45 @@ describe('staging decisions', () => {
     expect(useStore.getState().studio.viewVariationId).toBe(g.variations[0].id);
     expect(handoffSession().staging).toBeNull();
     expect(handoffSession().active).toMatchObject({ plannedId: 'b' });
+  });
+
+  it('Accept keeps you on the photo you are looking at: a hand-off waiting on another photo waits in the pill', () => {
+    setup([
+      { id: 'a', title: 'Wall paint · Soft sage', brief: 'Paint', status: 'staged', staged: { imageId: 'staged-img', thumbId: 'staged-th', source: { kind: 'handoff', app: 'chatgpt' } } },
+    ]);
+    // A second photo ("Living room") is on screen; the front yard has a hand-off still waiting.
+    const living = structuredClone(useStore.getState().project!.spaces[0]);
+    living.id = 'spc2';
+    living.name = 'Living room';
+    living.photos[0].id = 'pho2';
+    useStore.getState().mutateProject(
+      'x',
+      (d) => {
+        d.spaces[0].photos[0].generations[0].planned = [{ id: 'b', title: 'Flagstone walk', brief: 'Walk', status: 'awaiting-handoff' }];
+        d.spaces.push(living);
+      },
+      { history: false },
+    );
+    useStore.setState({ selection: { spaceId: 'spc2', photoId: 'pho2', regionId: null, objectId: null, lightId: null } });
+    const notify = vi.spyOn(useStore.getState(), 'notify');
+    const here = { photoId: 'pho2', generationId: 'gen', plannedId: 'a' };
+    setHandoffSession({ staging: here, active: here, companion: 'open' });
+    expect(acceptStaged(here)).toBe(true);
+    expect(useStore.getState().selection.photoId).toBe('pho2');
+    expect(useStore.getState().studio.viewVariationId).toBe(findPhoto(useStore.getState().project, 'pho2')!.photo.generations[0].variations[0].id);
+    expect(handoffSession()).toMatchObject({ active: null, companion: 'collapsed', staging: null });
+    expect(notify).toHaveBeenLastCalledWith('“Wall paint · Soft sage” added to your variations. 1 hand-off waiting in “Front” — open it from the pill.', 'success');
+    notify.mockRestore();
+  });
+
+  it('Accept moves a folded card on to the next item without unfolding it', () => {
+    setup([
+      { id: 'a', title: 'Flagstone', brief: 'Lay flagstones', status: 'staged', staged: { imageId: 'staged-img', thumbId: 'staged-th', source: { kind: 'handoff', app: 'chatgpt' } } },
+      { id: 'b', title: 'Gravel', brief: 'Pea gravel', status: 'awaiting-handoff' },
+    ]);
+    setHandoffSession({ staging: ref('a'), active: ref('a'), companion: 'collapsed' });
+    acceptStaged(ref('a'));
+    expect(handoffSession()).toMatchObject({ active: ref('b'), companion: 'collapsed' });
   });
 
   it('Accept frees the item’s hand-off exports (marked PNG + clean JPEG)', async () => {

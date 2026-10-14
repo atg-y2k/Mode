@@ -6,7 +6,9 @@
  * USDA hardiness zones, mature size (height × width at maturity, ~10 years for
  * shrubs and small trees), light, water once established, deer resistance
  * (true = seldom browsed; omitted = mixed reports), native range. Costs are
- * typical 2026 US retail for the listed container size.
+ * typical 2026 US retail for the listed container size. Where Rutgers NJAES
+ * rates the species, deerResistant matches it (A/B → true, C/D → false), the
+ * same rule as the design plant profiles in ../design/plants.ts.
  *
  * realHeightFt (height when placed on a calibrated photo) is the mature
  * height for shrubs, perennials and small trees, and a ~10–15-year landscape
@@ -61,7 +63,7 @@ const ENTRIES: PlantEntry[] = [
       matureWidthFt: 35,
       evergreen: false,
       containerSize: '15 gal',
-      deerResistant: false,
+      deerResistant: true,
       native: 'Eastern US',
     },
     art: { form: 'deciduous-tree', foliage: '#4c7a36', foliage2: '#6a9446', trunk: '#6b5d52', seed: 11 },
@@ -161,7 +163,7 @@ const ENTRIES: PlantEntry[] = [
       matureWidthFt: 20,
       evergreen: false,
       containerSize: '7 gal',
-      deerResistant: false,
+      deerResistant: true,
       native: 'Japan & Korea',
     },
     art: { form: 'ornamental-tree', foliage: '#6e1f2a', foliage2: '#8f2b35', trunk: '#4a3a35', seed: 21 },
@@ -258,9 +260,9 @@ const ENTRIES: PlantEntry[] = [
       matureHeightFt: 20,
       matureWidthFt: 15,
       evergreen: false,
-      bloom: 'White, early spring; edible berries in June',
+      bloom: 'White, early spring; June berries',
       containerSize: '7 gal (multi-stem)',
-      deerResistant: false,
+      deerResistant: true,
       native: 'Eastern US (hybrid of natives)',
     },
     art: { form: 'ornamental-tree', foliage: '#557d3c', foliage2: '#729a4c', flower: '#f7f5ef', trunk: '#8a8580', seed: 25 },

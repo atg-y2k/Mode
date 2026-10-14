@@ -26,8 +26,11 @@ compare photoreal variations side by side.
   keys are optional for fully automatic renders.
 - **Compare and refine.** Generate several takes, or *compare* one question
   (the path in four stone sizes, everything else unchanged) in a labeled
-  grid. From any result: *More like this*, *Refine*, *Use as base*, favorite,
-  before/after slider, download. History branches from any result.
+  grid. From any result: *More like this*, *Refine*, favorite, before/after
+  slider, download, and *Use as base* to make your next run edit that result.
+  Otherwise every run starts from your original photo — looking at a result
+  doesn't change that — and the Review shows what it starts from. History
+  branches from any result.
 - **Grounded in real architecture, themes and purpose.** A built-in design
   knowledge base (architectural styles, design themes, and rules of thumb
   such as a 4–5 ft entry walk that leads clearly to the door) shapes the
@@ -35,12 +38,17 @@ compare photoreal variations side by side.
 - **Plants that will actually grow there.** Your ZIP code fills in the USDA
   hardiness zone offline; plant choices are checked against zone, each
   spot's sun hours (from the photo's compass heading or a compass you set),
-  water, mature size, deer pressure and the USGS invasive-species list, with
-  frost dates and soil from NOAA and USDA. Render plants as planted, after
-  ~3 years, or mature.
+  water, mature size, deer pressure (Rutgers ratings) and invasive plants,
+  with frost dates and soil from NOAA and USDA. Full sun means 6+ hours of
+  direct sun, part sun 3–6 hours, shade under 3. Known problem plants (Japanese
+  barberry, burning bush, Bradford pear…) get a caution; plants the USGS
+  national list includes somewhere in the country get a note to check your
+  state's list. Render plants as planted, after ~3 years, or mature.
 - **Free on-device precision.** Small models running in your browser sharpen
   the AI's zone outlines to exact edges, let you tap to select an area, and
-  can map a photo with no AI key at all.
+  can map a photo with no AI key at all. The free map says what it didn't
+  find (often the front door, porch or planting beds); add those with *Tap to
+  select*.
 - **Idea board.** Collect inspiration images, notes, design themes and real
   products (AI search of Home Depot, Lowe's and nurseries, or paste a link).
   Generations and suggestions draw on it.
@@ -49,7 +57,11 @@ compare photoreal variations side by side.
   placing plants and fixtures.
 
 Projects, photos and results stay in your browser (IndexedDB). AI requests go
-out only when you run them.
+out only when you run them. If the page reloads — or the browser unloads the
+tab while you're in ChatGPT — Mode reopens the project you were in, waiting
+hand-offs included; *All projects* takes you back to the projects page. If the browser runs out of storage space, Mode
+says so: delete old runs or photos, or back up and delete a project under
+**Settings → Storage**.
 
 ## Quick start (no keys needed)
 
@@ -161,8 +173,8 @@ Fill in what you need, save, and restart Mode (Ctrl+C, then `npm run dev`).
 | `HANDOFF_WATCH_DIR` | Folder to watch for downloaded hand-off results (default `~/Downloads`). |
 
 With no keys at all, Mode still works: renders go through the manual hand-off
-to your ChatGPT or Gemini app, plans come from built-in templates, scenes can
-be mapped on your device, and Fine-tune needs nothing. Tips for the hand-off:
+to your ChatGPT or Gemini app, Mode writes each instruction from your choices,
+scenes can be mapped on your device, and Fine-tune needs nothing. Tips for the hand-off:
 start a new chat for each image, use *Download full size* (not right-click),
 and on Gemini with a Google AI plan use *More → Redo with Pro*; on a free
 Gemini account ChatGPT usually edits better.
@@ -186,8 +198,10 @@ npm start
 ```
 
 `npm start` serves the app and the API together on http://localhost:8787 (set
-`PORT` in `.env` to change it). Projects you made at http://localhost:5173
-don't show up there: each address has its own browser storage.
+`PORT` in `.env` to change it), compressed so phones on your Wi-Fi load it
+quickly. Projects you made at http://localhost:5173 don't show up there: each
+address has its own browser storage. The build writes source maps next to the
+bundles for debugging, but the browser never downloads them.
 
 If you expose the server beyond your own network, set `MODE_ACCESS_TOKEN` and
 enter the same token under **Settings → Server access token**.

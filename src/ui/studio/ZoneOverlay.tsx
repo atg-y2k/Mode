@@ -16,7 +16,7 @@
  */
 import { Check, Leaf, Pencil, Sun, CloudSun, Cloud } from 'lucide-react';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import type { ElementSpec, Photo, PlantFeasibility, Project, Pt, ScenePath, SceneZone, Space } from '../../../shared/types';
+import { CONTEXT_ZONE_KINDS, type ElementSpec, type Photo, type PlantFeasibility, type Project, type Pt, type ScenePath, type SceneZone, type Space } from '../../../shared/types';
 import type { Mask } from '../../engine/types';
 import { useInvasivesReady } from '../../site/hooks';
 import * as db from '../../state/persistence';
@@ -172,9 +172,11 @@ export function ZoneOverlay({
   const hoverZone = hover?.kind === 'zone' ? hover.id : null;
   const hoverPath = hover?.kind === 'path' ? hover.id : null;
 
-  // Context zones (sky, street, neighbors) stay quiet unless they matter right now.
+  // Context zones (sky, street, neighbors — and anything mapped as not to be changed) get no outline unless they matter right now.
   const visibleZones = zones.filter(
-    (z) => z.polygon.length >= 3 && ((showZones && (z.editable || z.id === hoverZone || targetZones.has(z.id))) || z.id === focusZoneId),
+    (z) =>
+      z.polygon.length >= 3 &&
+      ((showZones && ((z.editable && !CONTEXT_ZONE_KINDS.includes(z.kind)) || z.id === hoverZone || targetZones.has(z.id))) || z.id === focusZoneId),
   );
   const visiblePaths = scene.paths.filter((p) => p.points.length >= 2 && (showZones || p.id === editingPathId));
 

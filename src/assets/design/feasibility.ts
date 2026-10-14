@@ -15,7 +15,7 @@
  * synchronous: until US-RIIS has loaded only the curated list applies.
  */
 import type { AssetDef, PlantFeasibility, PlantInfo, ProjectLocation, SunExposure } from '../../../shared/types';
-import { ensureInvasivesLoading, invasiveStatusSync, splitBotanicalNames, type Locality } from '../../site/invasives';
+import { LOCALITY_NAMES, ensureInvasivesLoading, invasiveStatusSync, splitBotanicalNames, type Locality } from '../../site/invasives';
 import type { PlantProfile } from './plants';
 
 /** Deer pressure: the project's setting (low/medium/high) or a yes/no read from climate notes. */
@@ -235,26 +235,34 @@ function isTurf(info: PlantInfo): boolean {
 }
 
 /**
- * Invasiveness: the curated list first (regional advice), then US-RIIS for the
- * property's region. Listed invasive / widespread invasive → caution (info for
- * lawn grasses, which are meant to spread: keep them out of beds). "Established"
- * (introduced but not invasive) adds nothing. When only some forms of a species
- * are listed, an info note says to check which form is sold.
+ * Invasiveness: only the curated list (regional advice about real problem
+ * plants) rates caution. US-RIIS is national — "invasive somewhere in the lower
+ * 48" is not a verdict for this property (it lists Japanese maple and crape
+ * myrtle) — so a listing there is an info note pointing to the state list
+ * (for lawn grasses, which are meant to spread: keep them out of beds).
+ * "Established" (introduced but not invasive) adds nothing. When only some
+ * forms of a species are listed, an info note says to check which form is sold.
  */
 function invasiveChecks(info: PlantInfo, name: string, ctx: FeasibilityContext): Check[] {
   const curated = invasiveNote(info.botanical, name);
   if (curated) return [{ kind: 'invasive', level: 'caution', text: `Invasive risk: ${curated}` }];
   ensureInvasivesLoading();
   const turf = isTurf(info);
+  const locality = ctx.locality ?? 'L48';
   const out: Check[] = [];
   for (const n of splitBotanicalNames(info.botanical)) {
-    const v = invasiveStatusSync(n, ctx.locality ?? 'L48');
+    const v = invasiveStatusSync(n, locality);
     if (!v?.note) continue;
     if (v.invasive) {
+      const listed = !v.match ? shortPlantName(name) : v.match.common ? `${v.match.common} (${v.match.name})` : v.match.name;
       out.push(
         turf
           ? { kind: 'invasive', level: 'info', text: `Spreads beyond the lawn: ${v.note} — keep a clean edge between lawn and beds` }
-          : { kind: 'invasive', level: 'caution', text: `Invasive risk: ${v.note} — check your state's invasive plant list before planting` },
+          : {
+              kind: 'invasive',
+              level: 'info',
+              text: `USGS lists ${listed} as naturalized/invasive in parts of ${LOCALITY_NAMES[locality]} — check your state's invasive plant list`,
+            },
       );
     } else if (v.formListed && !turf) {
       out.push({ kind: 'invasive', level: 'info', text: v.note });
@@ -417,7 +425,9 @@ export function paletteFeasibility(plants: PlantProfile[], mode: 'all' | 'any', 
     }
   }
   const notes = evals.flatMap((e) =>
-    e.checks.filter((c) => c.level === 'info' && c.kind === 'deer').map((c) => `${shortPlantName(e.p.name)}: ${c.text.toLowerCase()}`),
+    e.checks
+      .filter((c) => c.level === 'info' && (c.kind === 'deer' || c.kind === 'invasive'))
+      .map((c) => `${shortPlantName(e.p.name)}: ${c.kind === 'deer' ? c.text.toLowerCase() : c.text}`),
   );
   return { rating, reasons: [...reasons, ...notes] };
 }
@@ -430,6 +440,6 @@ export const FEASIBILITY_RULES: string[] = [
   'Trees: small trees (≤ 25 ft) 8–10+ ft from the house, medium 15–20 ft, large shade trees 20–30+ ft and away from sewer lines and overhead wires.',
   'Water: group plants by water need; drought-tolerant Mediterranean plants need sharp drainage in wet climates; thirsty plants need irrigation where rainfall is under ~30 in/yr.',
   'Deer: where deer are present favor deer-resistant plants (boxwood, lavender, catmint, ornamental grasses, ferns, hellebores) over hosta, arborvitae, yews, hydrangeas, roses and tulips; with high deer pressure suggest only plants deer rarely damage (Rutgers A/B ratings).',
-  `Never suggest invasive plants: ${INVASIVE_WATCHLIST.join(', ')}. Prefer natives of the region where they fit the design. Plants the USGS US-RIIS register lists as invasive in the region (e.g. cherry laurel, Japanese maple, crape myrtle, star jasmine) self-seed beyond gardens in places — when one is central to a style, rate it caution, say so, and offer a native alternative.`,
+  `Never suggest invasive plants: ${INVASIVE_WATCHLIST.join(', ')}. Prefer natives of the region where they fit the design. Rate caution only for the watchlist above; mention a USGS US-RIIS listing as a note and offer a native alternative.`,
   'Plant maturity in renderings: "new" = nursery sizes (1-gal perennials, 3–7 gal shrubs, 6–8 ft trees) with mulch visible between plants; "established" ≈ 3 years, perennials full, shrubs ~2/3 of mature size; "mature" = full mature size.',
 ];

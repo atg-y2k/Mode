@@ -32,6 +32,7 @@ export function ThemePickerModal({ open, onClose, defaultSetting }: { open: bool
           </p>
           <Segmented
             size="sm"
+            label="Themes for"
             value={setting}
             onChange={setSetting}
             options={[

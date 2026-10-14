@@ -194,7 +194,10 @@ describe('RefineSection', () => {
   it('offers the offline map when Claude is off and nothing is mapped', () => {
     seed(undefined);
     render(<RefineSection photoId="pho_1" />);
-    expect(screen.getByRole('button', { name: 'Map on this device (free)' })).toBeTruthy();
+    // One name for the free map everywhere (photo pill, Design panel, element cards, Scene panel).
+    expect(screen.getByRole('button', { name: 'Map the scene' }).getAttribute('title')).toBe('On this device, free');
+    expect(screen.getByText(/Free · private/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Map on this device/ })).toBeNull();
     expect(screen.queryByRole('button', { name: /Sharpen outlines/ })).toBeNull();
     expect(screen.getByText(/Models & licenses/)).toBeTruthy();
   });
@@ -231,7 +234,7 @@ describe('RefineSection', () => {
     const sharp = (id: string) => [id, { refined: true, mask: rectMask(0, 41, 100, 80), polygon: [{ x: 1, y: 41 }, { x: 99, y: 41 }, { x: 99, y: 79 }], agreement: 0.9, iou: 0.9, classShare: 1 }] as const;
     refineZonesDetailed.mockResolvedValue(new Map([sharp('zone_l'), sharp('zone_sky')]));
     render(<RefineSection photoId="pho_1" />);
-    fireEvent.click(screen.getByRole('button', { name: 'Map on this device (free)' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Map the scene' }));
     await waitFor(() => expect(photo().scene?.zones.map((z) => z.id)).toEqual(['zone_l', 'zone_sky']));
     await waitFor(() => expect(useVisionJobs.getState().job).toBeNull());
     expect(offlineSceneMap).toHaveBeenCalledWith('pho_1', expect.anything(), false, true);
@@ -405,7 +408,7 @@ describe('SegFormer licence (C5)', () => {
     expect(useVisionJobs.getState().consent).toBeNull();
     expect(segformerChoice()).toBeNull();
     expect(offlineSceneMap).not.toHaveBeenCalled();
-    expect(screen.getByRole('button', { name: 'Map on this device (free)' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Map the scene' })).toBeTruthy();
   });
 
   it('parks a re-map and replaces the existing map once answered', async () => {

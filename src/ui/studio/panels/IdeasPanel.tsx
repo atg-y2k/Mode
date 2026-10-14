@@ -127,6 +127,7 @@ function IdeaBoard({ project, space, setting }: { project: Project; space: Space
             <Segmented
               size="sm"
               className="shrink-0"
+              label="Show ideas for"
               value={filter}
               onChange={setFilter}
               options={[

@@ -72,7 +72,7 @@ vi.mock('../../shell/sceneJobs', () => ({
 vi.mock('../../../vision/ui/RefineSection', () => ({
   RefineSection: ({ photoId }: { photoId: string }) => <div data-testid="refine-section">{photoId}</div>,
 }));
-// The free on-device map (used when Claude is off): whether this browser can run it, and the call.
+// The free on-device map (used without a Claude key): whether this browser can run it, and the call.
 const vision = { supported: true };
 const AI_OFF = { ok: true, ai: { enabled: false, model: null }, imageProvider: { enabled: false, name: null, model: null } };
 const mapSceneOffline = vi.fn(async () => undefined);
@@ -120,6 +120,7 @@ vi.mock('../../../lib/products', async (importOriginal) => ({
 
 type Store = typeof import('../../../state/store').useStore;
 let useStore: Store;
+let useStudioUI: typeof import('../ui').useStudioUI;
 let panels: {
   DesignPanel: typeof import('./DesignPanel').DesignPanel;
   ScenePanel: typeof import('./ScenePanel').ScenePanel;
@@ -228,6 +229,7 @@ beforeEach(async () => {
   // ZIP → zone + centre without fetching public/data/zones.json (or phzmapi.org) in tests.
   (await import('../../../site/zip')).setZipTable({ '20817': ['7a', 38.99, -77.15] });
   ({ useStore } = await import('../../../state/store'));
+  ({ useStudioUI } = await import('../ui'));
   panels = {
     DesignPanel: (await import('./DesignPanel')).DesignPanel,
     ScenePanel: (await import('./ScenePanel')).ScenePanel,
@@ -280,10 +282,12 @@ describe('DesignPanel', () => {
   it('says a wider or curvier path gets room on the lawn beside it, and drops the note for the old footprint', () => {
     render(<panels.DesignPanel />);
     fireEvent.click(screen.getByRole('button', { name: 'Pathway' }));
-    // Defaults: gentle curve, 5 ft.
+    // Defaults keep the walk's route and width: nothing beside it changes.
+    expect(screen.queryByText(/Room to curve and widen/)).toBeNull();
+    fireEvent.click(screen.getByRole('radio', { name: /Gentle curveOne soft, wide arc/ }));
     expect(screen.getByText(/Room to curve and widen: the lawn alongside the walk may change too/)).toBeTruthy();
     fireEvent.click(screen.getByRole('radio', { name: /StraightDirect, formal line/ }));
-    fireEvent.click(screen.getByRole('radio', { name: /Keep currentSame width as the walk today/ }));
+    expect(screen.getByRole('radio', { name: /Keep currentSame width as the walk today/ }).getAttribute('aria-checked')).toBe('true');
     expect(draft().elements[0].choices.width).toEqual(['keep-width']);
     expect(screen.queryByText(/Room to curve and widen/)).toBeNull();
   });
@@ -309,6 +313,7 @@ describe('DesignPanel', () => {
     withLawnAt(300, 900);
     render(<panels.DesignPanel />);
     fireEvent.click(screen.getByRole('button', { name: 'Pathway' }));
+    fireEvent.click(screen.getByRole('radio', { name: /Gentle curveOne soft, wide arc/ }));
     await clearWhere(['z_walk', 'z_lawn']);
     expect(screen.getByText(/Room to curve and widen: the lawn alongside the walk may change too/)).toBeTruthy();
     expect(screen.queryByText(/wider or curvier than the area that may change/)).toBeNull();
@@ -318,6 +323,7 @@ describe('DesignPanel', () => {
     withLawnAt(700, 1100);
     render(<panels.DesignPanel />);
     fireEvent.click(screen.getByRole('button', { name: 'Pathway' }));
+    fireEvent.click(screen.getByRole('radio', { name: /Gentle curveOne soft, wide arc/ }));
     await clearWhere(['z_walk']);
     expect(screen.getByText(/wider or curvier than the area that may change/)).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Let the lawn beside it change' }));
@@ -363,6 +369,64 @@ describe('DesignPanel', () => {
     expect(await screen.findByText('Match the brick steps')).toBeTruthy();
     expect(screen.getByText('What mood?')).toBeTruthy();
     expect(draft().elements[0].choices.mood).toEqual([]);
+  });
+
+  it('a planting bed is offered only ground to go on, can be outlined on the photo, and borrows the lawn’s sun', async () => {
+    useStore.getState().mutateProject(
+      'x',
+      (d) => {
+        // An on-device map: house, roof, a tree and the lawn — no planting bed found.
+        d.spaces[0].photos[0].scene!.zones.push(
+          { id: 'z_roof', kind: 'roof', label: 'Roof', description: '', polygon: [{ x: 0, y: 100 }, { x: 600, y: 100 }, { x: 600, y: 200 }], editable: true },
+          { id: 'z_facade', kind: 'facade', label: 'Facade', description: '', polygon: [{ x: 0, y: 200 }, { x: 600, y: 200 }, { x: 600, y: 450 }], editable: true },
+          { id: 'z_tree', kind: 'tree', label: 'Tree', description: '', polygon: [{ x: 900, y: 100 }, { x: 1100, y: 100 }, { x: 1100, y: 400 }], editable: true },
+        );
+      },
+      { history: false },
+    );
+    render(<panels.DesignPanel />);
+    if (!screen.queryByRole('button', { name: 'Planting bed' })) fireEvent.click(screen.getByRole('button', { name: /^Show all/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Planting bed' }));
+    const el = draft().elements[0];
+    expect(el.type).toBe('planting-bed');
+    const card = document.querySelector(`[data-element-id="${el.id}"]`) as HTMLElement;
+    // Where: ground only — never the roof, the facade or a tree.
+    for (const name of ['Roof', 'Facade', 'Tree']) expect(within(card).queryByRole('button', { name })).toBeNull();
+    expect(within(card).getByRole('button', { name: 'Front lawn' })).toBeTruthy();
+    expect(within(card).getByRole('button', { name: 'Front walk' })).toBeTruthy();
+    // The header borrows the lawn's sun and says so.
+    expect(within(card).getByRole('group', { name: /^Plant ratings are for: Zone 7a · Part sun \(from the lawn\)/ })).toBeTruthy();
+
+    // "Outline the planting bed on the photo" arms the lasso for this element…
+    fireEvent.click(within(card).getByRole('button', { name: 'Outline the planting bed on the photo' }));
+    expect(useStore.getState().studio).toMatchObject({ sketch: 'area', showZones: true, activeElementId: el.id });
+    // …and the finished outline becomes the bed's own area (a planting bed, not a general target).
+    const { addSketchedArea } = await import('../actions');
+    const p = photo();
+    let id: string | null = null;
+    act(() => {
+      id = addSketchedArea(p, useStore.getState().project!.spaces[0], [{ x: 420, y: 520 }, { x: 600, y: 520 }, { x: 600, y: 600 }, { x: 420, y: 600 }], { elementId: el.id });
+    });
+    expect(id).toBeTruthy();
+    expect(draft().elements[0].zoneIds).toEqual([id]);
+    expect(draft().targetZoneIds).not.toContain(id);
+    expect(photo().scene!.zones.find((z) => z.id === id)).toMatchObject({ kind: 'planting-bed', label: 'Sketched area', source: 'sketch' });
+    expect(useStore.getState().toasts.at(-1)?.message).toBe('Sketched area added to “Planting bed”.');
+    expect(within(card).getByRole('button', { name: 'Sketched area' }).getAttribute('aria-pressed')).toBe('true');
+    // An element that already has its areas: a later outline is a general target as before.
+    act(() => {
+      addSketchedArea(photo(), useStore.getState().project!.spaces[0], [{ x: 700, y: 520 }, { x: 800, y: 520 }, { x: 800, y: 600 }], { elementId: el.id });
+    });
+    expect(draft().elements[0].zoneIds).toHaveLength(1);
+    expect(draft().targetZoneIds).toHaveLength(1);
+  });
+
+  it('says calmly that the whole photo may change until it is mapped (no warning colour)', () => {
+    useStore.setState({ project: makeProject(false) });
+    render(<panels.DesignPanel />);
+    const note = screen.getByText('Whole photo may change — map the scene to pick areas.');
+    expect(note.className).toContain('text-muted');
+    expect(note.closest('[class*="warning"]')).toBeNull();
   });
 
   it('without a Claude key, offers tailoring as an optional extra (no setup details, no warning)', async () => {
@@ -466,7 +530,7 @@ describe('ScenePanel', () => {
     expect(screen.queryByRole('alert')).toBeNull();
   });
 
-  it('re-maps on this device when Claude is off', async () => {
+  it('re-maps on this device without a Claude key', async () => {
     useStore.setState({ health: AI_OFF });
     render(<panels.ScenePanel />);
     fireEvent.click(screen.getByRole('button', { name: 'Re-map' }));
@@ -869,11 +933,19 @@ describe('Branching history', () => {
     expect(screen.getByTitle(/^ChatGPT: Rough fit/).getAttribute('title')).not.toMatch(/matching features|\d/);
     expect(screen.getByTitle('Made with API').textContent).toBe('API');
     expect(screen.getByText(/Alignment needs a look: Rough fit/)).toBeTruthy();
+    // Viewing a variation does not make it the next run's starting image.
+    fireEvent.click(screen.getByTitle('Wide flagstone'));
+    expect(useStore.getState().studio.viewVariationId).toBe('var_2');
+    expect(useStudioUI.getState().baseVariationId).toBeNull();
+    expect(screen.getByText('The next run starts from the original photo.')).toBeTruthy();
+    // Branching does (and shows it).
     fireEvent.click(screen.getByRole('button', { name: 'Branch from Wide flagstone' }));
     expect(useStore.getState().studio.viewVariationId).toBe('var_2');
-    expect(screen.getByText(/Viewing “Wide flagstone” — the next run branches from it/)).toBeTruthy();
+    expect(useStudioUI.getState().baseVariationId).toBe('var_2');
+    expect(screen.getByText('Branching from “Wide flagstone”')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Use original' }));
     expect(useStore.getState().studio.viewVariationId).toBeNull();
+    expect(useStudioUI.getState().baseVariationId).toBeNull();
   });
 
   it('opens the hand-off companion for runs waiting on hand-offs', async () => {

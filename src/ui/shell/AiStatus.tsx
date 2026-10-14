@@ -40,7 +40,7 @@ export function imageProvidersOf(health: HealthResponse | null): { id: string; n
 const LABELS: Record<AiLevel, string> = {
   checking: 'Checking AI…',
   offline: 'Server offline',
-  off: 'Claude off',
+  off: 'No AI key · hand-off',
   'planning-only': 'AI ready · hand-off',
   ready: 'AI ready',
 };
@@ -53,9 +53,9 @@ export function aiSummary(level: AiLevel, onDeviceVision = visionUnsupportedReas
     case 'offline':
       return "Can't reach the Mode server. Projects and hand tools still work; AI features need the server.";
     case 'off':
-      return `Claude is off on this server: variations follow a simple template of your brief, and suggestions, climate profiles and architecture notes need a key. Photoreal variations still work by hand-off to your ChatGPT or Gemini app, and ${
-        onDeviceVision ? 'scenes can be mapped on this device' : 'you can outline areas with the lasso'
-      }.`;
+      return `No AI key: Mode writes each instruction from your choices; photoreal images come from your ChatGPT or Gemini app by hand-off, and ${
+        onDeviceVision ? 'scenes map on this device' : 'you outline areas with the lasso'
+      }. A Claude key (optional) adds tailored plans and suggestions.`;
     case 'planning-only':
       return 'Claude plans and maps scenes. Photoreal variations work by hand-off to your ChatGPT or Gemini app; add an OpenAI or Gemini key to render them in Mode instead.';
     case 'ready':

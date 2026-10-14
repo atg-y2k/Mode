@@ -171,3 +171,25 @@ export const GROUND_ZONE_KINDS: readonly ZoneKind[] = [
   'fence',
   'pool',
 ];
+
+/** Ground a planting or paving element can go on outdoors: never a roof, facade, sky, a tree's canopy or the pool. */
+export const PLANTABLE_GROUND_KINDS: readonly ZoneKind[] = GROUND_ZONE_KINDS.filter((k) => k !== 'tree' && k !== 'pool');
+
+/** Elements whose own kinds of area are all ground (planting beds, lawn, walks, edging…): outdoors they only go on the ground. */
+export function isGroundElement(kinds: readonly ZoneKind[]): boolean {
+  return kinds.length > 0 && kinds.every((k) => GROUND_ZONE_KINDS.includes(k));
+}
+
+/**
+ * The sun of the ground nearby, for a planting spot that has no sun of its
+ * own (nothing of its own mapped or rated yet): the lawn's when it has one,
+ * else the other plantable ground with a sun rating. `from` names it for the
+ * header ("the lawn"). Null when no ground has sun.
+ */
+export function groundSunSpot(zones: readonly SceneZone[]): { zones: SceneZone[]; from: string } | null {
+  const ground = zones.filter((z) => z.sun && isDesignZone(z) && PLANTABLE_GROUND_KINDS.includes(z.kind));
+  if (ground.length === 0) return null;
+  const lawn = ground.filter((z) => z.kind === 'lawn');
+  if (lawn.length) return { zones: lawn, from: 'the lawn' };
+  return { zones: ground, from: ground.length === 1 ? `the ${ground[0].label.toLowerCase()}` : 'the ground nearby' };
+}

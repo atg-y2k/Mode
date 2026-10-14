@@ -5,7 +5,7 @@
  * question, a note, and "Tailor to my photo" (AI options for this house).
  */
 import { memo, useId, useMemo, useState } from 'react';
-import { ArrowDown, ArrowUp, Check, ChevronDown, GitCompare, Lightbulb, MoveHorizontal, Route, ScanSearch, Sparkles, TriangleAlert, Trash2, X } from 'lucide-react';
+import { ArrowDown, ArrowUp, Check, ChevronDown, GitCompare, Lasso, Lightbulb, MoveHorizontal, Route, ScanSearch, Sparkles, TriangleAlert, Trash2, X } from 'lucide-react';
 import type { DesignBrief, ElementDimension, ElementOption, ElementSpec, ProjectLocation, SceneMap, ZoneKind } from '../../../../shared/types';
 import { feasibilityContext, getElementDef, guidanceFor, swatchSpanIn, withPlantFeasibility } from '../../../assets/design';
 import { useInvasivesReady } from '../../../site/hooks';
@@ -25,9 +25,9 @@ import { FeasibilityHeader } from './FeasibilityHeader';
 import { growthExamples } from './growth';
 import { GrowthSlider } from './GrowthSlider';
 import { elementIcon } from './icons';
-import { isPlantingElement, siteHeader, spotZones } from './siteHeader';
+import { isPlantingElement, siteHeader, spotOf } from './siteHeader';
 import { AiJobStatus, AiProgress, Callout, Chip, FEASIBILITY_META, FeasibilityBadge, InlineText, OptionVisualView } from './ui';
-import { zonesForElement } from './zones';
+import { isGroundElement, PLANTABLE_GROUND_KINDS, zonesForElement } from './zones';
 
 export interface ElementCardProps {
   el: ElementSpec;
@@ -58,10 +58,11 @@ export const ElementCard = memo(function ElementCard({ el, photoId, scene, locat
   const invasivesReady = useInvasivesReady();
   const dims = useMemo(() => withPlantFeasibility(el.type, el.dimensions, ctx), [el.type, el.dimensions, ctx, invasivesReady]);
   const planting = isPlantingElement(el, dims, setting);
-  const header = useMemo(
-    () => (planting ? siteHeader(location, spotZones(el, scene, targetZoneIds), ctx) : null),
-    [planting, location, el, scene, targetZoneIds, ctx],
-  );
+  const header = useMemo(() => {
+    if (!planting) return null;
+    const spot = spotOf(el, scene, targetZoneIds);
+    return siteHeader(location, spot.zones, ctx, spot.from);
+  }, [planting, location, el, scene, targetZoneIds, ctx]);
   const examples = useMemo(() => (planting ? growthExamples(el, el.dimensions, 3) : []), [planting, el]);
   const worst = worstChosenFeasibility(el, dims);
   const summary = dims.flatMap((d) => d.options.filter((o) => isChosen(el, d.id, o.id)).map((o) => o.label)).join(' · ');
@@ -134,7 +135,7 @@ export const ElementCard = memo(function ElementCard({ el, photoId, scene, locat
 
           <Guidance type={el.type} />
 
-          <WherePicker el={el} photoId={photoId} scene={scene} relevantKinds={def.zoneKinds} />
+          <WherePicker el={el} photoId={photoId} scene={scene} relevantKinds={def.zoneKinds} setting={setting} />
 
           {dims.map((dim) => (
             <DimensionBlock key={dim.id} el={el} dim={dim} photoId={photoId} />
@@ -303,13 +304,42 @@ function FootprintNote({ el, photoId, scene }: { el: ElementSpec; photoId: strin
   );
 }
 
-function WherePicker({ el, photoId, scene, relevantKinds }: { el: ElementSpec; photoId: string; scene: SceneMap | undefined; relevantKinds: readonly ZoneKind[] }) {
+function WherePicker({
+  el,
+  photoId,
+  scene,
+  relevantKinds,
+  setting,
+}: {
+  el: ElementSpec;
+  photoId: string;
+  scene: SceneMap | undefined;
+  relevantKinds: readonly ZoneKind[];
+  setting: 'interior' | 'exterior';
+}) {
   const [showAll, setShowAll] = useState(false);
   const claudeMapping = useSceneJob(photoId);
   const deviceMapping = useDeviceMapping(photoId);
   const sceneJob = !!claudeMapping || deviceMapping;
   const { relevant, other } = useMemo(() => zonesForElement(scene, relevantKinds), [scene, relevantKinds]);
   const focus = (id: string | null) => useStore.getState().setStudio({ focusZoneId: id });
+  // Planting beds, lawn, walks, edging… outdoors: only ground is offered (never the roof, facade or a tree), and the spot can be drawn.
+  const ground = setting === 'exterior' && isGroundElement(relevantKinds);
+  const outline = ground && (
+    <Button
+      size="sm"
+      variant="ghost"
+      className="self-start max-lg:h-9"
+      icon={<Lasso className="size-3.5" />}
+      onClick={() => {
+        useStore.getState().setStudio({ sketch: 'area', showZones: true, activeElementId: el.id });
+        if (!window.matchMedia?.('(min-width: 64rem)').matches) useStore.getState().setView({ mobilePane: 'editor' });
+      }}
+      title="Draw around the spot on the photo — it becomes this element's area"
+    >
+      Outline the {el.label.toLowerCase()} on the photo
+    </Button>
+  );
 
   if (!scene) {
     return (
@@ -319,9 +349,12 @@ function WherePicker({ el, photoId, scene, relevantKinds }: { el: ElementSpec; p
           {sceneJob ? 'Mapping the scene… areas to choose from appear here when it is done.' : 'Map the scene to point this element at specific areas. Until then Mode decides where it goes.'}
         </p>
         {!sceneJob && (
-          <Button size="sm" className="self-start max-lg:h-9" icon={<ScanSearch className="size-3.5" />} onClick={() => void mapScene(photoId)}>
-            Map the scene
-          </Button>
+          <div className="flex flex-wrap gap-1.5">
+            <Button size="sm" className="max-lg:h-9" icon={<ScanSearch className="size-3.5" />} onClick={() => void mapScene(photoId)}>
+              Map the scene
+            </Button>
+            {outline}
+          </div>
         )}
       </div>
     );
@@ -329,7 +362,7 @@ function WherePicker({ el, photoId, scene, relevantKinds }: { el: ElementSpec; p
 
   // Keep chosen zones visible even when they are not among the relevant kinds.
   const extra = other.filter((z) => el.zoneIds.includes(z.id));
-  const rest = other.filter((z) => !el.zoneIds.includes(z.id));
+  const rest = other.filter((z) => !el.zoneIds.includes(z.id) && (!ground || PLANTABLE_GROUND_KINDS.includes(z.kind)));
   const visible = showAll || relevant.length + extra.length === 0 ? [...relevant, ...extra, ...rest] : [...relevant, ...extra];
   const hidden = showAll || relevant.length + extra.length === 0 ? 0 : rest.length;
   const paths = scene.paths;
@@ -342,7 +375,9 @@ function WherePicker({ el, photoId, scene, relevantKinds }: { el: ElementSpec; p
         <span className="text-[11px] text-subtle">{el.zoneIds.length + el.pathIds.length ? `${el.zoneIds.length + el.pathIds.length} selected` : 'Anywhere that fits'}</span>
       </div>
       {none ? (
-        <p className="text-xs text-muted">No areas mapped for this photo yet — Mode decides where it goes.</p>
+        <p className="text-xs text-muted">
+          {ground ? 'No ground mapped on this photo yet — outline the spot, or Mode decides where it goes.' : 'No areas mapped for this photo yet — Mode decides where it goes.'}
+        </p>
       ) : (
         <div className="flex flex-wrap gap-1.5">
           {visible.map((z) => (
@@ -384,6 +419,7 @@ function WherePicker({ el, photoId, scene, relevantKinds }: { el: ElementSpec; p
           )}
         </div>
       )}
+      {relevant.length === 0 && outline}
     </div>
   );
 }
@@ -581,6 +617,17 @@ function TailorSection({ el, photoId }: { el: ElementSpec; photoId: string }) {
   if (job?.status === 'running') {
     return <AiProgress job={job} hint="Claude looks at your photo, its architecture and your ideas, then suggests options that suit them. Usually 20–60 seconds." />;
   }
+  if (keyOff) {
+    // No Claude key: one quiet line (the keyless state is explained once, in Settings).
+    return (
+      <p className="flex flex-wrap items-center gap-x-1 text-xs text-muted">
+        <span>Optional: with a Claude key, Mode picks options that suit this house.</span>
+        <Button size="sm" className="h-7 px-1.5 max-lg:h-9" variant="ghost" onClick={() => openSettings('server')}>
+          How to add a Claude key
+        </Button>
+      </p>
+    );
+  }
   return (
     <div className="flex flex-col gap-2 rounded-xl border border-dashed border-line-strong p-3">
       <div className="flex items-start gap-2">
@@ -588,11 +635,7 @@ function TailorSection({ el, photoId }: { el: ElementSpec; photoId: string }) {
         <div className="min-w-0 flex-1 text-xs">
           <p className="font-medium text-text">Tailor to my photo</p>
           <p className="mt-0.5 text-muted">
-            {aiReady
-              ? 'Get options picked for this house — its style, materials, light and your idea board.'
-              : keyOff
-                ? 'Optional: with a Claude key, Mode picks options that suit this house — its style, materials, light and your idea board.'
-                : SERVER_OFFLINE_REASON}
+            {aiReady ? 'Get options picked for this house — its style, materials, light and your idea board.' : SERVER_OFFLINE_REASON}
           </p>
         </div>
       </div>
@@ -613,15 +656,9 @@ function TailorSection({ el, photoId }: { el: ElementSpec; photoId: string }) {
         />
       )}
       <div className="flex flex-wrap gap-2">
-        {keyOff ? (
-          <Button size="sm" className="max-lg:h-9" variant="ghost" onClick={() => openSettings('server')}>
-            How to add a Claude key
-          </Button>
-        ) : (
-          <Button size="sm" className="max-lg:h-9" variant="soft" icon={<Sparkles className="size-3.5" />} disabled={!aiReady} onClick={run}>
-            {job?.status === 'done' ? 'Tailor again' : 'Tailor options'}
-          </Button>
-        )}
+        <Button size="sm" className="max-lg:h-9" variant="soft" icon={<Sparkles className="size-3.5" />} disabled={!aiReady} onClick={run}>
+          {job?.status === 'done' ? 'Tailor again' : 'Tailor options'}
+        </Button>
         {!asking && aiReady && (
           <Button size="sm" className="max-lg:h-9" variant="ghost" onClick={() => setAsking(true)}>
             Ask something specific

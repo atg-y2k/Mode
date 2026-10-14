@@ -491,13 +491,51 @@ function walksFromDrivesAndPatios(found: Found[], W: number): void {
   }
 }
 
-/** One-line summary of what the offline map found. */
-export function offlineSummary(zones: readonly Pick<OfflineZone, 'kind' | 'editable'>[]): string {
+/** Areas people usually change that the on-device models often miss (any listed kind counts as found). */
+type Expected = { kinds: readonly ZoneKind[]; label: string };
+const FRONT_OF_HOUSE: readonly Expected[] = [
+  { kinds: ['front-door'], label: 'front door' },
+  { kinds: ['porch'], label: 'porch' },
+  { kinds: ['windows'], label: 'windows' },
+  { kinds: ['planting-bed'], label: 'planting beds' },
+  { kinds: ['driveway', 'walkway'], label: 'driveway' },
+];
+const EXPECTED_BY_CATEGORY: Partial<Record<SpaceType, readonly Expected[]>> = {
+  'front-exterior': FRONT_OF_HOUSE,
+  'front-yard': FRONT_OF_HOUSE,
+  'other-exterior': FRONT_OF_HOUSE,
+  'back-exterior': [FRONT_OF_HOUSE[2], FRONT_OF_HOUSE[3]],
+  'side-exterior': [FRONT_OF_HOUSE[2], FRONT_OF_HOUSE[3]],
+  backyard: [FRONT_OF_HOUSE[3]],
+  'side-yard': [FRONT_OF_HOUSE[3]],
+  garden: [FRONT_OF_HOUSE[3]],
+};
+const EXPECTED_INTERIOR: readonly Expected[] = [
+  { kinds: ['ceiling'], label: 'ceiling' },
+  { kinds: ['window'], label: 'windows' },
+  { kinds: ['door'], label: 'door' },
+];
+
+/** What the map of a `category` photo usually has but `zones` lack ("front door", "porch"…). */
+export function offlineMissing(zones: readonly Pick<OfflineZone, 'kind'>[], category: SpaceType): string[] {
+  const expected = spaceKindOf(category) === 'interior' ? EXPECTED_INTERIOR : (EXPECTED_BY_CATEGORY[category] ?? []);
+  const found = new Set(zones.map((z) => z.kind));
+  return expected.filter((e) => !e.kinds.some((k) => found.has(k))).map((e) => e.label);
+}
+
+/**
+ * One-line summary of what the offline map found. With the photo's category,
+ * it also names the usual areas it did not find (the models have no reliable
+ * classes for doors, porches or beds) and how to add them.
+ */
+export function offlineSummary(zones: readonly Pick<OfflineZone, 'kind' | 'editable'>[], category?: SpaceType): string {
   const counts = new Map<ZoneKind, number>();
   for (const z of zones) counts.set(z.kind, (counts.get(z.kind) ?? 0) + 1);
   const parts = [...counts.entries()].map(([k, n]) => (n > 1 ? `${n}× ${ZONE_KIND_LABELS[k].toLowerCase()}` : ZONE_KIND_LABELS[k].toLowerCase()));
   if (parts.length === 0) return 'Mapped on this device without AI — no clear areas were found; outline the areas to change by hand.';
-  return `Mapped on this device without AI: ${parts.join(', ')}. No style or architecture notes — those need Claude.`;
+  const missing = category ? offlineMissing(zones, category) : [];
+  const notFound = missing.length ? ` Not found: ${missing.join(', ')} — use Tap to select to add them.` : '';
+  return `Mapped on this device without AI: ${parts.join(', ')}.${notFound} No style or architecture notes — those need Claude.`;
 }
 
 export const OFFLINE_MODEL_LABEL = 'On-device (SegFormer-B2';
@@ -518,7 +556,7 @@ export function buildOfflineScene(zones: readonly OfflineZone[], category: Space
   }));
   return {
     category,
-    summary: offlineSummary(zones),
+    summary: offlineSummary(zones, category),
     viewpoint: '',
     style: '',
     boundaries: '',

@@ -499,6 +499,7 @@ function GenerationTab() {
       <Group title="Quality" description={QUALITY_HELP[quality]}>
         <Segmented<StudioState['quality']>
           value={quality}
+          label="Quality"
           onChange={(q) => setStudio({ quality: q })}
           options={[
             { value: 'draft', label: 'Draft' },
@@ -534,6 +535,7 @@ function HandoffGroup() {
       >
         <Segmented<'free' | 'paid'>
           value={plan ?? 'free'}
+          label="Gemini plan"
           onChange={(v) => setPref(GEMINI_PLAN_KEY, v)}
           options={[
             { value: 'free', label: 'Free' },
@@ -552,6 +554,7 @@ function HandoffGroup() {
       >
         <Segmented<'marked' | 'clean'>
           value={paste}
+          label="Photo the main button copies"
           onChange={(v) => setPref(PASTE_IMAGE_KEY, v === 'marked' ? null : v)}
           options={[
             { value: 'marked', label: 'Marked (recommended)' },

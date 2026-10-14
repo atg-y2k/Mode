@@ -6,6 +6,10 @@
  *
  * Data follows common US nursery references (USDA zones, mature size at
  * ~10 years for shrubs/trees). Lawn grasses have matureWidthFt 0 (they spread).
+ * deerResistant follows the Rutgers NJAES deer ratings where they list the
+ * species: A/B (rarely / seldom severely damaged) → true, C/D (occasionally /
+ * frequently severely damaged) → false; others are unrated or follow other
+ * extension references.
  */
 import type { PlantInfo } from '../../../shared/types';
 
@@ -30,7 +34,7 @@ const DATA = {
   },
   'dwarf-hinoki': {
     name: "Dwarf Hinoki cypress 'Nana Gracilis'", botanical: "Chamaecyparis obtusa 'Nana Gracilis'", type: 'shrub', sun: ['full-sun', 'part-sun'],
-    water: 'medium', zoneMin: 5, zoneMax: 8, matureHeightFt: 6, matureWidthFt: 4, evergreen: true, deerResistant: true,
+    water: 'medium', zoneMin: 5, zoneMax: 8, matureHeightFt: 6, matureWidthFt: 4, evergreen: true, deerResistant: false,
   },
   'dwarf-yaupon': {
     name: 'Dwarf yaupon holly', botanical: "Ilex vomitoria 'Nana'", type: 'shrub', sun: ALL_SUN, water: 'low',
@@ -169,16 +173,17 @@ const DATA = {
   // --- trees
   'japanese-maple': {
     name: "Japanese maple 'Bloodgood'", botanical: "Acer palmatum 'Bloodgood'", type: 'tree', sun: ['full-sun', 'part-sun'], water: 'medium',
-    zoneMin: 5, zoneMax: 8, matureHeightFt: 18, matureWidthFt: 18, bloom: 'Burgundy-red leaves spring–fall', deerResistant: false,
+    zoneMin: 5, zoneMax: 8, matureHeightFt: 18, matureWidthFt: 18, bloom: 'Burgundy-red leaves spring–fall', deerResistant: true,
   },
   redbud: {
     name: 'Eastern redbud', botanical: 'Cercis canadensis', type: 'tree', sun: ['full-sun', 'part-sun'], water: 'medium',
-    zoneMin: 4, zoneMax: 9, matureHeightFt: 25, matureWidthFt: 30, bloom: 'Rosy pink, early spring', native: 'Eastern & Central US',
+    zoneMin: 4, zoneMax: 9, matureHeightFt: 25, matureWidthFt: 30, bloom: 'Rosy pink, early spring', deerResistant: false,
+    native: 'Eastern & Central US',
   },
   serviceberry: {
     name: "Serviceberry 'Autumn Brilliance'", botanical: "Amelanchier × grandiflora 'Autumn Brilliance'", type: 'tree', sun: ['full-sun', 'part-sun'],
     water: 'medium', zoneMin: 3, zoneMax: 8, matureHeightFt: 20, matureWidthFt: 15, bloom: 'White, early spring; June berries; orange fall color',
-    native: 'Eastern North America',
+    deerResistant: true, native: 'Eastern North America',
   },
   'crape-myrtle': {
     name: "Crape myrtle 'Natchez'", botanical: "Lagerstroemia indica × fauriei 'Natchez'", type: 'tree', sun: ['full-sun'], water: 'low',
@@ -190,7 +195,8 @@ const DATA = {
   },
   'red-maple': {
     name: "Red maple 'October Glory'", botanical: "Acer rubrum 'October Glory'", type: 'tree', sun: ['full-sun', 'part-sun'], water: 'medium',
-    zoneMin: 4, zoneMax: 9, matureHeightFt: 45, matureWidthFt: 35, bloom: 'Brilliant red fall color', native: 'Eastern North America',
+    zoneMin: 4, zoneMax: 9, matureHeightFt: 45, matureWidthFt: 35, bloom: 'Brilliant red fall color', deerResistant: true,
+    native: 'Eastern North America',
   },
   // --- houseplants (sun = window light: full = bright direct, part = bright indirect, shade = low light)
   'fiddle-leaf-fig': {

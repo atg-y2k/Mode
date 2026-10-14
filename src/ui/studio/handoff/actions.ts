@@ -398,22 +398,40 @@ export function acceptStaged(ref: PlannedRef, opts: { force?: boolean } = {}): b
   return true;
 }
 
-/** Moves the companion on to the next waiting item, or closes it when everything is back. */
+/** The name of the space a photo belongs to ("Front yard"). */
+function spaceNameOf(photoId: string): string {
+  return findPhoto(store().project, photoId)?.space.name ?? 'another space';
+}
+
+/**
+ * Moves the companion on to the next waiting item, or closes it when
+ * everything is back. Never leaves the photo on screen: an item waiting on
+ * another photo is left to the pill (the owner opens it when ready). A card
+ * the owner folded stays folded.
+ */
 function advanceAfter(ref: PlannedRef, message: string): void {
   const next = nextWaiting(ref);
   const s = store();
+  if (next && next.photoId !== ref.photoId) {
+    const there = pendingItems().filter((i) => i.photoId === next.photoId && i.planned.status === 'awaiting-handoff' && !sameRef(i, ref)).length;
+    setHandoffSession({ active: null, companion: 'collapsed' });
+    s.notify(`${message} ${there} hand-off${there === 1 ? '' : 's'} waiting in “${spaceNameOf(next.photoId)}” — open it from the pill.`, 'success');
+    return;
+  }
   if (next) {
     // Phones: the card would cover the result just accepted — fold it to its pill.
     const phone = typeof window !== 'undefined' && !!window.matchMedia?.('(max-width: 639px)').matches;
-    openHandoff(next, { open: !phone && handoffSession().companion !== 'closed' });
-    if (phone || handoffSession().companion === 'closed') setHandoffSession({ companion: 'collapsed' });
+    const open = !phone && handoffSession().companion === 'open';
+    openHandoff(next, { open });
+    if (!open) setHandoffSession({ companion: 'collapsed' });
     s.notify(`${message} Next: “${next.planned.title}”.`, 'success');
     return;
   }
   const staged = pendingItems().find((i) => i.planned.status === 'staged');
   if (staged) {
     setHandoffSession({ active: staged });
-    s.notify(`${message} “${staged.planned.title}” is waiting for your review.`, 'success');
+    const where = staged.photoId === ref.photoId ? '' : ` in “${spaceNameOf(staged.photoId)}”`;
+    s.notify(`${message} “${staged.planned.title}”${where} is waiting for your review.`, 'success');
     return;
   }
   setHandoffSession({ active: null, companion: 'closed' });

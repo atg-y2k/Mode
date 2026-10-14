@@ -56,6 +56,16 @@ function store(name: StoreName): UseStore {
   return s;
 }
 
+/** What to tell the owner when a storage write fails: what to do when the browser is full, else the error's own message. */
+export function storageErrorText(err: unknown): string {
+  const e = err as { name?: unknown; message?: unknown } | null;
+  const message = typeof e?.message === 'string' ? e.message : String(err);
+  if (e?.name === 'QuotaExceededError' || /quota/i.test(message)) {
+    return 'This browser is out of storage space for Mode. Delete old runs or photos, or back up and delete a project (Settings → Storage), then try again.';
+  }
+  return message;
+}
+
 const LIBRARY_KEY = 'assets';
 
 /** Mask record as stored in IndexedDB. */
@@ -821,8 +831,7 @@ export async function importProjectBundle(file: Blob): Promise<{ project: Projec
         deleteBlobs(written.blobs),
         deleteMasks(written.masks),
       ]).catch(() => undefined);
-      const msg = (err as Error)?.name === 'QuotaExceededError' ? 'Not enough storage space on this device.' : (err as Error)?.message;
-      throw new Error(`Could not save the imported project: ${msg}`);
+      throw new Error(`Could not save the imported project: ${storageErrorText(err)}`);
     }
   });
   return { project: imported, library: carried };

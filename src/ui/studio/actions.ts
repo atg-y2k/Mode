@@ -16,13 +16,14 @@ import {
   type Space,
   type Variation,
 } from '../../../shared/types';
-import { feasibilityContext, newElementSpec } from '../../assets/design';
+import { feasibilityContext, getElementDef, newElementSpec } from '../../assets/design';
 import { downloadBlob } from '../../lib/imageImport';
 import * as db from '../../state/persistence';
 import { findPhoto, useStore } from '../../state/store';
 import { polygonArea } from './geometry';
 import { cancelRun, errorMessage, generationOfVariation, isRunActive, startRun, type StartRunOptions } from './generate';
 import { getRunInfo } from './runs';
+import { PLANTABLE_GROUND_KINDS } from './panels/zones';
 import { compareContext, runVariations } from './tiles';
 
 const store = () => useStore.getState();
@@ -178,28 +179,50 @@ function clockwise(points: Pt[]): Pt[] {
   return a < 0 ? [...points].reverse() : points;
 }
 
-/** A drawn area becomes a zone ("Sketched area") that the brief targets. */
-export function addSketchedArea(photo: Photo, space: Space | undefined, polygon: Pt[]): string | null {
+/**
+ * A drawn area becomes a zone ("Sketched area") that the brief targets — or,
+ * drawn for an open element that has no areas yet (the card's "Outline the
+ * planting bed on the photo"), that element's area: it takes the element's
+ * kind of ground when it has one, so sun and plant ratings follow it.
+ */
+export function addSketchedArea(photo: Photo, space: Space | undefined, polygon: Pt[], opts: { elementId?: string | null } = {}): string | null {
   if (polygon.length < 3 || polygonArea(polygon) < 16) return null;
   const s = store();
   ensureScene(photo, space);
   const id = newId('zone');
-  const labels = findPhoto(s.project, photo.id)?.photo.scene?.zones.map((z) => z.label) ?? [];
+  const fresh = findPhoto(s.project, photo.id)?.photo;
+  const labels = fresh?.scene?.zones.map((z) => z.label) ?? [];
   const label = nextLabel('Sketched area', labels);
+  const el = opts.elementId ? fresh?.draft?.elements.find((e) => e.id === opts.elementId) : undefined;
+  const forElement = el && el.zoneIds.length === 0 && el.pathIds.length === 0 ? el : undefined;
+  const kind = (forElement && getElementDef(forElement.type).zoneKinds.find((k) => PLANTABLE_GROUND_KINDS.includes(k))) || 'other';
   s.updateScene(
     photo.id,
     (scene) => {
       scene.zones.push({
         id,
-        kind: 'other',
+        kind,
         label,
-        description: 'Area outlined by the homeowner on the photo',
+        description: forElement ? `${forElement.label} outlined by the homeowner on the photo` : 'Area outlined by the homeowner on the photo',
         polygon: clockwise(polygon.map((p) => ({ x: Math.round(p.x * 10) / 10, y: Math.round(p.y * 10) / 10 }))),
         editable: true,
+        ...(kind === 'other' ? {} : { source: 'sketch' as const }),
       });
     },
     {},
   );
+  if (forElement) {
+    s.updateDraft(
+      photo.id,
+      (d) => {
+        const t = d.elements.find((e) => e.id === forElement.id);
+        if (t && !t.zoneIds.includes(id)) t.zoneIds.push(id);
+      },
+      {},
+    );
+    s.notify(`${label} added to “${forElement.label}”.`, 'success');
+    return id;
+  }
   s.updateDraft(photo.id, (d) => void d.targetZoneIds.push(id), {});
   s.notify(`${label} added to the areas that may change.`, 'success');
   return id;

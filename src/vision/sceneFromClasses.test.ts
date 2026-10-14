@@ -11,6 +11,7 @@ import {
   componentLabels,
   kindGrid,
   offlineCategory,
+  offlineMissing,
   offlineSceneCategory,
   offlineSummary,
   UNLABELED,
@@ -281,6 +282,34 @@ describe('buildOfflineScene', () => {
     expect(scene.paths).toEqual([]);
     expect(scene.summary).toMatch(/without AI/);
     expect(offlineSummary([])).toMatch(/no clear areas/);
+  });
+});
+
+describe('offlineSummary: what the free map did not find', () => {
+  const zones = (...kinds: string[]) => kinds.map((kind) => ({ kind, editable: kind !== 'sky' }) as Parameters<typeof offlineSummary>[0][number]);
+
+  it('a plain house front (lawn, facade, roof, walk, steps) names the four usual areas it missed and how to add them', () => {
+    const found = zones('lawn', 'facade', 'roof', 'walkway', 'steps');
+    expect(offlineMissing(found, 'front-exterior')).toEqual(['front door', 'porch', 'windows', 'planting beds']);
+    expect(offlineSummary(found, 'front-exterior')).toBe(
+      'Mapped on this device without AI: lawn, facade, roof, walkway, steps. Not found: front door, porch, windows, planting beds — use Tap to select to add them. No style or architecture notes — those need Claude.',
+    );
+    // No walk or drive either: the driveway is missing too.
+    expect(offlineMissing(zones('lawn', 'facade'), 'front-yard')).toEqual(['front door', 'porch', 'windows', 'planting beds', 'driveway']);
+  });
+
+  it('says nothing missing when the usual areas are there', () => {
+    const found = zones('front-door', 'porch', 'windows', 'planting-bed', 'driveway', 'lawn');
+    expect(offlineSummary(found, 'front-exterior')).not.toMatch(/Not found/);
+  });
+
+  it('only expects what the kind of photo has', () => {
+    expect(offlineMissing(zones('lawn', 'tree'), 'backyard')).toEqual(['planting beds']);
+    expect(offlineMissing(zones('lawn', 'patio'), 'patio')).toEqual([]);
+    expect(offlineMissing(zones('wall', 'floor'), 'living-room')).toEqual(['ceiling', 'windows', 'door']);
+    expect(offlineMissing(zones('wall', 'floor', 'ceiling', 'window', 'door'), 'kitchen')).toEqual([]);
+    // Without a category (older callers) the summary is unchanged.
+    expect(offlineSummary(zones('lawn'))).toBe('Mapped on this device without AI: lawn. No style or architecture notes — those need Claude.');
   });
 });
 

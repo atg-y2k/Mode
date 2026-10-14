@@ -270,7 +270,7 @@ export function SunCard({ photo, scene, location }: { photo: Photo; scene: Scene
               </Button>
               <p className="text-[11px] leading-snug text-subtle">
                 Estimates assume open sky with the house shading the side behind it (SunCalc{coords.from === 'photo' ? ", at your photo's GPS location" : ''}). Trees, fences and
-                neighbors cut sun further — adjust an area by hand if you know better. Full sun ≥ 6 h, part sun 2–6 h, shade &lt; 2 h.
+                neighbors cut sun further — adjust an area by hand if you know better. Full sun ≥ 6 h, part sun 3–6 h, shade &lt; 3 h.
               </p>
             </div>
           )}

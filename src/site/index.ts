@@ -23,8 +23,8 @@ export { readPhotoCapture, captureFromTags } from './capture';
  *
  * sunHours: estimated direct-sun hours for a surface/yard facing `azimuthDeg` (0 = north,
  * clockwise) at lat/lon on the 15th of `month` (1-12), assuming open sky and a
- * 2-story house shading the side behind it. Classification: ≥ 6 h full sun,
- * 2–6 h part sun, < 2 h shade.
+ * 2-story house shading the side behind it (sun under 15° counts as blocked).
+ * Classification: ≥ 6 h full sun, 3–6 h part sun, < 3 h shade.
  *
  * sunPosition: sun position at a time (degrees): altitude above horizon, azimuth from north clockwise.
  */

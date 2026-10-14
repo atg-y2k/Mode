@@ -3,8 +3,10 @@
  * Suggestions, History (store.studio.panel). Fine-tune mode: Surfaces, Paint,
  * Materials, Lighting, Library (store.panel).
  * Desktop: fixed-width content + a vertical icon/label tab rail on the outer
- * edge (clicking the active tab collapses the content to give the photo more
- * room). Mobile: a horizontal tab strip above the panel, full screen.
+ * edge. A tab always shows its panel (clicking it reopens a hidden panel);
+ * only the "Hide panel" button at the foot of the rail hides the content to
+ * give the photo more room, and the current tab stays marked meanwhile.
+ * Mobile: a horizontal tab strip above the panel, full screen.
  */
 import type { KeyboardEvent, ReactNode } from 'react';
 import {
@@ -171,7 +173,7 @@ function Badge({ spec, compact }: { spec: BadgeSpec; compact?: boolean }) {
     <span
       className={cn(
         'absolute flex min-w-4 items-center justify-center rounded-full bg-accent px-1 font-semibold leading-none text-accent-fg tabular-nums',
-        compact ? '-right-2.5 -top-1.5 h-3.5 text-[9px]' : '-right-3 -top-2 h-4 text-[10px]',
+        compact ? '-right-2.5 -top-1.5 h-3.5 text-[10px]' : '-right-3 -top-2 h-4 text-[10px]',
       )}
     >
       {spec.n > 99 ? '99+' : spec.n}
@@ -182,14 +184,14 @@ function Badge({ spec, compact }: { spec: BadgeSpec; compact?: boolean }) {
 function TabButton({
   tab,
   selected,
-  focusable = selected,
+  collapsed = false,
   orientation,
   onSelect,
 }: {
   tab: TabDef<string>;
   selected: boolean;
-  /** In the tab order (roving tabindex); stays true for the current tab while the panel is collapsed. */
-  focusable?: boolean;
+  /** Desktop: the panel content is hidden; the current tab stays selected in a muted style. */
+  collapsed?: boolean;
   orientation: 'vertical' | 'horizontal';
   onSelect: () => void;
 }) {
@@ -202,18 +204,24 @@ function TabButton({
       role="tab"
       id={`panel-tab-${tab.id}`}
       aria-selected={selected}
-      aria-controls="workspace-panel"
-      tabIndex={focusable ? 0 : -1}
-      title={tab.title}
+      aria-controls={collapsed ? undefined : 'workspace-panel'}
+      tabIndex={selected ? 0 : -1}
+      title={selected && collapsed ? `${tab.title} (panel hidden — click to show it)` : tab.title}
       data-tab={tab.id}
       onClick={onSelect}
       className={cn(
         'relative flex shrink-0 items-center rounded-xl font-medium transition-colors focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
-        vertical ? 'w-full flex-col gap-1 px-1 py-2.5 text-[10.5px]' : 'min-w-14 flex-1 flex-col justify-center gap-1 px-1 py-1.5 text-[11px]',
-        selected ? 'bg-accent-soft text-accent' : 'text-muted hover:bg-surface-2 hover:text-text',
+        vertical ? 'w-full flex-col gap-1 px-1 py-2.5 text-xs' : 'min-w-14 flex-1 flex-col justify-center gap-1 px-1 py-1.5 text-[11px]',
+        selected
+          ? collapsed
+            ? 'bg-surface-2 text-text hover:bg-accent-soft hover:text-accent'
+            : 'bg-accent-soft text-accent'
+          : 'text-muted hover:bg-surface-2 hover:text-text',
       )}
     >
-      {vertical && selected && <span className="absolute inset-y-2 right-0 w-0.5 rounded-full bg-accent" aria-hidden />}
+      {vertical && selected && (
+        <span className={cn('absolute inset-y-2 right-0 w-0.5 rounded-full', collapsed ? 'bg-line-strong' : 'bg-accent')} aria-hidden />
+      )}
       <span className="relative">
         <Icon className={vertical ? 'size-5' : 'size-[18px]'} aria-hidden />
         <Badge spec={badge} compact={!vertical} />
@@ -257,6 +265,11 @@ export function DesktopRightPanel() {
   const { tabs, active, select } = useTabs();
   const collapsed = useShellUI((s) => s.panelCollapsed);
   const tab = tabs.find((t) => t.id === active) ?? tabs[0];
+  // Choosing a tab (click or arrow keys) always shows its panel; only "Hide panel" hides it.
+  const show = (id: string) => {
+    if (id !== tab.id) select(id);
+    if (collapsed) setPanelCollapsed(false);
+  };
   return (
     <aside className="flex h-full min-h-0 shrink-0 border-l border-line bg-surface" aria-label="Design panels">
       {!collapsed && (
@@ -264,29 +277,16 @@ export function DesktopRightPanel() {
           <PanelBody tab={tab} />
         </div>
       )}
-      <div className="flex w-[4.5rem] shrink-0 flex-col items-stretch gap-1 px-1.5 py-2">
+      <div className="flex w-20 shrink-0 flex-col items-stretch gap-1 px-1.5 py-2">
         <div
           role="tablist"
           aria-orientation="vertical"
           aria-label="Panels"
           className="flex flex-col gap-1"
-          onKeyDown={(e) => onTabListKey(e, tabs, tab.id, select, true)}
+          onKeyDown={(e) => onTabListKey(e, tabs, tab.id, show, true)}
         >
           {tabs.map((t) => (
-            <TabButton
-              key={t.id}
-              tab={t}
-              selected={t.id === tab.id && !collapsed}
-              focusable={t.id === tab.id}
-              orientation="vertical"
-              onSelect={() => {
-                if (t.id === tab.id) setPanelCollapsed(!collapsed);
-                else {
-                  select(t.id);
-                  if (collapsed) setPanelCollapsed(false);
-                }
-              }}
-            />
+            <TabButton key={t.id} tab={t} selected={t.id === tab.id} collapsed={collapsed} orientation="vertical" onSelect={() => show(t.id)} />
           ))}
         </div>
         <div className="mt-auto flex justify-center pb-1">

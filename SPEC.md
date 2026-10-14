@@ -58,22 +58,12 @@
 >    no CSV/print exports, no /api/asset-list UI). Inside and outside are
 >    equally important. Image providers: **OpenAI and Google Gemini**, the
 >    user picks in Settings / per run.
->
-> **Assignment overrides for engineers who haven't started yet:**
-> - **data**: do NOT implement src/assetList/quantities|generate|export (deleted).
->   Implement only src/assetList/area.ts. Persistence must handle the new
->   blobs/masks: idea board images/thumbs (project.ideaBoard), variation
->   images/thumbs (photo.generations[].variations[]), scene zone masks
->   (zone.maskId) in referencedIds, deleteProject and bundles. Projects
->   loaded from older saves must be migrated (missing ideaBoard → [],
->   photo.generations → []).
-> - **shell**: see §3.8 (rewritten): Studio / Fine-tune modes; no asset-list exports.
-> - **panels-plan**: your assignment is REPLACED by §3.15 Studio panels.
-> - **panels-scene**: Lighting + Library are Fine-tune panels; no Shop there
->   (products go to the idea board, §3.15).
-> - **catalog / textures / engine-render / panels-design**: unchanged (they
->   power Fine-tune and the option swatches — textureSwatch renders the
->   texture visuals of element options).
+> 10. **Keys are optional.** Photoreal images come by default from a manual
+>    hand-off to the owner's own ChatGPT or Gemini app (§5); Mode never
+>    automates chatgpt.com / gemini.google.com. Without a Claude key the
+>    server writes each instruction from the brief's choices (template plan)
+>    and the scene map can be made on the device (§5.5); see §5.7 for the
+>    defaults a keyless first run relies on.
 
 Mode is a local-first web app. Everything except the AI features works
 offline with no API keys.
@@ -91,7 +81,13 @@ src/ui/editor/*               the canvas editor (render, zoom/pan, tools, overla
 src/ui/panels/*Panel.tsx      Fine-tune panels: Surfaces, Paint, Materials, Lighting, Library
 src/ui/studio/*               Studio: StudioView (viewer, zones, sketch, variations, compare grid), generate.ts (runs)
 src/ui/studio/panels/*        Studio panels: Design (brief composer), Scene, Ideas (+ ShopModal), Suggestions, History
-src/assets/design/*           design knowledge: architectural styles, themes, element guidance, ELEMENT_DEFS
+src/ui/studio/handoff/*       Studio hand-off: Review modal, companion, staging, import (§5.2)
+src/assets/design/*           design knowledge: architectural styles, themes, element guidance, ELEMENT_DEFS,
+                              plant profiles + feasibility
+src/handoff/*                 hand-off engine: crop/marker packs, ChatGPT/Gemini prompts, deep links, alignment (§5.1)
+src/vision/*                  on-device vision worker (Transformers.js): free scene map, sharpen outlines,
+                              Tap to select (§5.5)
+src/site/*                    ZIP → zone/coords, photo EXIF capture, sun hours, US-RIIS invasives, link-outs (§5.4)
 src/lib/studio.ts             Studio API client + conversions    src/lib/products.ts  real products client
 src/state/store.ts            zustand+immer store: project document, selection, tools, undo/redo   (DONE)
 src/state/runtime.ts          in-memory masks + decoded photos + Lab cache                          (DONE)
@@ -107,7 +103,10 @@ src/lib/api.ts                typed client for the API server
 shared/types.ts               domain model (DONE)        shared/art.ts  art spec types (DONE)
 shared/api.ts                 HTTP contract + zod schemas (DONE)   shared/ids.ts newId() (DONE)
 server/*                      Hono API server: Claude (vision, structured outputs) + optional image provider;
-                              serves dist/ in production
+                              serves dist/ in production (gzip, never /api)
+server/studio/*               Studio routes: scene, plan (Claude or template), render, products (§3.13)
+server/handoff/*              Downloads watcher (SSE) + fetch-url for hand-off imports (§5.3)
+server/site/*                 NOAA frost dates + USDA soil site profile (§5.3)
 tests/e2e/*                   Playwright smoke tests
 ```
 
@@ -119,7 +118,8 @@ Checks: `npm run typecheck`, `npm test` (vitest), `npm run test:e2e`.
 Project → Spaces (interior/exterior, typed) → Photos (working-res image in blob
 store, Regions = masked surfaces, Calibration, AI analysis) → Designs
 (“Option A/B…”: treatments per region, placed objects, placed lights,
-lighting settings, AI renders). Project.assetList holds the shopping list.
+lighting settings, AI renders). Project.assetList is only kept so older saves
+and backups load (migration fills it with []; the shopping list was dropped).
 Regions (geometry) are per photo; treatments are per design, so every design
 option reuses the same outlined surfaces.
 
@@ -320,17 +320,23 @@ truly need a contract change, work around it locally and list it under
   computer — never "open Mode in Safari": projects live in each browser's
   own storage).
 - backgroundRemoval per contract (tests on synthetic images).
-- assetList: ONLY area.ts (the shopping list was dropped — see §0).
-- persistence must cover Studio data (§0 overrides) and migrate old saves.
+- src/assetList/ holds only area.ts (real-world areas for Fine-tune); the shopping list was dropped (§0).
+- persistence covers Studio data (idea board images, variation images, zone
+  masks in referencedIds, deleteProject and bundles) and migrates old saves
+  (missing ideaBoard / generations → []).
 
 ### 3.7 server — `server/*`, `src/lib/api.ts` (+ tests)
 - Hono app (server/app.ts exporting `createApp(deps)` for tests; server/index.ts
   starts @hono/node-server on PORT ?? API_PORT ?? 8787 and, when
   NODE_ENV=production, serves ./dist with SPA fallback; `npm start` passes
   --production, which sets it).
-- config (env): ANTHROPIC_API_KEY (AI enabled when set or MODE_AI=on),
-  CLAUDE_MODEL (default 'claude-opus-5-5'), IMAGE_PROVIDER ('openai' | unset),
-  OPENAI_API_KEY, OPENAI_IMAGE_MODEL (default 'gpt-image-1'), OPENAI_BASE_URL,
+- config (env, server/config.ts): ANTHROPIC_API_KEY (AI enabled when set or
+  MODE_AI=on; MODE_AI=off forces it off), CLAUDE_MODEL (default
+  'claude-opus-5-5'), IMAGE_PROVIDER ('openai' | 'gemini' | 'none' — the default
+  provider among those with a key; 'none' turns image APIs off), OPENAI_API_KEY,
+  OPENAI_IMAGE_MODEL (default DEFAULT_OPENAI_IMAGE_MODEL, 'gpt-image-2.5-flare'),
+  OPENAI_BASE_URL, GEMINI_API_KEY (or GOOGLE_API_KEY), GEMINI_IMAGE_MODEL
+  (default 'gemini-2.5-flash-image'),
   MODE_ACCESS_TOKEN (if set, every /api request except /api/health must send
   header `x-mode-token`), RATE_LIMIT_PER_10MIN (default 60 AI calls per IP).
   Write `.env.example` documenting all of them.
@@ -364,7 +370,8 @@ truly need a contract change, work around it locally and list it under
   perspective; apply listed changes) — falls back to a template when AI is
   off; then the image provider edits the image (OpenAI `POST
   {base}/images/edits` multipart: model, image, optional mask, prompt,
-  size 'auto', quality 'high', input_fidelity 'high' for gpt-image-1;
+  size 'auto', quality 'high', input_fidelity 'high' when the model supports it
+  (retried without it when the API rejects the parameter);
   response data[0].b64_json). Provider behind an interface
   (server/imageProvider.ts) so others can be added.
 - Body limit MAX_BODY_BYTES, zod-validate requests, errors as ApiErrorBody
@@ -377,6 +384,10 @@ truly need a contract change, work around it locally and list it under
 
 ### 3.8 shell — `src/App.tsx`, `src/ui/shell/*`, `public/sw.js` (optional)
 - App: on mount `useStore.getState().init()`; route = project ? workspace : projects home.
+  init() reopens the project that was open when the page was last left
+  (localStorage 'mode.lastProjectId', set by openProject; "All projects" /
+  closeProject and deleteProject clear it), so a reload or a discarded tab
+  lands back in the project and its waiting hand-offs.
   Mount `<ShopModal />` (src/ui/studio/panels/ShopModal.tsx) once at app level.
 - Projects home: warm editorial landing (font-display headline, e.g. "See your
   home redesigned before you lift a shovel"), a short "how it works": upload a
@@ -568,8 +579,9 @@ truly need a contract change, work around it locally and list it under
   the variations strip (newest run first; each run labeled with its plan;
   thumbnails with favorite star, compare-run option labels, status
   placeholders while rendering, failed tiles with retry). Click a
-  variation → view it; actions: More like this, Refine (feedback input),
-  Use as base (viewVariationId), Compare with original, Download, Delete.
+  variation → view it (viewing never changes what the next run edits);
+  actions: More like this, Refine (feedback input), Use as base (studio UI
+  `baseVariationId`), Compare with original, Download, Delete.
 - Compare grid: when studio.gridGenerationId is set, show that run's
   variations side by side with option labels, rationale, and "Choose" (sets
   the element choice to that option and views the variation).
@@ -772,11 +784,15 @@ marked region + fixed hint text + feature alignment + restore outside.
 - lookupZip → zone + coords: New project & Settings fill the zone
   automatically from the ZIP (zoneSource 'zip-table'; AI climate stays
   optional). readPhotoCapture via exifr on import (store.addPhotos sets
-  photo.capture). SunCalc sunHours/sunPosition. invasiveStatus. plantLinkOuts
+  photo.capture). SunCalc sunHours/sunPosition (sun under 15° counts as
+  blocked; ≥ 6 h full sun, 3–6 h part sun, < 3 h shade). invasiveStatus. plantLinkOuts
   (NWF Native Plant Finder ?zip=, Audubon ?zipcode=, NC State Plant Toolbox
   search, MoBot search, Rutgers deer list). fetchSiteProfile client.
 - Feasibility: deer pressure (location.deerPressure) and US-RIIS invasives
   feed plantFeasibility reasons (keep it sync: invasives load once, cached).
+  Only the curated watchlist rates "Invasive risk" (caution); a US-RIIS
+  listing is an info note ("USGS lists … in parts of the lower 48 states —
+  check your state's invasive plant list").
 - Settings: deer pressure select; "Use exact address" (geocoded server-side
   via the US Census geocoder through /api/site/profile? — keep simple: ZIP
   centroid + photo GPS), site profile card (frost dates, soil) with source
@@ -813,6 +829,55 @@ marked region + fixed hint text + feature alignment + restore outside.
   base (Original → variation → runs from it), "Branch from here" (= use as
   base), favorites filter, provenance (ChatGPT / Gemini / API) and alignment
   per variation.
+
+### 5.7 First run without keys — defaults and plain messages (review pass)
+- Runs start from the original photo unless the owner picks "Use as base",
+  "Branch from here" or Refine (studio UI `baseVariationId`); the Review
+  says "Starting from: …". Viewing a variation never makes it the base.
+- Without Claude the server's template plan writes each variation's
+  instruction from the choices: a compare run fills in the compared option
+  (each variation names its own), and active idea-board notes, themes and
+  products are appended to the instruction.
+- Element defaults never change what the owner did not ask for: Pathway
+  shape and width, Steps and Porch railing, and Wall paint trim default to
+  "Keep current"; lighting "Show it at" defaults to Daytime.
+- The owner's typed words win over a "Keep current" / "No …" default they
+  plainly contradict (shared/promptAsks.ts: width ← "wider", "5 ft wide";
+  shape ← "curved", "winding", "straight"; path lighting ← "path lights",
+  "lanterns", "bollards"; edging ← "edging", "border"): the template plan and
+  the Claude plan prompt leave that clause out (a positive choice is never
+  removed), and a refinement strips it from the earlier instruction. The
+  prompt dock shows a dismissible note in its hint line ("Your idea mentions
+  a wider walk — pick a width on the Pathway card so Mode leaves room for
+  it.") while a Pathway question is still on its default, because the room
+  the outline leaves comes from the card's choice; it is hidden while a
+  hand-off for the photo is out. The hand-off prompt says "(where the walk
+  widens)" unless the route changes ("re-lawn where the old walk no longer
+  runs" for a curve, offset or stepping stones).
+- Desktop toasts sit right-aligned over the right panel (left of the tab
+  rail), below an open dialog unless they are errors; the hand-off card
+  floats beside the right panel when the photo pane is under 480×500 px
+  (1366×768 laptops) and sits inside the pane otherwise (1440×900).
+- The top bar's save status reads "Not saved here" in a read-only tab, and
+  "Not saved" with a Retry button after a failed save (store.retrySave).
+- The last open project is reopened on load (§3.8).
+- Storage full (QuotaExceededError) says what to do: "This browser is out of
+  storage space for Mode. Delete old runs or photos, or back up and delete a
+  project (Settings → Storage), then try again." (persistence
+  storageErrorText; save, photo import and backup import).
+- Free map (§5.5): the summary names the usual areas it did not find
+  ("Not found: front door, porch, windows, planting beds — use Tap to select
+  to add them."; indoors: ceiling, windows, door). When only the sharpening
+  step fails, the saved map stays and the message says the outlines can be
+  sharpened later.
+- Sun hours (§5.4): 15° cut-off and 6 / 3 h thresholds, matching the rule
+  the guidance, FEASIBILITY_RULES and the AI prompts state.
+- Plants: US-RIIS listings are info notes; the curated watchlist rates
+  caution. Deer flags follow the Rutgers ratings (A/B resistant, C/D deer
+  favorite).
+- `npm start` gzips the app's files (hono/compress; /api untouched, HEAD
+  answers stay uncompressed) and the build writes hidden source maps (not
+  referenced from the bundles).
 
 ---------------------------------------------------------------------------
 

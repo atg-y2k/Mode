@@ -496,9 +496,10 @@ function StagingContent({ photo, stagingRef }: { photo: Photo; stagingRef: Plann
           onConfirm={() => acceptStaged(stagingRef, { force: true })}
         />
         {fixes.length > 0 && (
-          <div className="flex min-w-0 items-center gap-2">
-            <span className="shrink-0 text-[11px] text-white/55">Fix in the same chat:</span>
-            <div className="scroll-thin -mx-1 flex min-w-0 gap-1.5 overflow-x-auto px-1 pb-0.5">
+          <div className="flex min-w-0 items-start gap-2">
+            <span className="shrink-0 pt-1.5 text-[11px] text-white/55">Fix in the same chat:</span>
+            {/* Wraps instead of scrolling: every chip stays fully visible. */}
+            <div className="flex min-w-0 flex-1 flex-wrap gap-1.5" data-testid="staging-fixes">
               {fixes.map((f) => (
                 <FixChip key={f.id} text={f.text} label={f.label} />
               ))}

@@ -2,7 +2,8 @@
  * Shell-only UI state shared between the top bar, sidebars, the projects home
  * and anything that wants to open Settings (e.g. a panel prompting for a ZIP
  * code): `openSettings('project')`.
- * Layout toggles are remembered per device.
+ * The spaces sidebar toggle is remembered per device; the right panel always
+ * starts open (a hidden panel is easy to miss on the next visit).
  */
 import { create } from 'zustand';
 import { useStore } from '../../state/store';
@@ -14,7 +15,7 @@ interface ShellUIState {
   settingsTab: SettingsTab;
   /** Desktop: spaces sidebar collapsed. */
   sidebarCollapsed: boolean;
-  /** Desktop: right panel content collapsed (tab rail stays). */
+  /** Desktop: right panel content collapsed (tab rail stays). This session only. */
   panelCollapsed: boolean;
   newProjectOpen: boolean;
   addSpaceOpen: boolean;
@@ -23,7 +24,6 @@ interface ShellUIState {
 }
 
 const SIDEBAR_KEY = 'mode.layout.sidebarCollapsed';
-const PANEL_KEY = 'mode.layout.panelCollapsed';
 
 function readFlag(key: string): boolean {
   try {
@@ -46,7 +46,7 @@ export const useShellUI = create<ShellUIState>()(() => ({
   settingsOpen: false,
   settingsTab: 'appearance',
   sidebarCollapsed: readFlag(SIDEBAR_KEY),
-  panelCollapsed: readFlag(PANEL_KEY),
+  panelCollapsed: false,
   newProjectOpen: false,
   addSpaceOpen: false,
   addSpaceKind: null,
@@ -73,7 +73,6 @@ export function setSidebarCollapsed(collapsed: boolean): void {
 }
 
 export function setPanelCollapsed(collapsed: boolean): void {
-  writeFlag(PANEL_KEY, collapsed);
   useShellUI.setState({ panelCollapsed: collapsed });
 }
 

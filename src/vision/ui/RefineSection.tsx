@@ -1,7 +1,7 @@
 /**
  * Scene panel section for the free on-device vision: "Sharpen outlines on
  * this device (free)" (EdgeTAM + SegFormer turn the AI's rough outlines into
- * exact masks, with per-area agreement), and "Map on this device (free)" when
+ * exact masks, with per-area agreement), and "Map the scene" (on this device, free) when
  * Claude is off. One primary action, progress with the download size, clear
  * fallbacks when the browser can't run the models, and the SegFormer
  * licence: an explicit opt-in before its first use (NVIDIA non-commercial
@@ -104,7 +104,7 @@ export function RefineSection({ photoId }: { photoId: string }) {
           {otherBusy && <p className="text-xs text-muted">Busy with another photo — this can run when it finishes.</p>}
           {error && <Note icon={<CircleAlert className="size-4 text-danger" />}>{error}</Note>}
           {status.stage === 'error' && !error && status.message && <Note icon={<CircleAlert className="size-4 text-danger" />}>{status.message}</Note>}
-          {outcome && scene && <Outcomes items={outcome.items} zoneIds={new Set(scene.zones.map((z) => z.id))} />}
+          {outcome && scene && <Outcomes items={outcome.items} zoneIds={new Set(scene.zones.filter(listed).map((z) => z.id))} />}
           {scene && (
             <button
               type="button"
@@ -212,8 +212,15 @@ function OfflineMapBlock({
       <p className="text-sm leading-relaxed text-text">
         {hasScene ? 'Add the main areas of this photo' : 'Map this photo on this device'}: Mode finds the {finds} and outlines them precisely — free and private, no key or account needed.
       </p>
-      <Button variant="primary" className="self-start" icon={<ScanSearch className="size-4" />} disabled={disabled} onClick={() => void mapSceneOffline(photoId)}>
-        Map on this device (free)
+      <Button
+        variant="primary"
+        className="self-start"
+        icon={<ScanSearch className="size-4" />}
+        disabled={disabled}
+        title="On this device, free"
+        onClick={() => void mapSceneOffline(photoId)}
+      >
+        Map the scene
       </Button>
       <p className="text-[11px] leading-snug text-subtle">
         {downloadLine(interior ? 'mapInterior' : 'mapExterior', cached)} {backendLine()}
@@ -264,6 +271,11 @@ const LEVEL: Record<'high' | 'medium' | 'low', { label: string; tone: 'success' 
   low: { label: 'Unsure', tone: 'warning' },
 };
 
+/**
+ * The last run's result per area. `zoneIds`: the areas still in the scene that
+ * the Scene panel lists (not the sky or the street), so the counts match
+ * "All N areas have precise outlines".
+ */
 function Outcomes({ items, zoneIds }: { items: ZoneOutcome[]; zoneIds: ReadonlySet<string> }) {
   const [all, setAll] = useState(false);
   const live = useMemo(() => items.filter((i) => zoneIds.has(i.zoneId)), [items, zoneIds]);
@@ -271,11 +283,14 @@ function Outcomes({ items, zoneIds }: { items: ZoneOutcome[]; zoneIds: ReadonlyS
   const sharp = live.filter((i) => i.refined).length;
   const shown = all ? live : live.slice(0, 6);
   const focus = (id: string | null) => useStore.getState().setStudio({ focusZoneId: id });
+  // The badges worth a second look, named as shown ("Check", "Unsure"), only when present.
+  const levels = new Set(live.filter((i) => i.refined).map((i) => agreementLevel(i.agreement)));
+  const doubtful = (['medium', 'low'] as const).filter((l) => levels.has(l)).map((l) => `“${LEVEL[l].label}”`);
   return (
     <div className="flex flex-col gap-1.5">
       <p className="text-xs font-medium text-muted">
         Last run: {sharp} of {live.length} sharpened
-        <span className="font-normal text-subtle"> · agreement with the AI outline and what the photo shows</span>
+        <span className="font-normal text-subtle"> · how well each sharpened outline agrees with the first outline</span>
       </p>
       <ul className="flex flex-col" onPointerLeave={() => focus(null)}>
         {shown.map((i) => {
@@ -302,8 +317,11 @@ function Outcomes({ items, zoneIds }: { items: ZoneOutcome[]; zoneIds: ReadonlyS
           {all ? 'Show fewer' : `Show all ${live.length}`}
         </button>
       )}
-      {live.some((i) => i.refined && agreementLevel(i.agreement) !== 'high') && (
-        <p className="text-[11px] leading-snug text-subtle">“Check” areas may have grabbed a neighbour — fix them with Tap to select (Alt-click removes) or in Fine-tune. ⌘Z / Ctrl+Z undoes the whole run.</p>
+      {doubtful.length > 0 && (
+        <p className="text-[11px] leading-snug text-subtle">
+          {doubtful.join(' and ')} areas may have grabbed a neighbour — fix them with Tap to select (Alt-click removes) or in Fine-tune.
+          ⌘Z / Ctrl+Z undoes the whole run.
+        </p>
       )}
     </div>
   );
@@ -335,7 +353,7 @@ function SegformerConsent({ consent, cached, interior }: { consent: PendingConse
     return d.bytes ? ` (${d.label} download)` : '';
   };
   const what = consent.action === 'map' ? 'map the scene' : consent.action === 'remap' ? 'map the scene again' : 'sharpen the outlines';
-  // The action may have been parked from the photo ("Map on this device") with the
+  // The action may have been parked from the photo ("Map the scene") with the
   // question below the fold: bring the whole card into view and move focus to it
   // (the card, not a choice, so nothing nudges towards accepting the licence).
   const ref = useRef<HTMLDivElement>(null);

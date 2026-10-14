@@ -4,14 +4,15 @@ import type { Generation, IdeaItem, Photo, SceneMap } from '../../shared/types';
 import { emptyBrief } from '../../shared/types';
 import * as db from './persistence';
 import * as runtime from './runtime';
-import { newDesign, useStore } from './store';
+import { LAST_PROJECT_KEY, newDesign, useStore } from './store';
 
 // Test hooks into storage: hold blob writes at a gate (to switch projects mid-add),
-// record the ids written, make project saves fail.
+// record the ids written, make project saves fail, fill the disk after N blob writes.
 const io = vi.hoisted(() => ({
   gate: Promise.resolve() as Promise<void>,
   written: [] as string[],
   failSaves: false,
+  blobRoom: Infinity,
 }));
 
 vi.mock('./persistence', async (importOriginal) => {
@@ -21,6 +22,7 @@ vi.mock('./persistence', async (importOriginal) => {
     putBlob: async (id: string, blob: Blob) => {
       io.written.push(id);
       await io.gate;
+      if (io.blobRoom-- <= 0) throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
       return real.putBlob(id, blob);
     },
     saveProject: async (...args: Parameters<typeof real.saveProject>) => {
@@ -56,6 +58,7 @@ afterEach(() => {
   io.gate = Promise.resolve();
   io.written = [];
   io.failSaves = false;
+  io.blobRoom = Infinity;
 });
 
 function photo(id: string): Photo {
@@ -400,6 +403,21 @@ describe('async adds stay in the project (and space) they started in', () => {
     expect(useStore.getState().selection.photoId).toBe('p1');
   });
 
+  it('says what to do when the browser is out of storage, and adds nothing half-written', async () => {
+    const spaceId = useStore.getState().project!.spaces[0].id;
+    useStore.setState({ toasts: [] });
+    io.blobRoom = 1; // the full-size image fits, its thumbnail does not
+    const ids = await useStore.getState().addPhotos(spaceId, [new File(['a'], 'big.jpg')]);
+    expect(ids).toEqual([]);
+    expect(photoIds(spaceId)).toEqual(['p1']);
+    for (const id of io.written) expect(await db.getBlob(id)).toBeUndefined();
+    const errors = useStore.getState().toasts.filter((t) => t.kind === 'error');
+    expect(errors.map((t) => t.message)).toEqual([
+      'big.jpg wasn’t added. This browser is out of storage space for Mode. Delete old runs or photos, or back up and delete a project (Settings → Storage), then try again.',
+    ]);
+    expect(errors[0].message).not.toMatch(/quota/i);
+  });
+
   it('still adds photos normally', async () => {
     const spaceId = useStore.getState().project!.spaces[0].id;
     const ids = await useStore.getState().addPhotos(spaceId, [new File(['a'], 'a.jpg')]);
@@ -425,11 +443,21 @@ describe('deletes remove pixels only after the document without them is saved', 
     const pid = useStore.getState().project!.id;
     await afterAutosave();
     await db.putBlob('img-p1', new Blob(['x']));
+    useStore.setState({ toasts: [] });
     io.failSaves = true;
     await useStore.getState().deletePhoto('p1');
     expect((await db.loadProject(pid))!.spaces[0].photos.map((p) => p.id)).toEqual(['p1']);
     expect(await db.getBlob('img-p1')).toBeTruthy();
     expect(useStore.getState().saveState).toBe('error');
+    // A full disk says what to do, not "Quota exceeded".
+    expect(useStore.getState().toasts.filter((t) => t.kind === 'error').map((t) => t.message)).toEqual([
+      'Could not save: This browser is out of storage space for Mode. Delete old runs or photos, or back up and delete a project (Settings → Storage), then try again.',
+    ]);
+    // Once space is freed, Retry (TopBar) saves the open project right away.
+    io.failSaves = false;
+    expect(await useStore.getState().retrySave()).toBe(true);
+    expect(useStore.getState().saveState).toBe('saved');
+    expect((await db.loadProject(pid))!.spaces[0].photos).toEqual([]);
   });
 
   it('deleteVariation and deleteGeneration', async () => {
@@ -459,5 +487,83 @@ describe('deleteSpace and the idea board', () => {
     expect(board.get(only)).toMatchObject({ spaceIds: [], active: false });
     expect(board.get(both)).toMatchObject({ spaceIds: [other], active: true });
     expect(board.get(house)).toMatchObject({ spaceIds: [], active: true });
+  });
+});
+
+describe('reopening the last project on load', () => {
+  let stored: Map<string, string>;
+  beforeEach(() => {
+    stored = new Map();
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => stored.get(k) ?? null,
+      setItem: (k: string, v: string) => void stored.set(k, String(v)),
+      removeItem: (k: string) => void stored.delete(k),
+    });
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  /** A fresh page load: nothing open, the store's projects list not loaded yet. */
+  async function reload() {
+    await useStore.getState().closeProject();
+    useStore.setState({ ready: false, projects: [] });
+  }
+
+  it('remembers the open project and reopens it after a reload', async () => {
+    const pid = useStore.getState().project!.id;
+    await useStore.getState().openProject(pid);
+    expect(stored.get(LAST_PROJECT_KEY)).toBe(pid);
+    const id = stored.get(LAST_PROJECT_KEY)!;
+    await reload();
+    stored.set(LAST_PROJECT_KEY, id); // closeProject cleared it; a reload does not close
+    await useStore.getState().init();
+    expect(useStore.getState()).toMatchObject({ ready: true, project: { id: pid } });
+    expect(useStore.getState().selection.photoId).toBe('p1');
+  });
+
+  it('stays on the projects home for an id that no longer exists, and forgets it', async () => {
+    await reload();
+    stored.set(LAST_PROJECT_KEY, 'prj_gone');
+    await useStore.getState().init();
+    expect(useStore.getState().ready).toBe(true);
+    expect(useStore.getState().project).toBeNull();
+    expect(stored.has(LAST_PROJECT_KEY)).toBe(false);
+  });
+
+  it('"All projects" (closeProject) and deleting the project forget it', async () => {
+    const pid = useStore.getState().project!.id;
+    await useStore.getState().openProject(pid);
+    await useStore.getState().closeProject();
+    expect(stored.has(LAST_PROJECT_KEY)).toBe(false);
+
+    await useStore.getState().openProject(pid);
+    await useStore.getState().deleteProject(pid);
+    expect(stored.has(LAST_PROJECT_KEY)).toBe(false);
+  });
+
+  it('deleting another project keeps the remembered one', async () => {
+    const pid = useStore.getState().project!.id;
+    const other = await useStore.getState().createProject('Other');
+    await useStore.getState().openProject(pid);
+    await useStore.getState().deleteProject(other);
+    expect(stored.get(LAST_PROJECT_KEY)).toBe(pid);
+  });
+
+  it('works when storage is blocked', async () => {
+    vi.stubGlobal('localStorage', {
+      getItem: () => {
+        throw new DOMException('blocked', 'SecurityError');
+      },
+      setItem: () => {
+        throw new DOMException('blocked', 'SecurityError');
+      },
+      removeItem: () => {
+        throw new DOMException('blocked', 'SecurityError');
+      },
+    });
+    const pid = useStore.getState().project!.id;
+    await useStore.getState().openProject(pid);
+    await reload();
+    await useStore.getState().init();
+    expect(useStore.getState()).toMatchObject({ ready: true, project: null });
   });
 });

@@ -8,7 +8,7 @@
  *
  * Keyboard: ←/→ step through the variations of the current run, F favorite,
  * Esc back to the original (closes the grid first), [ or ] toggle the areas
- * overlay. Shortcuts are ignored while typing or when a dialog is open.
+ * overlay (over a shown result: on that result only — results are shown clean). Shortcuts are ignored while typing or when a dialog is open.
  */
 import { ImageOff } from 'lucide-react';
 import { useEffect } from 'react';
@@ -24,7 +24,7 @@ import { syncHandoffProject, useHandoffSession } from './handoff/session';
 import { StagingView } from './handoff/StagingView';
 import { useActivePhoto } from './hooks';
 import { PromptDock } from './PromptDock';
-import { setStudioUI, useStudioUI } from './ui';
+import { installBaseReset, setStudioUI, toggleAreasOverlay, useStudioUI } from './ui';
 import { VariationStrip } from './VariationStrip';
 import { Viewer } from './Viewer';
 
@@ -65,7 +65,7 @@ function useStudioShortcuts(): void {
           break;
         case '[':
         case ']':
-          s.setStudio({ showZones: !s.studio.showZones });
+          toggleAreasOverlay(!!findVariation(photo, s.studio.viewVariationId));
           break;
         default:
           return;
@@ -109,6 +109,7 @@ export function StudioView() {
 
   useEffect(() => {
     installHandoffPrefs();
+    installBaseReset();
   }, []);
 
   // Hand-off items belong to one project: switching projects closes the companion and staging.

@@ -7,6 +7,8 @@
  * "returned" image (the clean export, rescaled, slightly cropped, colour cast,
  * new stones inside the outline) through the file picker → staging (lined
  * up, outside protected) → Accept → a variation tile marked as ChatGPT.
+ * Halfway, the page reloads (as when the browser drops the tab while the
+ * owner is in ChatGPT): Mode reopens the project with the hand-off waiting.
  */
 import type { Page } from '@playwright/test';
 import { addSpaceWithPhoto, createProject, dockGenerate, expect, HOUSE, houseJpeg, panel, photoToScreen, shot, studioPhoto, test } from './support';
@@ -66,6 +68,21 @@ test('Pathway brief → hand-off to ChatGPT → import → staging → accept', 
 
   // --- Companion: copy the marked photo and open ChatGPT (a stub tab).
   const companion = page.getByRole('dialog', { name: 'Hand-off companion' });
+  await expect(companion).toBeVisible();
+
+  // A reload (or a discarded tab) while the owner is off in ChatGPT: the project reopens, not the projects home,
+  // and the hand-off is still waiting. (Reloaded once the run is saved — seconds pass before anyone switches tabs.)
+  await expect(companion.getByRole('button', { name: /Copy photo & open ChatGPT/ })).toBeEnabled({ timeout: 30_000 });
+  await expect(page.getByText('Saving…')).toHaveCount(0);
+  await page.reload();
+  await expect(page).toHaveTitle('Hand-off house · Mode');
+  await expect(studioPhoto(page)).toBeVisible();
+  await expect(page.locator('main').getByText('Original photo', { exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Your projects' })).toHaveCount(0);
+  const pill = page.getByRole('button', { name: '1 hand-off waiting — open the hand-off card' });
+  await expect(pill.or(companion.getByText('1 waiting', { exact: false })).first()).toBeVisible();
+  await shot(page, 'handoff-3a-after-reload');
+  if (!(await companion.isVisible())) await pill.click();
   await expect(companion).toBeVisible();
   const copyAndOpen = companion.getByRole('button', { name: /Copy photo & open ChatGPT/ });
   await expect(copyAndOpen).toBeEnabled({ timeout: 30_000 });

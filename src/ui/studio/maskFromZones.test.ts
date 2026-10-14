@@ -258,12 +258,13 @@ describe('footprint room (a wider or curvier path needs ground beside the old on
       rect('lawn', 'lawn', 0, 150, PW, PH),
     ]),
   });
+  // A gentle curve at 5 ft (the Pathway's defaults keep the walk's route and width, which needs no room).
   const pathway = (choices?: Record<string, string[]>) => {
     const el = newElementSpec('pathway', walkScene());
-    return { ...el, choices: { ...el.choices, ...choices } };
+    return { ...el, choices: { ...el.choices, shape: ['gentle-curve'], width: ['width-5ft'], ...choices } };
   };
 
-  it('the default Pathway (gentle curve, 5 ft) may change the lawn about one walk width to each side — never the house or steps', () => {
+  it('a gentle-curve, 5 ft Pathway may change the lawn about one walk width to each side — never the house or steps', () => {
     const el = pathway();
     expect(el.zoneIds).toEqual(['walk']);
     expect(growChoice(el)).toBe(true);

@@ -15,7 +15,7 @@ import {
   provenanceOf,
   requestOpenHandoff,
 } from './historyTree';
-import { deerOf, formatHours, isPlantingElement, siteHeader, spotZones } from './siteHeader';
+import { deerOf, formatHours, isPlantingElement, siteHeader, spotOf, spotZones } from './siteHeader';
 import { inferElementType, isInBrief, shortLabel, suggestedEdits, zonesMentioned } from './suggestedEdits';
 import {
   azimuthFromText,
@@ -246,6 +246,28 @@ describe('site header', () => {
     const sc = scene([zone('a', 'planting-bed', 'A', undefined, { sun: 'shade' }), zone('b', 'lawn', 'B', undefined, { sun: 'full-sun' }), zone('c', 'lawn', 'C')]);
     expect(spotZones({ zoneIds: ['a', 'c'] }, sc, ['b']).map((z) => z.id)).toEqual(['a']);
     expect(spotZones({ zoneIds: ['c'] }, sc, ['b']).map((z) => z.id)).toEqual(['b']);
+  });
+
+  it('falls back to the lawn’s sun (and says so) when the spot has none of its own', () => {
+    const sc = scene([
+      zone('roof', 'roof', 'Roof', undefined, { sun: 'full-sun' }),
+      zone('tree', 'tree', 'Maple', undefined, { sun: 'shade' }),
+      zone('walk', 'walkway', 'Front walk', undefined, { sun: 'full-sun' }),
+      zone('lawn', 'lawn', 'Front lawn', undefined, { sun: 'part-sun', sunHours: 4.2 }),
+      zone('bed', 'other', 'Sketched area'),
+    ]);
+    const spot = spotOf({ zoneIds: ['bed'] }, sc, ['bed']);
+    expect(spot.zones.map((z) => z.id)).toEqual(['lawn']);
+    expect(spot.from).toBe('the lawn');
+    expect(siteHeader({ hardinessZone: '7a', deerPressure: 'high' }, spot.zones, undefined, spot.from).text).toBe('Zone 7a · Part sun (4 h, from the lawn) · Deer: high');
+    // No lawn: the other ground with sun (never the roof or a tree).
+    const noLawn = scene([zone('roof', 'roof', 'Roof', undefined, { sun: 'full-sun' }), zone('walk', 'walkway', 'Front walk', undefined, { sun: 'full-sun' })]);
+    expect(spotOf({ zoneIds: [] }, noLawn)).toMatchObject({ zones: [{ id: 'walk' }], from: 'the front walk' });
+    expect(siteHeader({}, spotOf({ zoneIds: [] }, noLawn).zones, undefined, 'the front walk').sun).toBe('Full sun (from the front walk)');
+    // Its own sun wins, without a "from".
+    const own = scene([zone('bed', 'planting-bed', 'Bed', undefined, { sun: 'shade' }), zone('lawn', 'lawn', 'Lawn', undefined, { sun: 'full-sun' })]);
+    expect(spotOf({ zoneIds: ['bed'] }, own)).toMatchObject({ zones: [{ id: 'bed' }], from: null });
+    expect(spotOf({ zoneIds: [] }, scene([zone('roof', 'roof', 'Roof', undefined, { sun: 'full-sun' })]))).toEqual({ zones: [], from: null });
   });
 
   it('shows the Settings deer pressure in the header, else the context', () => {
