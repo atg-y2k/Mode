@@ -8,7 +8,7 @@
  * joined into one sentence), shown in the dock's hint line so the dock — and
  * the photo pane above it — keep their height.
  */
-import { isKeepOrNone, promptAsks, type PromptAskDimension } from '../../../shared/promptAsks';
+import { askedWords, isKeepOrNone, NUDGED_TYPES, promptAsks, type PromptAskDimension } from '../../../shared/promptAsks';
 import type { DesignBrief } from '../../../shared/types';
 import { chosenOptions } from './planRequest';
 
@@ -27,9 +27,6 @@ export interface PromptNote {
   elementLabel: string;
   text: string;
 }
-
-/** Element types whose keep / no defaults the dock checks against the typed idea. */
-const NUDGED_TYPES = new Set(['pathway']);
 
 /**
  * The Pathway questions the typed idea asks for while they are still on a
@@ -59,19 +56,26 @@ function joinList(items: readonly string[]): string {
   return items.length <= 1 ? (items[0] ?? '') : `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
 }
 
+/** Named from the words that ask: "not curved, winding instead" is a winding walk. */
 function shapeWord(prompt: string): string {
-  if (/\bcurv/i.test(prompt)) return 'curved';
-  if (/\bmeander/i.test(prompt)) return 'meandering';
-  if (/\bwind(?:s|ing)?\b/i.test(prompt)) return 'winding';
-  if (/\bangled\b/i.test(prompt)) return 'angled';
-  if (/\bre-?rout/i.test(prompt)) return 're-routed';
+  const asked = askedWords(prompt, 'shape').join(' ');
+  if (/\bs-(?:shape|curv)/i.test(asked)) return 'S-shaped';
+  if (/\bcurv/i.test(asked)) return 'curved';
+  if (/\bmeander/i.test(asked)) return 'meandering';
+  if (/\bwind(?:s|ing)?\b/i.test(asked)) return 'winding';
+  if (/\bangled\b/i.test(asked)) return 'angled';
+  if (/\bre-?rout/i.test(asked)) return 're-routed';
+  if (/\barc/i.test(asked)) return 'arcing';
+  if (/\bsweeping\b/i.test(asked)) return 'sweeping';
+  if (/\bserpentine\b/i.test(asked)) return 'serpentine';
   return 'straight';
 }
 
 function widthWord(prompt: string): string {
-  const feet = prompt.match(/\b(\d+(?:\.\d+)?)\s*-?\s*(?:ft|feet|foot)\b/i);
+  const asked = askedWords(prompt, 'width').join(' ');
+  const feet = asked.match(/\b(\d+(?:\.\d+)?)\s*-?\s*(?:ft|feet|foot)\b/i);
   if (feet) return `${feet[1]} ft`;
-  return /\bnarrow/i.test(prompt) && !/\bwide[nr]/i.test(prompt) ? 'narrower' : 'wider';
+  return /\bnarrow/i.test(asked) && !/\b(?:wide|broad)/i.test(asked) ? 'narrower' : 'wider';
 }
 
 const QUESTION: Record<PromptAskDimension, string> = {
@@ -99,7 +103,7 @@ export function promptNote(brief: DesignBrief, dismissed: ReadonlySet<string> = 
     const width = has('width') ? widthWord(prompt) : '';
     const shape = has('shape') ? shapeWord(prompt) : '';
     const words = width && shape ? (/ ft$/.test(width) ? `${width} ${shape}` : `${width}, ${shape}`) : width || shape;
-    mentions.push(`${/^[aeiou]/i.test(words) ? 'an' : 'a'} ${words} walk`);
+    mentions.push(`${/^(?:[aeiou]|s-)/i.test(words) ? 'an' : 'a'} ${words} walk`);
   }
   if (has('edging')) mentions.push('the walk’s edge');
   if (has('path lighting')) mentions.push('path lights');

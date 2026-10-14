@@ -58,4 +58,22 @@ describe('promptNudges / promptNote', () => {
     // A dismissed ask drops out of the joined sentence.
     expect(promptNote(brief('a wider walk with path lights'), new Set(['el1:width']))?.keys).toEqual(['el1:lighting']);
   });
+
+  it('stays quiet for words that keep the walk as it is, and names only what asks', () => {
+    for (const idea of ['no wider than today', 'keep it straight', "don't widen it", 'not wider', 'keep the walk the same width']) {
+      expect(promptNudges(brief(idea)), idea).toEqual([]);
+      expect(promptNote(brief(idea)), idea).toBeNull();
+    }
+    expect(promptNote(brief('keep it straight but make it wider'))?.text).toBe(
+      'Your idea mentions a wider walk — pick a width on the Pathway card so Mode leaves room for it.',
+    );
+    expect(promptNote(brief('not curved, winding instead'))?.text).toBe(
+      'Your idea mentions a winding walk — pick a shape on the Pathway card so Mode leaves room for it.',
+    );
+    // The newer shape words name the walk as typed.
+    expect(promptNote(brief('a sweeping walk to the door'))?.text).toBe(
+      'Your idea mentions a sweeping walk — pick a shape on the Pathway card so Mode leaves room for it.',
+    );
+    expect(promptNote(brief('an S-shaped walk'))?.text).toBe('Your idea mentions an S-shaped walk — pick a shape on the Pathway card so Mode leaves room for it.');
+  });
 });

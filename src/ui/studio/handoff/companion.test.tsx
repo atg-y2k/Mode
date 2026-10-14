@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
 /**
  * Companion UI checks in jsdom: one drop on the Picture-in-Picture drop zone
- * imports once (the frame's own drop handler must not import it again), and
- * the floating card leaves the top bar clickable. Actions, packs and the
- * clipboard are mocked.
+ * imports once (the frame's own drop handler must not import it again), the
+ * floating card leaves the top bar clickable, and the dock's hand-off pill
+ * folds and reopens it. Actions, packs and the clipboard are mocked.
  */
-import { act } from 'react';
+import { act, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -78,7 +78,7 @@ vi.mock('../../../state/store', () => {
   return { useStore, findPhoto: () => undefined };
 });
 
-import { CompanionDock } from './Companion';
+import { CompanionDock, HandoffDockPill } from './Companion';
 import { handoffSession, setHandoffSession } from './session';
 
 function fireDrop(target: Element) {
@@ -91,16 +91,16 @@ const roots: { unmount: () => void }[] = [];
 afterEach(async () => {
   for (const r of roots.splice(0)) await act(async () => r.unmount());
   document.body.innerHTML = '';
-  setHandoffSession({ pip: null, companion: 'closed', active: null });
+  setHandoffSession({ pip: null, companion: 'closed', active: null, staging: null });
   paneSize = { width: 0, height: 0 };
 });
 
-async function mount(): Promise<void> {
+async function mount(node: ReactNode = <CompanionDock />): Promise<void> {
   const host = document.createElement('div');
   document.body.appendChild(host);
   const root = createRoot(host);
   roots.push(root);
-  await act(async () => root.render(<CompanionDock />));
+  await act(async () => root.render(node));
 }
 
 describe('Picture-in-Picture drop', () => {
@@ -190,5 +190,44 @@ describe('Esc', () => {
     // Handled: the Studio's own Esc (back to the original) leaves it alone.
     expect(esc.defaultPrevented).toBe(true);
     expect(document.querySelector('[role="dialog"][aria-label="Hand-off companion"]')).toBeNull();
+  });
+});
+
+describe('dock pill', () => {
+  it('folds the card floating over the dock (1366×768) and opens it again, saying which it will do', async () => {
+    paneSize = { width: 677, height: 403 };
+    const ref = { photoId: 'p1', generationId: 'g1', plannedId: 'pl1' };
+    setHandoffSession({ pip: null, companion: 'open', staging: null, active: ref });
+    await mount(
+      <>
+        <CompanionDock />
+        <HandoffDockPill waiting={1} back={0} />
+      </>,
+    );
+    const card = () => document.querySelector('[role="dialog"][aria-label="Hand-off companion"]');
+    const pill = () => Array.from(document.querySelectorAll('button')).find((b) => b.textContent === '1 hand-off waiting')!;
+    expect(card()?.className).toContain('fixed');
+    expect(pill().getAttribute('aria-expanded')).toBe('true');
+    expect(pill().title).toBe('Collapse the hand-off card');
+
+    await act(async () => pill().click());
+    expect(handoffSession().companion).toBe('collapsed');
+    expect(card()).toBeNull();
+    expect(pill().getAttribute('aria-expanded')).toBe('false');
+    expect(pill().title).toBe('Open the hand-off card');
+
+    await act(async () => pill().click());
+    expect(handoffSession().companion).toBe('open');
+    expect(card()).toBeTruthy();
+    expect(pill().getAttribute('aria-expanded')).toBe('true');
+
+    // Behind staging the card is not on screen: the pill leaves staging and shows it.
+    await act(async () => setHandoffSession({ staging: ref }));
+    expect(card()).toBeNull();
+    expect(pill().getAttribute('aria-expanded')).toBe('false');
+    await act(async () => pill().click());
+    expect(handoffSession().staging).toBeNull();
+    expect(handoffSession().companion).toBe('open');
+    expect(card()).toBeTruthy();
   });
 });

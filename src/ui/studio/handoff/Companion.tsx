@@ -22,6 +22,7 @@ import {
   FolderDown,
   ImagePlus,
   ImageUp,
+  Inbox,
   Loader2,
   PictureInPicture2,
   RotateCcw,
@@ -886,6 +887,29 @@ export function CompanionDock() {
         )
       )}
     </>
+  );
+}
+
+/**
+ * The prompt dock's "2 hand-offs waiting · 1 back" pill: opens the hand-off
+ * card, and folds it again while it is open — a card floating over a short
+ * window (1366×768) covers part of the dock, and this pill stays in reach.
+ */
+export function HandoffDockPill({ waiting, back }: { waiting: number; back: number }) {
+  const open = useHandoffSession((s) => s.companion === 'open' && !s.pip && !s.staging);
+  return (
+    <button
+      type="button"
+      onClick={() => setHandoffSession(open ? { companion: 'collapsed' } : { companion: 'open', staging: null })}
+      aria-expanded={open}
+      className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-accent-soft px-2.5 text-xs font-semibold text-accent hover:brightness-95"
+      title={open ? 'Collapse the hand-off card' : 'Open the hand-off card'}
+    >
+      <Inbox className="size-3.5" />
+      {waiting > 0 && `${waiting} hand-off${waiting === 1 ? '' : 's'} waiting`}
+      {waiting > 0 && back > 0 && ' · '}
+      {back > 0 && `${back} back`}
+    </button>
   );
 }
 

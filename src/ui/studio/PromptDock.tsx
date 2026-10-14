@@ -6,7 +6,7 @@
  * the user's ChatGPT / Gemini app, or an image API when the server has one)
  * sit next to Generate.
  */
-import { Blocks, Check, ImagePlus, Inbox, Lightbulb, MessageCircle, MousePointerClick, Plus, Sparkle, Sparkles, Target, X } from 'lucide-react';
+import { Blocks, Check, ImagePlus, Lightbulb, MessageCircle, MousePointerClick, Plus, Sparkle, Sparkles, Target, X } from 'lucide-react';
 import { useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { emptyBrief, type DesignBrief, type Photo, type Space } from '../../../shared/types';
 import { findVariation, useStore } from '../../state/store';
@@ -14,10 +14,10 @@ import { cn } from '../common';
 import { openElement, runOrNotify } from './actions';
 import { generationBlocker } from './generate';
 import { setDefaultHandoffApp } from './handoff/actions';
+import { HandoffDockPill } from './handoff/Companion';
 import { usePendingHandoffs } from './handoff/hooks';
 import { appLabel } from './handoff/planned';
 import { effectiveRenderMode, hasImageProviders, variationCountOf } from './handoff/prefs';
-import { setHandoffSession } from './handoff/session';
 import { briefTargetIds } from './maskFromZones';
 import { NO_IDEAS } from './panels/briefOps';
 import { ideasForBrief } from './planRequest';
@@ -484,19 +484,7 @@ export function PromptDock({ photo, space }: { photo: Photo; space: Space | unde
               </select>
             </label>
           )}
-          {waitingHere + backHere > 0 && (
-            <button
-              type="button"
-              onClick={() => setHandoffSession({ companion: 'open', staging: null })}
-              className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-accent-soft px-2.5 text-xs font-semibold text-accent hover:brightness-95"
-              title="Open the hand-off card"
-            >
-              <Inbox className="size-3.5" />
-              {waitingHere > 0 && `${waitingHere} hand-off${waitingHere === 1 ? '' : 's'} waiting`}
-              {waitingHere > 0 && backHere > 0 && ' · '}
-              {backHere > 0 && `${backHere} back`}
-            </button>
-          )}
+          {waitingHere + backHere > 0 && <HandoffDockPill waiting={waitingHere} back={backHere} />}
           {showNote && note ? (
             <div role="note" aria-label="Note on your idea" className="flex min-w-48 flex-1 items-start gap-1.5 text-xs leading-snug text-muted">
               <Lightbulb className="mt-px size-3.5 shrink-0" aria-hidden />

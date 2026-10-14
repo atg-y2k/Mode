@@ -458,6 +458,43 @@ describe('studio prompts', () => {
     expect(refined).toContain('shape: keeping its current route and line. No border edging and no added path lighting.');
   });
 
+  it('drops overridden defaults only on the element types the Studio nudges', () => {
+    const DRIVEWAY = ELEMENT_DEFS.find((d) => d.type === 'driveway')!;
+    const drivewayChoices = DRIVEWAY.dimensions
+      .filter((d) => d.defaultOptionId)
+      .map((d) => ({ dimension: d.label, options: [d.options.find((o) => o.id === d.defaultOptionId)!.promptText] }));
+    const withPrompt = (prompt: string): PlanRequest => ({
+      ...exteriorPlan,
+      brief: {
+        ...exteriorPlan.brief,
+        prompt,
+        elements: [
+          { type: 'pathway', label: 'Pathway', where: ['Front walk'], choices: pathwayChoices(), note: '' },
+          { type: 'driveway', label: 'Driveway', where: ['Driveway'], choices: drivewayChoices, note: '' },
+        ],
+      },
+    });
+    const brief = templatePlan(withPrompt('a wider walk'), 1).variations[0].brief;
+    expect(brief).not.toContain('keeping its current width');
+    expect(brief).toContain('For the Front walk: Pathway — ');
+    expect(brief).toContain('shape: keeping its current route and line');
+    expect(brief).toMatch(/For the Driveway: Driveway — [^.]*; width: keeping its current footprint\./);
+    // Claude's plan gets the same choices.
+    const ai = planPrompt(withPrompt('a wider walk'), 1);
+    expect(ai).not.toContain('keeping its current width');
+    expect(ai).toContain('- Width: keeping its current footprint');
+
+    // A refinement ("Make it wider") of a result planned on the defaults: the same scope.
+    const base = templatePlan(withPrompt('Bluestone walk'), 1).variations[0].brief;
+    expect(base).toContain('width: keeping its current width');
+    const refined = templatePlan({ ...withPrompt('Bluestone walk'), refine: { title: 'A', brief: base, feedback: 'Make it wider' } }, 1).variations[0].brief;
+    expect(refined).not.toContain('keeping its current width');
+    expect(refined).toContain('shape: keeping its current route and line. No border edging and no added path lighting.');
+    expect(refined).toMatch(/For the Driveway: Driveway — [^.]*; width: keeping its current footprint\./);
+    // Everything else reads exactly as before.
+    expect(refined.endsWith(base.replace('; width: keeping its current width', ''))).toBe(true);
+  });
+
   it('refines with the feedback first, varies "More like this", and keeps takes off the chosen details', () => {
     const refine = templatePlan({ ...exteriorPlan, refine: { title: 'A', brief: 'Edit this photo. Lay bluestone.', feedback: 'Make the stones larger.' } }, 2);
     expect(refine.variations.map((v) => v.title)).toEqual(['Refined 1', 'Refined 2']);

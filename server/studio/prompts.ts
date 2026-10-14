@@ -16,7 +16,7 @@ import type {
   RecommendRequest,
   SceneRequest,
 } from '../../shared/api';
-import { withoutOverriddenDefaults, withoutOverriddenText } from '../../shared/promptAsks';
+import { NUDGED_TYPES, withoutOverriddenDefaults, withoutOverriddenText } from '../../shared/promptAsks';
 import { SPACE_TYPE_LABELS, spaceKindOf, type SpaceType } from '../../shared/types';
 import { variationTitles } from './templateTitles';
 
@@ -395,13 +395,22 @@ function cappedElements(brief: PlanRequest['brief']): PlanRequest['brief']['elem
   }));
 }
 
+/**
+ * The element's choices minus the "keep current" / "no …" defaults the owner's
+ * words override — only for the element types the Studio nudges: the asks are
+ * the Pathway's, so "a wider walk" leaves a driveway "keeping its current footprint".
+ */
+function choicesAfterPrompt(prompt: string, el: TemplateElement): TemplateElement['choices'] {
+  return NUDGED_TYPES.has(el.type) ? withoutOverriddenDefaults(prompt, el.choices) : el.choices;
+}
+
 function formatElements(brief: PlanRequest['brief']): string {
   if (!brief.elements.length) return 'none';
   const prompt = cleanText(brief.prompt, 3000);
   const lines = cappedElements(brief).map((el, i) => {
     const out = [`${i + 1}. ${el.type} — "${cleanText(el.label, 120)}"; where: ${el.where.map((w) => cleanText(w, 160)).join('; ') || 'not specified'}`];
     // Same as template plans: a "keep current" / "no …" default the homeowner's words override is left out.
-    for (const c of withoutOverriddenDefaults(prompt, el.choices)) {
+    for (const c of choicesAfterPrompt(prompt, el)) {
       if (c.options.length) out.push(`   - ${cleanText(c.dimension, 80)}: ${c.options.map((o) => cleanText(o, 400)).join(' + ')}`);
     }
     const note = cleanText(el.note, 600);
@@ -731,6 +740,12 @@ function comparedElementIndex(elements: readonly TemplateElement[], compare: Pla
   return matches.find((i) => !elements[i].choices.some((c) => c.dimension === dimension)) ?? matches[0] ?? 0;
 }
 
+/** "For the Front walk: Pathway" — how an element's sentence opens. */
+function elementHead(el: TemplateElement): string {
+  const where = el.where.map((w) => cleanText(w, 160)).join(' and ');
+  return `${where ? `For the ${where}: ` : ''}${cleanText(el.label, 120)}`;
+}
+
 /**
  * "For the Front walk: Pathway — stone size: …; width: …. No border edging and
  * no added path lighting." Options that ask for an absence are gathered into one
@@ -745,15 +760,42 @@ function elementSentence(el: TemplateElement, choices: TemplateElement['choices'
     if (pos.length) positive.push(`${cleanText(c.dimension, 80).toLowerCase()}: ${pos.join(' and ')}`);
     for (const o of options) if (NEGATED_OPTION.test(o)) negated.push(o.replace(/^with\s+/i, '').replace(/[.;,\s]+$/, ''));
   }
-  const where = el.where.map((w) => cleanText(w, 160)).join(' and ');
-  const label = cleanText(el.label, 120);
   const note = cleanText(el.note, 600);
   const absent = negated.join(' and ');
   return [
-    `${where ? `For the ${where}: ` : ''}${asSentence(`${label}${positive.length ? ` — ${positive.join('; ')}` : ''}`)}`,
+    asSentence(`${elementHead(el)}${positive.length ? ` — ${positive.join('; ')}` : ''}`),
     absent ? asSentence(absent.charAt(0).toUpperCase() + absent.slice(1)) : '',
     note ? asSentence(note) : '',
   ]
+    .filter(Boolean)
+    .join(' ');
+}
+
+/**
+ * The earlier instruction of a refinement minus the keep / no clauses the
+ * feedback overrides — like choicesAfterPrompt, only in the sentences of the
+ * element types the Studio nudges. The instruction is cut where each of the
+ * brief's element sentences opens ("For the Driveway: Driveway — …") and the
+ * other elements' sentences are left exactly as they were; the text before
+ * them (or an instruction without them) is read as a whole, as before.
+ */
+function baseAfterFeedback(base: string, feedback: string, brief: PlanRequest['brief']): string {
+  const cuts: { at: number; nudged: boolean }[] = [];
+  let from = 0;
+  for (const el of cappedElements(brief)) {
+    const head = new RegExp(`(?<=^|[.!?]\\s)${elementHead(el).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?= —|[.!?](?:\\s|$))`, 'g');
+    head.lastIndex = from;
+    const m = head.exec(base);
+    if (!m) continue;
+    cuts.push({ at: m.index, nudged: NUDGED_TYPES.has(el.type) });
+    from = m.index + m[0].length;
+  }
+  if (cuts.every((c) => c.nudged)) return withoutOverriddenText(base, feedback);
+  return [{ at: 0, nudged: true }, ...cuts]
+    .map((c, i, all) => {
+      const piece = base.slice(c.at, all[i + 1]?.at ?? base.length);
+      return (c.nudged ? withoutOverriddenText(piece, feedback) : piece).trim();
+    })
     .filter(Boolean)
     .join(' ');
 }
@@ -808,7 +850,7 @@ function templateBrief(req: PlanRequest, extra: string, overrideChoice?: { dimen
   const compared = overrideChoice ? comparedElementIndex(elements, req.compare, overrideChoice.dimension) : -1;
   elements.forEach((el, i) => {
     // A "keep current" / "no …" default the owner's words override ("a wider walk") would contradict them.
-    let choices = withoutOverriddenDefaults(prompt, el.choices);
+    let choices = choicesAfterPrompt(prompt, el);
     if (overrideChoice && i === compared) {
       const override = { dimension: overrideChoice.dimension, options: [overrideChoice.promptText] };
       // The client leaves the compared dimension out of the element's choices: put this option back.
@@ -874,7 +916,7 @@ export function templatePlan(req: PlanRequest, count: number): PlanResult {
         return {
           title: `Refined ${i + 1}`,
           // A "keep current width" left in the earlier instruction would contradict "make it wider".
-          brief: `Starting from the previous result, change this: ${feedback.replace(/[.!?\s]+$/, '')}. Keep everything else as rendered. ${withoutOverriddenText(base, feedback)}`,
+          brief: `Starting from the previous result, change this: ${feedback.replace(/[.!?\s]+$/, '')}. Keep everything else as rendered. ${baseAfterFeedback(base, feedback, req.brief)}`,
           optionId: null,
         };
       }
